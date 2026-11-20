@@ -27,10 +27,3 @@ typedef struct {
     uint32_t length;
     char payload[PROBE_MACH_PAYLOAD_MAX];
 } ProbeMachMessage;
-
-static inline void ProbeMachServiceName(char *buffer,
-                                        size_t size,
-                                        pid_t hostPid)
-{
-    snprintf(buffer, size, PROBE_MACH_SERVICE "-%d", hostPid);
-}

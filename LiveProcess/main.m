@@ -28,29 +28,16 @@ typedef xpc_object_t (*ProbeCopyPropertiesFn)(pid_t pid);
 
 static mach_port_t ProbeLookUpBroker(pid_t hostPid)
 {
+    (void)hostPid;
+
     mach_port_t port = MACH_PORT_NULL;
-    char name[160] = { 0 };
-
-    if (hostPid > 0) {
-        ProbeMachServiceName(name, sizeof(name), hostPid);
-    } else {
-        snprintf(name, sizeof(name), "%s", PROBE_MACH_SERVICE);
-    }
-
-    kern_return_t kr = bootstrap_look_up(bootstrap_port, name, &port);
-    NSLog(@"ProbeExtension: look_up %s -> %d", name, kr);
-    if (kr == KERN_SUCCESS && MACH_PORT_VALID(port)) {
-        return port;
-    }
-
-    if (hostPid > 0) {
-        port = MACH_PORT_NULL;
-        kr = bootstrap_look_up(bootstrap_port, PROBE_MACH_SERVICE, &port);
-        NSLog(@"ProbeExtension: look_up %s -> %d",
-              PROBE_MACH_SERVICE, kr);
-    }
-
-    return (kr == KERN_SUCCESS && MACH_PORT_VALID(port)) ? port : MACH_PORT_NULL;
+    kern_return_t kr = bootstrap_look_up(bootstrap_port,
+                                         PROBE_MACH_SERVICE,
+                                         &port);
+    NSLog(@"ProbeExtension: look_up %s -> %d", PROBE_MACH_SERVICE, kr);
+    return (kr == KERN_SUCCESS && MACH_PORT_VALID(port))
+        ? port
+        : MACH_PORT_NULL;
 }
 
 static void ProbePostNotification(CFStringRef name)
