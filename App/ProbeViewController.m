@@ -1,11 +1,14 @@
 #import "ProbeViewController.h"
 #import "ProbeController.h"
+#import "GuestLauncher.h"
 
 @interface ProbeViewController ()
 
 @property (nonatomic, strong) UITextView *logView;
 @property (nonatomic, strong) UIButton *runButton;
+@property (nonatomic, strong) UIButton *guestButton;
 @property (nonatomic, strong) ProbeController *probe;
+@property (nonatomic, strong) GuestLauncher *guestLauncher;
 @property (nonatomic, strong) NSDateFormatter *formatter;
 
 @end
@@ -46,13 +49,28 @@
              forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:self.runButton];
 
+    self.guestButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [self.guestButton setTitle:@"Run Linux Test" forState:UIControlStateNormal];
+    self.guestButton.titleLabel.font = [UIFont boldSystemFontOfSize:17];
+    self.guestButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.guestButton addTarget:self
+                         action:@selector(runGuest:)
+               forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:self.guestButton];
+
     UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
         [self.logView.topAnchor constraintEqualToAnchor:safe.topAnchor],
         [self.logView.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
         [self.logView.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
-        [self.logView.bottomAnchor constraintEqualToAnchor:self.runButton.topAnchor
+        [self.logView.bottomAnchor constraintEqualToAnchor:self.guestButton.topAnchor
                                                   constant:-8],
+
+        [self.guestButton.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
+        [self.guestButton.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
+        [self.guestButton.bottomAnchor constraintEqualToAnchor:self.runButton.topAnchor
+                                                      constant:-8],
+        [self.guestButton.heightAnchor constraintEqualToConstant:44],
 
         [self.runButton.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
         [self.runButton.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
@@ -102,6 +120,26 @@
     if (![self.probe start]) {
         self.runButton.enabled = YES;
         [self appendLog:@"Probe did not start. See the messages above."];
+    }
+}
+
+- (void)runGuest:(UIButton *)sender
+{
+    self.guestButton.enabled = NO;
+    self.logView.text = @"";
+    [self appendLog:@"Starting Linux guest..."];
+
+    self.guestLauncher = [GuestLauncher new];
+    __weak typeof(self) weakSelf = self;
+    self.guestLauncher.logHandler = ^(NSString *line) {
+        [weakSelf appendLog:line];
+    };
+    self.guestLauncher.completionHandler = ^(int status) {
+        weakSelf.guestButton.enabled = YES;
+    };
+
+    if (![self.guestLauncher runBundledGuest]) {
+        self.guestButton.enabled = YES;
     }
 }
 

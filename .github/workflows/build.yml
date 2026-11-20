@@ -45,13 +45,18 @@ jobs:
           set -eux
           APP="build/Build/Products/Release-iphoneos/Probe.app"
           HELPER="build/Build/Products/Release-iphoneos/probe-helper"
+          GUEST="build/Build/Products/Release-iphoneos/guest-runner"
           test -d "$APP"
           test -f "$HELPER"
+          test -f "$GUEST"
           mkdir -p "$APP/Helpers"
           cp "$HELPER" "$APP/Helpers/probe-helper"
           cp "$HELPER" "$APP/Helpers/probe-helper.dat"
+          cp "$GUEST" "$APP/Helpers/guest-runner"
           chmod 755 "$APP/Helpers/probe-helper"
           chmod 644 "$APP/Helpers/probe-helper.dat"
+          chmod 755 "$APP/Helpers/guest-runner"
+          python3 tools/make_guest_elf.py "$APP/guest-hello.elf"
           rm -rf Payload PayloadUnsigned LinuxProbe.ipa LinuxProbe-unsigned.ipa
           mkdir Payload
           mkdir -p PayloadUnsigned/Payload
@@ -84,6 +89,11 @@ jobs:
               || codesign --force --sign - \
                    --entitlements Helper/ProbeHelper.entitlements \
                    "Payload/Probe.app/Helpers/probe-helper.dat" || true
+            ldid -SGuest/GuestRunner.entitlements \
+              "Payload/Probe.app/Helpers/guest-runner" \
+              || codesign --force --sign - \
+                   --entitlements Guest/GuestRunner.entitlements \
+                   "Payload/Probe.app/Helpers/guest-runner" || true
           else
             codesign --force --sign - --entitlements App/Probe.entitlements \
               "Payload/Probe.app/Probe" || true
@@ -96,6 +106,9 @@ jobs:
             codesign --force --sign - \
               --entitlements Helper/ProbeHelper.entitlements \
               "Payload/Probe.app/Helpers/probe-helper.dat" || true
+            codesign --force --sign - \
+              --entitlements Guest/GuestRunner.entitlements \
+              "Payload/Probe.app/Helpers/guest-runner" || true
           fi
           codesign --force --sign - \
             --entitlements LiveProcess/LiveProcess.entitlements \
