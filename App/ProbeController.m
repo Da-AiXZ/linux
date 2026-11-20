@@ -701,6 +701,9 @@ static void ProbeDarwinNotifyCallback(CFNotificationCenterRef center,
         @"get-task-allow",
         @"application-identifier",
         @"platform-application",
+        @"com.apple.private.security.no-sandbox",
+        @"com.apple.private.security.container-required",
+        @"com.apple.private.security.storage.AppDataContainers",
         @"com.apple.private.cs.debugger",
         @"com.apple.security.cs.allow-jit",
         @"dynamic-codesigning",
@@ -944,20 +947,19 @@ static void ProbeDarwinNotifyCallback(CFNotificationCenterRef center,
 
 - (void)startMachService
 {
+    char name[160] = { 0 };
+    ProbeMachServiceName(name, sizeof(name), getpid());
+
     mach_port_t port = MACH_PORT_NULL;
-    kern_return_t kr = bootstrap_check_in(bootstrap_port,
-                                          PROBE_MACH_SERVICE,
-                                          &port);
+    kern_return_t kr = bootstrap_check_in(bootstrap_port, name, &port);
     if (kr != KERN_SUCCESS || !MACH_PORT_VALID(port)) {
         [self log:[NSString stringWithFormat:
-                   @"bootstrap_check_in failed: %d for %@",
-                   kr, @PROBE_MACH_SERVICE]];
+                   @"bootstrap_check_in failed: %d for %s", kr, name]];
         return;
     }
 
     self.machServicePort = port;
-    [self log:[NSString stringWithFormat:@"mach service: %@",
-               @PROBE_MACH_SERVICE]];
+    [self log:[NSString stringWithFormat:@"mach service: %s", name]];
     [self startMachReceiver];
 }
 

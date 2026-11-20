@@ -12,7 +12,7 @@
  * 4. The general pasteboard (may prompt the user on read).
  */
 
-#define PROBE_BOOT_SERVICE "com.daixz.linux.probe.LiveProcess.broker"
+#define PROBE_BOOT_SERVICE "com.daixz.linux.probe.LiveProcess.extbroker"
 
 #define PROBE_SHM_NAME "/linuxprobe-probe"
 #define PROBE_SHM_SIZE (64 * 1024)
