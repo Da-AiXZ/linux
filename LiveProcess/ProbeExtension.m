@@ -357,7 +357,8 @@ int ProbeExtensionRun(pid_t hostPid, mach_port_t servicePort)
     @autoreleasepool {
         ProbeNotify(CFSTR("com.daixz.linux.probe.ext-begin"));
 
-        NSDictionary *input = context.inputItems.firstObject.userInfo;
+        NSExtensionItem *inputItem = context.inputItems.firstObject;
+        NSDictionary *input = inputItem.userInfo;
         NSNumber *hostPidNumber = input[@"hostPid"];
         pid_t hostPid = hostPidNumber != nil ? hostPidNumber.intValue : 0;
 
