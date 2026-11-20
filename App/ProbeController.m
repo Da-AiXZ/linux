@@ -1,5 +1,6 @@
 #import "ProbeController.h"
 
+#import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 #import <signal.h>
 #import <stdint.h>
@@ -31,10 +32,27 @@ typedef char *(*ProbeIssueExtensionFn)(const char *extensionClass,
 @property (nonatomic, copy) NSString *resultsPath;
 @property (nonatomic, strong) NSMutableData *lineBuffer;
 @property (nonatomic, assign) NSUInteger readOffset;
+@property (nonatomic, assign) CFMessagePortRef localPort;
 @property (atomic, assign) BOOL running;
 @property (atomic, assign) BOOL completed;
 
+- (void)handleJSON:(NSString *)json;
+
 @end
+
+static CFDataRef ProbeMessagePortCallback(CFMessagePortRef localPort,
+                                          SInt32 messageID,
+                                          CFDataRef data,
+                                          void *info)
+{
+    ProbeController *controller = (__bridge ProbeController *)info;
+    if (data != NULL) {
+        NSString *json = [[NSString alloc] initWithData:(__bridge NSData *)data
+                                               encoding:NSUTF8StringEncoding];
+        [controller handleJSON:json];
+    }
+    return NULL;
+}
 
 @implementation ProbeController
 
@@ -116,10 +134,40 @@ typedef char *(*ProbeIssueExtensionFn)(const char *extensionClass,
         [self log:@"warning: could not issue a sandbox extension token."];
     }
 
+    /*
+     * Independent live channel. CFMessagePort only carries a service-name
+     * string in the extension item, so it stays property-list safe. If the
+     * bootstrap namespace is not shared, the results file below is used.
+     */
+    CFMessagePortContext portContext = {
+        0, (__bridge void *)self, NULL, NULL, NULL
+    };
+    CFMessagePortRef localPort =
+        CFMessagePortCreateLocal(kCFAllocatorDefault,
+                                 CFSTR("com.daixz.linux.probe.results"),
+                                 ProbeMessagePortCallback,
+                                 &portContext,
+                                 NULL);
+    if (localPort != NULL) {
+        CFRunLoopSourceRef source =
+            CFMessagePortCreateRunLoopSource(kCFAllocatorDefault, localPort, 0);
+        if (source != NULL) {
+            CFRunLoopAddSource(CFRunLoopGetMain(),
+                               source,
+                               kCFRunLoopDefaultMode);
+            CFRelease(source);
+        }
+        self.localPort = localPort;
+        [self log:@"message port ready."];
+    } else {
+        [self log:@"warning: CFMessagePort unavailable, file only."];
+    }
+
     NSExtensionItem *item = [NSExtensionItem new];
     item.userInfo = @{
         @"resultsPath": resultsPath,
         @"resultsToken": token ?: @"",
+        @"serviceName": @"com.daixz.linux.probe.results",
         @"hostPid": @(getpid()),
     };
 
@@ -129,6 +177,11 @@ typedef char *(*ProbeIssueExtensionFn)(const char *extensionClass,
     if (request == nil) {
         [self log:[NSString stringWithFormat:@"extension launch failed: %@",
                    [self describeError:requestError]]];
+        if (self.localPort != NULL) {
+            CFMessagePortInvalidate(self.localPort);
+            CFRelease(self.localPort);
+            self.localPort = NULL;
+        }
         return NO;
     }
 
@@ -213,6 +266,24 @@ typedef char *(*ProbeIssueExtensionFn)(const char *extensionClass,
     });
 }
 
+- (void)handleJSON:(NSString *)json
+{
+    if (json.length == 0) {
+        return;
+    }
+
+    [self log:[NSString stringWithFormat:@"[port] %@", json]];
+
+    if ([json containsString:@"\"done\":true"]) {
+        __weak typeof(self) weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                     (int64_t)(0.3 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            [weakSelf finish];
+        });
+    }
+}
+
 - (void)stop
 {
     [self finish];
@@ -225,6 +296,12 @@ typedef char *(*ProbeIssueExtensionFn)(const char *extensionClass,
     }
     self.completed = YES;
     self.running = NO;
+
+    if (self.localPort != NULL) {
+        CFMessagePortInvalidate(self.localPort);
+        CFRelease(self.localPort);
+        self.localPort = NULL;
+    }
 
     [self log:@"probe finished."];
 

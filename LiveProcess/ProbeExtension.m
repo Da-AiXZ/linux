@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 
+#import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 #import <fcntl.h>
 #import <mach/mach.h>
@@ -28,6 +29,7 @@ extern kern_return_t task_for_pid(mach_port_t target_task,
 
 @implementation ProbeExtension {
     int _resultsFD;
+    CFMessagePortRef _remotePort;
 }
 
 - (void)loadView
@@ -43,16 +45,27 @@ extern kern_return_t task_for_pid(mach_port_t target_task,
 
         NSString *resultsPath = input[@"resultsPath"];
         NSString *token = input[@"resultsToken"];
+        NSString *serviceName = input[@"serviceName"];
         NSNumber *hostPidNumber = input[@"hostPid"];
 
-        if (![resultsPath isKindOfClass:[NSString class]]
-            || resultsPath.length == 0) {
-            NSLog(@"ProbeExtension: no resultsPath in input");
+        BOOL hasPath = [resultsPath isKindOfClass:[NSString class]]
+            && resultsPath.length > 0;
+
+        if ([serviceName isKindOfClass:[NSString class]]
+            && serviceName.length > 0) {
+            _remotePort = CFMessagePortCreateRemote(
+                kCFAllocatorDefault,
+                (__bridge CFStringRef)serviceName);
+        }
+
+        if (!hasPath && _remotePort == NULL) {
+            NSLog(@"ProbeExtension: no results transport in input");
             [context completeRequestReturningItems:nil completionHandler:nil];
             return;
         }
 
-        if ([token isKindOfClass:[NSString class]] && token.length > 0) {
+        if (hasPath && [token isKindOfClass:[NSString class]]
+            && token.length > 0) {
             typedef int64_t (*ProbeConsumeExtensionFn)(const char *);
             ProbeConsumeExtensionFn consume =
                 (ProbeConsumeExtensionFn)dlsym(RTLD_DEFAULT,
@@ -65,16 +78,23 @@ extern kern_return_t task_for_pid(mach_port_t target_task,
             }
         }
 
-        _resultsFD = open(resultsPath.fileSystemRepresentation,
-                          O_WRONLY | O_APPEND);
-        if (_resultsFD < 0) {
+        _resultsFD = -1;
+        if (hasPath) {
             _resultsFD = open(resultsPath.fileSystemRepresentation,
-                              O_WRONLY | O_APPEND | O_CREAT,
-                              0644);
+                              O_WRONLY | O_APPEND);
+            if (_resultsFD < 0) {
+                _resultsFD = open(resultsPath.fileSystemRepresentation,
+                                  O_WRONLY | O_APPEND | O_CREAT,
+                                  0644);
+            }
+            if (_resultsFD < 0) {
+                NSLog(@"ProbeExtension: open results file failed: %s",
+                      strerror(errno));
+            }
         }
-        if (_resultsFD < 0) {
-            NSLog(@"ProbeExtension: open results file failed: %s",
-                  strerror(errno));
+
+        if (_resultsFD < 0 && _remotePort == NULL) {
+            NSLog(@"ProbeExtension: no usable results transport");
             [context completeRequestReturningItems:nil completionHandler:nil];
             return;
         }
@@ -113,8 +133,15 @@ extern kern_return_t task_for_pid(mach_port_t target_task,
 
         [self sendJSON:@{@"done": @YES}];
 
-        close(_resultsFD);
-        _resultsFD = -1;
+        if (_remotePort != NULL) {
+            CFMessagePortInvalidate(_remotePort);
+            CFRelease(_remotePort);
+            _remotePort = NULL;
+        }
+        if (_resultsFD >= 0) {
+            close(_resultsFD);
+            _resultsFD = -1;
+        }
         [context completeRequestReturningItems:nil completionHandler:nil];
     }
 }
@@ -123,14 +150,33 @@ extern kern_return_t task_for_pid(mach_port_t target_task,
 
 - (BOOL)sendJSON:(NSDictionary *)dictionary
 {
-    if (_resultsFD < 0) {
-        return NO;
-    }
-
     NSData *data = [NSJSONSerialization dataWithJSONObject:dictionary
                                                    options:0
                                                      error:NULL];
     if (data == nil) {
+        return NO;
+    }
+
+    if (_remotePort != NULL) {
+        CFDataRef payload = CFDataCreate(kCFAllocatorDefault,
+                                         data.bytes,
+                                         (CFIndex)data.length);
+        if (payload != NULL) {
+            SInt32 status = CFMessagePortSendRequest(_remotePort,
+                                                     1,
+                                                     payload,
+                                                     2.0,
+                                                     2.0,
+                                                     NULL,
+                                                     NULL);
+            CFRelease(payload);
+            if (status == kCFMessagePortSuccess) {
+                return YES;
+            }
+        }
+    }
+
+    if (_resultsFD < 0) {
         return NO;
     }
 
