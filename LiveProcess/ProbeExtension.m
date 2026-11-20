@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 
 #import <dlfcn.h>
 #import <mach/mach.h>
@@ -24,10 +25,21 @@ extern kern_return_t task_for_pid(mach_port_t target_task,
                                   int pid,
                                   mach_port_t *task);
 
-@interface ProbeExtension : NSObject <NSExtensionRequestHandling>
+@interface ProbeExtension : UIViewController <NSExtensionRequestHandling>
+@end
+
+@interface ProbeExtension () {
+    mach_port_t _hostPort;
+    int _socketFD;
+}
 @end
 
 @implementation ProbeExtension
+
+- (void)loadView
+{
+    self.view = [[UIView alloc] initWithFrame:CGRectZero];
+}
 
 - (void)beginRequestWithExtensionContext:(NSExtensionContext *)context
 {
@@ -35,16 +47,28 @@ extern kern_return_t task_for_pid(mach_port_t target_task,
         NSExtensionItem *item = context.inputItems.firstObject;
         NSDictionary *input = item.userInfo;
         id portObject = input[@"port"];
+        id socketObject = input[@"socket"];
 
-        if (![portObject isKindOfClass:[ProbeMachPort class]]) {
-            NSLog(@"ProbeExtension: no ProbeMachPort in input (noPort=%@)",
+        ProbeMachPort *port = nil;
+        if ([portObject isKindOfClass:[ProbeMachPort class]]) {
+            port = (ProbeMachPort *)portObject;
+        }
+
+        NSFileHandle *socketHandle = nil;
+        if ([socketObject isKindOfClass:[NSFileHandle class]]) {
+            socketHandle = (NSFileHandle *)socketObject;
+        }
+
+        if (port == nil && socketHandle == nil) {
+            NSLog(@"ProbeExtension: no transport in input (noPort=%@)",
                   input[@"noPort"]);
             [context completeRequestReturningItems:nil completionHandler:nil];
             return;
         }
 
-        ProbeMachPort *port = (ProbeMachPort *)portObject;
-        mach_port_t hostPort = port.port;
+        _hostPort = port != nil ? port.port : MACH_PORT_NULL;
+        _socketFD = socketHandle != nil ? socketHandle.fileDescriptor : -1;
+        mach_port_t hostPort = _hostPort;
         NSNumber *hostPidNumber = input[@"hostPid"];
         pid_t hostPid = hostPidNumber != nil ? hostPidNumber.intValue : 0;
 
@@ -243,6 +267,11 @@ static NSString *ProbeSysctlString(const char *name)
 {
     NSMutableDictionary *result = [NSMutableDictionary dictionary];
 
+    if (hostPort == MACH_PORT_NULL) {
+        result[@"skipped"] = @"no Mach transport";
+        return result;
+    }
+
     mach_port_t replyPort = MACH_PORT_NULL;
     kern_return_t kr = mach_port_allocate(mach_task_self(),
                                           MACH_PORT_RIGHT_RECEIVE,
@@ -325,6 +354,28 @@ static NSString *ProbeSysctlString(const char *name)
                                                    options:0
                                                      error:NULL];
     if (data == nil) {
+        return;
+    }
+
+    if (port == MACH_PORT_NULL) {
+        if (_socketFD < 0) {
+            return;
+        }
+
+        NSMutableData *line = [NSMutableData dataWithData:data];
+        const uint8_t newline = '\n';
+        [line appendBytes:&newline length:1];
+
+        const uint8_t *bytes = line.bytes;
+        size_t remaining = line.length;
+        while (remaining > 0) {
+            ssize_t written = write(_socketFD, bytes, remaining);
+            if (written <= 0) {
+                break;
+            }
+            bytes += written;
+            remaining -= (size_t)written;
+        }
         return;
     }
 
