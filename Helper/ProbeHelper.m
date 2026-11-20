@@ -4,7 +4,9 @@
 #import <dlfcn.h>
 #import <fcntl.h>
 #import <mach/mach.h>
+#import <mach-o/dyld.h>
 #import <os/proc.h>
+#import <pthread.h>
 #import <signal.h>
 #import <spawn.h>
 #import <string.h>
@@ -22,6 +24,44 @@ extern char **environ;
 extern kern_return_t task_for_pid(mach_port_t target_task,
                                   int pid,
                                   mach_port_t *task);
+extern int ptrace(int request, pid_t pid, caddr_t addr, int data);
+extern int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
+extern boolean_t exc_server(mach_msg_header_t *request,
+                            mach_msg_header_t *reply);
+
+#define PROBE_PT_TRACE_ME 0
+#define PROBE_PT_SIGEXC 12
+#define PROBE_CS_OPS_STATUS 0
+#define PROBE_CS_DEBUGGED 0x10000000
+
+/*
+ * UTM's iOS hypervisor entry: x16 = -5 selects the hv trap, SVC 0x80
+ * enters the kernel. Call 0 asks for VM capabilities.
+ */
+__attribute__((naked))
+static uint64_t ProbeHVTrap(unsigned int call, void *argument)
+{
+    __asm__ volatile("mov x16, #-0x5\n"
+                     "svc 0x80\n"
+                     "ret\n");
+}
+
+kern_return_t catch_exception_raise(mach_port_t exception_port,
+                                    mach_port_t thread,
+                                    mach_port_t task,
+                                    exception_type_t exception,
+                                    exception_data_t code,
+                                    mach_msg_type_number_t code_count)
+{
+    return KERN_FAILURE;
+}
+
+static void *ProbeExceptionThread(void *argument)
+{
+    mach_port_t port = *(mach_port_t *)argument;
+    mach_msg_server(exc_server, 2048, port, 0);
+    return NULL;
+}
 
 static NSString *ResultsPath = nil;
 
@@ -201,6 +241,59 @@ static NSDictionary *IPCInfo(NSString *serviceName)
     return info;
 }
 
+static NSDictionary *AdvancedInfo(void)
+{
+    NSMutableDictionary *info = [NSMutableDictionary dictionary];
+
+    uint32_t flagsBefore = 0;
+    csops(getpid(), PROBE_CS_OPS_STATUS, &flagsBefore, sizeof(flagsBefore));
+    info[@"csBefore"] = @(flagsBefore);
+    info[@"debuggedBefore"] =
+        @((flagsBefore & PROBE_CS_DEBUGGED) != 0);
+
+    errno = 0;
+    int trace = ptrace(PROBE_PT_TRACE_ME, 0, NULL, 0);
+    info[@"ptraceMe"] = @(trace);
+    info[@"ptraceErrno"] = @(errno);
+
+    if (trace == 0) {
+        ptrace(PROBE_PT_SIGEXC, 0, NULL, 0);
+
+        mach_port_t port = MACH_PORT_NULL;
+        if (mach_port_allocate(mach_task_self(),
+                               MACH_PORT_RIGHT_RECEIVE,
+                               &port) == KERN_SUCCESS) {
+            mach_port_insert_right(mach_task_self(),
+                                   port,
+                                   port,
+                                   MACH_MSG_TYPE_MAKE_SEND);
+            task_set_exception_ports(mach_task_self(),
+                                     EXC_MASK_SOFTWARE,
+                                     port,
+                                     EXCEPTION_DEFAULT,
+                                     THREAD_STATE_NONE);
+            pthread_t thread;
+            if (pthread_create(&thread,
+                               NULL,
+                               ProbeExceptionThread,
+                               &port) == 0) {
+                info[@"exceptionPort"] = @YES;
+            }
+        }
+    }
+
+    uint32_t flagsAfter = 0;
+    csops(getpid(), PROBE_CS_OPS_STATUS, &flagsAfter, sizeof(flagsAfter));
+    info[@"csAfter"] = @(flagsAfter);
+    info[@"debuggedAfter"] = @((flagsAfter & PROBE_CS_DEBUGGED) != 0);
+
+    int64_t hv = (int64_t)ProbeHVTrap(0, NULL);
+    info[@"hvTrap"] = @(hv);
+    info[@"hvSupported"] = @(hv != (int64_t)0xfae9400f);
+
+    return info;
+}
+
 static NSDictionary *JITInfo(void)
 {
     NSMutableDictionary *result = [NSMutableDictionary dictionary];
@@ -276,6 +369,8 @@ int main(int argc, char *argv[])
                 @"spawnProcess": ProcessInfo(hostPid, argv[0]) });
         Emit(@{ @"stage": @"spawnIPC",
                 @"spawnIPC": IPCInfo(serviceName) });
+        Emit(@{ @"stage": @"spawnAdvanced",
+                @"spawnAdvanced": AdvancedInfo() });
         Emit(@{ @"stage": @"spawnJIT",
                 @"spawnJIT": JITInfo() });
         Emit(@{ @"stage": @"spawnDone",
