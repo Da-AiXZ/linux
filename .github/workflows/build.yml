@@ -98,8 +98,10 @@ jobs:
               "Payload/Probe.app/Helpers/probe-helper.dat" || true
           fi
           codesign --force --sign - \
+            --entitlements LiveProcess/LiveProcess.entitlements \
             "Payload/Probe.app/PlugIns/LiveProcess.appex" || true
           codesign --force --sign - \
+            --entitlements App/Probe.entitlements \
             "Payload/Probe.app" || true
 
           /usr/bin/zip -r -y LinuxProbe.ipa Payload
