@@ -305,9 +305,98 @@ int ProbeExtensionRun(pid_t hostPid, mach_port_t servicePort)
     self.view = [[UIView alloc] initWithFrame:CGRectZero];
 }
 
+- (NSString *)jsonStringForObject:(id)object
+{
+    NSData *data = [NSJSONSerialization dataWithJSONObject:object
+                                                   options:0
+                                                     error:NULL];
+    if (data == nil) {
+        return @"{}";
+    }
+    return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]
+        ?: @"{}";
+}
+
+- (void)sendURLPayload:(NSDictionary *)payload
+               context:(NSExtensionContext *)context
+{
+    if (![context respondsToSelector:
+            @selector(openURL:completionHandler:)]) {
+        NSLog(@"ProbeExtension: openURL is unavailable");
+        return;
+    }
+
+    NSData *data = [NSJSONSerialization dataWithJSONObject:payload
+                                                   options:0
+                                                     error:NULL];
+    if (data == nil) {
+        return;
+    }
+
+    NSString *base64 = [data base64EncodedStringWithOptions:0];
+    NSURLComponents *components =
+        [NSURLComponents componentsWithString:@"linuxprobe://results"];
+    components.queryItems = @[
+        [NSURLQueryItem queryItemWithName:@"payload" value:base64],
+    ];
+
+    NSURL *url = components.URL;
+    if (url == nil) {
+        return;
+    }
+
+    [context openURL:url completionHandler:^(BOOL success) {
+        if (!success) {
+            NSLog(@"ProbeExtension: openURL failed");
+        }
+    }];
+}
+
 - (void)beginRequestWithExtensionContext:(NSExtensionContext *)context
 {
-    [context completeRequestReturningItems:nil completionHandler:nil];
+    @autoreleasepool {
+        ProbeNotify(CFSTR("com.daixz.linux.probe.ext-begin"));
+
+        NSDictionary *input = context.inputItems.firstObject.userInfo;
+        NSNumber *hostPidNumber = input[@"hostPid"];
+        pid_t hostPid = hostPidNumber != nil ? hostPidNumber.intValue : 0;
+
+        [self sendURLPayload:@{ @"stage": @"hello",
+                                @"pid": @(getpid()),
+                                @"hostPid": @(hostPid) }
+                     context:context];
+
+        NSDictionary *device = @{ @"stage": @"device",
+                                  @"device": ProbeDeviceInfo() };
+        [self sendURLPayload:device context:context];
+
+        NSDictionary *process = @{ @"stage": @"process",
+                                   @"process": ProbeProcessInfo(hostPid) };
+        [self sendURLPayload:process context:context];
+
+        NSDictionary *ipc = @{ @"stage": @"ipc",
+                               @"ipc": @{ @"transport": @"url",
+                                          @"hostPid": @(hostPid) } };
+        [self sendURLPayload:ipc context:context];
+
+        /*
+         * JIT is last: executing the RX page is the one probe that can
+         * kill the process, and everything above is already delivered.
+         */
+        NSDictionary *jit = @{ @"stage": @"jit",
+                               @"jit": ProbeJITInfo() };
+        [self sendURLPayload:jit context:context];
+
+        [self sendURLPayload:@{ @"stage": @"done", @"done": @YES }
+                     context:context];
+
+        NSExtensionItem *item = [NSExtensionItem new];
+        item.userInfo = @{
+            @"probeResult":
+                [self jsonStringForObject:@[ device, process, ipc, jit ]],
+        };
+        [context completeRequestReturningItems:@[item] completionHandler:nil];
+    }
 }
 
 @end

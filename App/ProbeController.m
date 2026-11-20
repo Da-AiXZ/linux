@@ -6,6 +6,7 @@
 #import <errno.h>
 #import <mach/mach.h>
 #import <objc/runtime.h>
+#import <Security/Security.h>
 #import <signal.h>
 #import <spawn.h>
 #import <stdint.h>
@@ -61,6 +62,8 @@ typedef char *(*ProbeIssueExtensionFn)(const char *extensionClass,
 @property (atomic, assign) pid_t helperPid;
 
 - (void)handleDarwinNotification:(NSString *)name;
+- (void)logEntitlements;
+- (void)logForkProbe;
 - (void)startMachService;
 - (void)startMachReceiver;
 - (BOOL)startExtensionWithResultsPath:(NSString *)resultsPath
@@ -112,6 +115,8 @@ static void ProbeDarwinNotifyCallback(CFNotificationCenterRef center,
     [self log:[NSString stringWithFormat:@"build %@ (%@)",
                info[@"CFBundleShortVersionString"] ?: @"?",
                info[@"CFBundleVersion"] ?: @"?"]];
+    [self logEntitlements];
+    [self logForkProbe];
 
     /*
      * The extension's file transport needs a path the extension can open.
@@ -623,6 +628,52 @@ static void ProbeDarwinNotifyCallback(CFNotificationCenterRef center,
             }
         });
     }
+}
+
+- (void)logEntitlements
+{
+    SecTaskRef task = SecTaskCreateFromSelf(kCFAllocatorDefault);
+    if (task == NULL) {
+        [self log:@"SecTaskCreateFromSelf failed"];
+        return;
+    }
+
+    NSArray *keys = @[
+        @"com.apple.security.application-groups",
+        @"get-task-allow",
+        @"application-identifier",
+        @"platform-application",
+        @"com.apple.private.cs.debugger",
+    ];
+    for (NSString *key in keys) {
+        CFTypeRef value = SecTaskCopyValueForEntitlement(
+            task, (__bridge CFStringRef)key, NULL);
+        [self log:[NSString stringWithFormat:@"entitlement %@ = %@",
+                   key,
+                   value ? (__bridge id)value : @"nil"]];
+        if (value != NULL) {
+            CFRelease(value);
+        }
+    }
+
+    CFRelease(task);
+}
+
+- (void)logForkProbe
+{
+    errno = 0;
+    pid_t forked = fork();
+    int forkErrno = errno;
+
+    if (forked == 0) {
+        _exit(0);
+    }
+    if (forked > 0) {
+        waitpid(forked, NULL, 0);
+    }
+
+    [self log:[NSString stringWithFormat:@"host fork: pid=%d errno=%d",
+               forked, forkErrno]];
 }
 
 #pragma mark - Mach service
