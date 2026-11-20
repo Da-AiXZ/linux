@@ -16,7 +16,12 @@
 {
     [super viewDidLoad];
 
-    self.title = @"Linux Probe";
+    NSDictionary *info = NSBundle.mainBundle.infoDictionary;
+    NSString *version = info[@"CFBundleShortVersionString"] ?: @"?";
+    NSString *build = info[@"CFBundleVersion"] ?: @"?";
+
+    self.title = [NSString stringWithFormat:@"Linux Probe %@ (%@)",
+                  version, build];
     self.view.backgroundColor = UIColor.systemBackgroundColor;
 
     self.formatter = [NSDateFormatter new];
@@ -56,6 +61,7 @@
         [self.runButton.heightAnchor constraintEqualToConstant:48],
     ]];
 
+    [self appendLog:[NSString stringWithFormat:@"build %@ (%@)", version, build]];
     [self appendLog:@"Tap Run Probe. Results are printed below."];
     [self appendLog:@"Target: iPad Pro 2021 (M1), iPadOS 16.6.1."];
 
