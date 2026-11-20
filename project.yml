@@ -1,0 +1,71 @@
+name: LinuxProbe
+
+options:
+  bundleIdPrefix: com.daixz.linux
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    CLANG_ENABLE_OBJC_ARC: YES
+    CLANG_ENABLE_MODULES: YES
+    CODE_SIGNING_ALLOWED: NO
+    CODE_SIGNING_REQUIRED: NO
+    CODE_SIGN_IDENTITY: ""
+
+targets:
+  Probe:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+        excludes:
+          - "Info.plist"
+          - "*.entitlements"
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.daixz.linux.probe
+        PRODUCT_NAME: Probe
+        INFOPLIST_FILE: App/Info.plist
+        CODE_SIGN_ENTITLEMENTS: App/Probe.entitlements
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: NO
+    dependencies:
+      - target: LiveProcess
+        embed: true
+
+  LiveProcess:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: LiveProcess
+        excludes:
+          - "Info.plist"
+          - "*.entitlements"
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.daixz.linux.probe.LiveProcess
+        PRODUCT_NAME: LiveProcess
+        INFOPLIST_FILE: LiveProcess/Info.plist
+        CODE_SIGN_ENTITLEMENTS: LiveProcess/LiveProcess.entitlements
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
+        LD_ENTRY_POINT: _NSExtensionMain
+        OTHER_LDFLAGS: "-Wl,-e,_NSExtensionMain"
+        TARGETED_DEVICE_FAMILY: "1,2"
+
+schemes:
+  Probe:
+    build:
+      targets:
+        Probe: all
+    run:
+      config: Debug
+    archive:
+      config: Release
