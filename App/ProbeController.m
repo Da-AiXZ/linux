@@ -6,7 +6,6 @@
 #import <errno.h>
 #import <mach/mach.h>
 #import <objc/runtime.h>
-#import <Security/Security.h>
 #import <signal.h>
 #import <spawn.h>
 #import <stdint.h>
@@ -15,6 +14,7 @@
 #import <string.h>
 #import <sys/wait.h>
 #import <unistd.h>
+#import <xpc/xpc.h>
 
 extern char **environ;
 extern mach_port_t bootstrap_port;
@@ -632,31 +632,56 @@ static void ProbeDarwinNotifyCallback(CFNotificationCenterRef center,
 
 - (void)logEntitlements
 {
-    SecTaskRef task = SecTaskCreateFromSelf(kCFAllocatorDefault);
-    if (task == NULL) {
-        [self log:@"SecTaskCreateFromSelf failed"];
+    typedef xpc_object_t (*ProbeCopyEntitlementFn)(const char *entitlement);
+    ProbeCopyEntitlementFn copyEntitlement =
+        (ProbeCopyEntitlementFn)dlsym(RTLD_DEFAULT,
+                                      "xpc_copy_entitlement_for_self");
+    if (copyEntitlement == NULL) {
+        [self log:@"xpc_copy_entitlement_for_self unavailable"];
         return;
     }
 
+    xpc_object_t groups = copyEntitlement(
+        "com.apple.security.application-groups");
+    NSMutableArray *groupNames = [NSMutableArray array];
+    if (groups != NULL && xpc_get_type(groups) == XPC_TYPE_ARRAY) {
+        size_t count = xpc_array_get_count(groups);
+        for (size_t index = 0; index < count; index++) {
+            const char *group = xpc_array_get_string(groups, index);
+            if (group != NULL) {
+                [groupNames addObject:@(group)];
+            }
+        }
+    }
+    [self log:[NSString stringWithFormat:@"entitlement app-groups = %@",
+               groupNames]];
+
     NSArray *keys = @[
-        @"com.apple.security.application-groups",
         @"get-task-allow",
         @"application-identifier",
         @"platform-application",
         @"com.apple.private.cs.debugger",
     ];
     for (NSString *key in keys) {
-        CFTypeRef value = SecTaskCopyValueForEntitlement(
-            task, (__bridge CFStringRef)key, NULL);
-        [self log:[NSString stringWithFormat:@"entitlement %@ = %@",
-                   key,
-                   value ? (__bridge id)value : @"nil"]];
+        xpc_object_t value = copyEntitlement(key.UTF8String);
+        NSString *description = @"nil";
         if (value != NULL) {
-            CFRelease(value);
+            xpc_type_t type = xpc_get_type(value);
+            if (type == XPC_TYPE_BOOL) {
+                description = xpc_bool_get_value(value) ? @"true" : @"false";
+            } else if (type == XPC_TYPE_STRING) {
+                const char *text = xpc_string_get_string_ptr(value);
+                description = text != NULL ? @(text) : @"<string>";
+            } else if (type == XPC_TYPE_INT64) {
+                description = [NSString stringWithFormat:@"%lld",
+                               xpc_int64_get_value(value)];
+            } else {
+                description = @"<other>";
+            }
         }
+        [self log:[NSString stringWithFormat:@"entitlement %@ = %@",
+                   key, description]];
     }
-
-    CFRelease(task);
 }
 
 - (void)logForkProbe
