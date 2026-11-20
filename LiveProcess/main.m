@@ -4,6 +4,7 @@
 #import <dlfcn.h>
 #import <mach/mach.h>
 #import <stdio.h>
+#import <string.h>
 #import <unistd.h>
 #import <xpc/xpc.h>
 
@@ -81,6 +82,10 @@ static void ProbeEntryLoaded(void)
 
 int NSExtensionMain(int argc, char *argv[], char *envp[], char *apple[])
 {
+    if (argc > 1 && strcmp(argv[1], "--nested") == 0) {
+        return 0;
+    }
+
     @autoreleasepool {
         pid_t hostPid = 0;
         ProbeCopyPropertiesFn copyProperties =
@@ -108,23 +113,9 @@ int NSExtensionMain(int argc, char *argv[], char *envp[], char *apple[])
         ProbePostNotification(CFSTR("com.daixz.linux.probe.ext-nomatch"));
 
         /*
-         * Fall back to the system extension entry. With a real extension
-         * point (com.apple.share-services) the context handshake completes
-         * and ProbeExtension's beginRequestWithExtensionContext: runs.
+         * The host cannot register a Mach service (BOOTSTRAP_NOT_PRIVILEGED),
+         * so run the privilege-free channel probe instead.
          */
-        void *foundation =
-            dlopen("/System/Library/Frameworks/Foundation.framework/Foundation",
-                   RTLD_NOW | RTLD_GLOBAL);
-        int (*systemMain)(int, char **) = foundation != NULL
-            ? (int (*)(int, char **))dlsym(foundation, "NSExtensionMain")
-            : NULL;
-        if (systemMain == NULL) {
-            systemMain = (int (*)(int, char **))dlsym(RTLD_NEXT,
-                                                      "NSExtensionMain");
-        }
-        if (systemMain != NULL) {
-            return systemMain(argc, argv);
-        }
-        return 1;
+        return ProbeExtensionChannelRun(hostPid);
     }
 }

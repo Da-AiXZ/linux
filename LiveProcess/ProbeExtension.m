@@ -6,16 +6,20 @@
 #import <fcntl.h>
 #import <mach-o/dyld.h>
 #import <mach/mach.h>
+#import <notify.h>
+#import <objc/message.h>
 #import <os/proc.h>
 #import <signal.h>
 #import <spawn.h>
 #import <string.h>
 #import <sys/mman.h>
 #import <sys/resource.h>
+#import <sys/stat.h>
 #import <sys/sysctl.h>
 #import <sys/wait.h>
 #import <unistd.h>
 
+#import "ProbeChannels.h"
 #import "ProbeExtension.h"
 #import "ProbeMach.h"
 
@@ -24,6 +28,10 @@
 #endif
 
 extern char **environ;
+extern mach_port_t bootstrap_port;
+extern kern_return_t bootstrap_check_in(mach_port_t bootstrap,
+                                        const char *name,
+                                        mach_port_t *port);
 extern kern_return_t task_for_pid(mach_port_t target_task,
                                   int pid,
                                   mach_port_t *task);
@@ -251,6 +259,226 @@ static NSDictionary *ProbeJITInfo(void)
     }
 
     return result;
+}
+
+#pragma mark - Privilege-free channels
+
+static void ProbeNotifyFormat(const char *format, int value)
+{
+    char buffer[160];
+    snprintf(buffer, sizeof(buffer), format, value);
+    CFStringRef name = CFStringCreateWithCString(kCFAllocatorDefault,
+                                                 buffer,
+                                                 kCFStringEncodingUTF8);
+    if (name != NULL) {
+        ProbeNotify(name);
+        CFRelease(name);
+    }
+}
+
+static void ProbePublishJSON(NSString *json, uint64_t sequence)
+{
+    NSData *data = [json dataUsingEncoding:NSUTF8StringEncoding];
+    if (data == nil) {
+        return;
+    }
+
+    NSUInteger length = MIN(data.length, (NSUInteger)PROBE_NOTIFY_BYTES);
+
+    /* 1. POSIX shared memory. */
+    int fd = shm_open(PROBE_SHM_NAME, O_CREAT | O_RDWR, 0666);
+    if (fd < 0) {
+        ProbeNotifyFormat("com.daixz.linux.probe.ext-shm-err-%d", errno);
+    } else {
+        if (ftruncate(fd, PROBE_SHM_SIZE) == 0) {
+            void *memory = mmap(NULL,
+                                PROBE_SHM_SIZE,
+                                PROT_READ | PROT_WRITE,
+                                MAP_SHARED,
+                                fd,
+                                0);
+            if (memory != MAP_FAILED) {
+                ProbeShmBlock *block = (ProbeShmBlock *)memory;
+                block->magic = PROBE_SHM_MAGIC;
+                block->length = (uint32_t)data.length;
+                block->sequence = sequence;
+                memcpy(block->json, data.bytes, data.length);
+                msync(memory, PROBE_SHM_SIZE, MS_ASYNC);
+                munmap(memory, PROBE_SHM_SIZE);
+                ProbeNotify(CFSTR("com.daixz.linux.probe.ext-shm-ok"));
+            } else {
+                ProbeNotifyFormat("com.daixz.linux.probe.ext-shm-err-%d",
+                                  errno);
+            }
+        } else {
+            ProbeNotifyFormat("com.daixz.linux.probe.ext-shm-err-%d", errno);
+        }
+        close(fd);
+    }
+
+    /* 2. Darwin notify 64-bit state words. */
+    const uint8_t *bytes = data.bytes;
+    BOOL notifyOK = YES;
+    for (int index = 0; index < PROBE_NOTIFY_CHUNKS; index++) {
+        uint64_t word = 0;
+        NSUInteger offset = (NSUInteger)index * 8;
+        if (offset < length) {
+            NSUInteger count = MIN((NSUInteger)8, length - offset);
+            memcpy(&word, bytes + offset, count);
+        }
+
+        char name[96];
+        snprintf(name, sizeof(name), PROBE_NOTIFY_PREFIX "%d", index);
+        int token = 0;
+        if (notify_register_check(name, &token) == NOTIFY_STATUS_OK) {
+            notify_set_state(token, word);
+            notify_cancel(token);
+        } else {
+            notifyOK = NO;
+        }
+    }
+
+    int token = 0;
+    if (notify_register_check(PROBE_NOTIFY_LEN, &token) == NOTIFY_STATUS_OK) {
+        notify_set_state(token, (uint64_t)length);
+        notify_cancel(token);
+    } else {
+        notifyOK = NO;
+    }
+    if (notify_register_check(PROBE_NOTIFY_DONE, &token) == NOTIFY_STATUS_OK) {
+        notify_set_state(token, sequence);
+        notify_cancel(token);
+    } else {
+        notifyOK = NO;
+    }
+    ProbeNotify(notifyOK
+        ? CFSTR("com.daixz.linux.probe.ext-notify-ok")
+        : CFSTR("com.daixz.linux.probe.ext-notify-err"));
+
+    /* 3. General pasteboard (may require user approval on the host side). */
+    @try {
+        Class pasteboardClass = NSClassFromString(@"UIPasteboard");
+        id pasteboard = pasteboardClass
+            ? ((id (*)(id, SEL))objc_msgSend)(pasteboardClass,
+                                              @selector(generalPasteboard))
+            : nil;
+        if (pasteboard != nil) {
+            ((void (*)(id, SEL, id))objc_msgSend)(pasteboard,
+                                                  @selector(setString:),
+                                                  json);
+            ProbeNotify(CFSTR("com.daixz.linux.probe.ext-paste-ok"));
+        } else {
+            ProbeNotify(CFSTR("com.daixz.linux.probe.ext-paste-missing"));
+        }
+    } @catch (__unused NSException *exception) {
+        ProbeNotify(CFSTR("com.daixz.linux.probe.ext-paste-err"));
+    }
+}
+
+static mach_port_t ProbeBootChannel(void)
+{
+    mach_port_t port = MACH_PORT_NULL;
+    kern_return_t kr = bootstrap_check_in(bootstrap_port,
+                                          PROBE_BOOT_SERVICE,
+                                          &port);
+    if (kr != KERN_SUCCESS || !MACH_PORT_VALID(port)) {
+        ProbeNotifyFormat("com.daixz.linux.probe.ext-boot-err-%d", kr);
+        return MACH_PORT_NULL;
+    }
+    ProbeNotify(CFSTR("com.daixz.linux.probe.ext-boot-ok"));
+
+    ProbeMachMessage message;
+    memset(&message, 0, sizeof(message));
+    mach_msg_return_t result =
+        mach_msg(&message.header,
+                 MACH_RCV_MSG | MACH_RCV_TIMEOUT,
+                 0,
+                 (mach_msg_size_t)sizeof(message),
+                 port,
+                 3000,
+                 MACH_PORT_NULL);
+    if (result == MACH_MSG_SUCCESS &&
+        message.magic == PROBE_MACH_MAGIC &&
+        MACH_PORT_VALID(message.header.msgh_local_port)) {
+        ProbeNotify(CFSTR("com.daixz.linux.probe.ext-boot-connected"));
+        return message.header.msgh_local_port;
+    }
+
+    ProbeNotifyFormat("com.daixz.linux.probe.ext-boot-recv-%d", result);
+    mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_RECEIVE, -1);
+    return MACH_PORT_NULL;
+}
+
+static NSString *ProbeCompactJSON(pid_t hostPid, BOOL includeJIT)
+{
+    NSMutableDictionary *info = [NSMutableDictionary dictionary];
+    info[@"machine"] = ProbeSysctlString("hw.machine");
+    info[@"os"] = ProbeSysctlString("kern.osversion");
+    info[@"pid"] = @(getpid());
+    info[@"host"] = @(hostPid);
+
+    NSDictionary *process = ProbeProcessInfo(hostPid);
+    info[@"fork"] = process[@"fork"] ?: @(-1);
+    info[@"forkErrno"] = process[@"forkErrno"] ?: @(-1);
+    info[@"spawn"] = process[@"nestedSpawn"] ?: @(-1);
+    info[@"spawnErrno"] = process[@"nestedSpawnErrno"] ?: @(-1);
+    info[@"ls"] = process[@"spawnLS"] ?: @(-1);
+    info[@"lsErrno"] = process[@"spawnLSErrno"] ?: @(-1);
+    info[@"tfSelf"] = process[@"taskForPidSelf"] ?: @(-1);
+    info[@"tfHost"] = process[@"taskForPidHost"] ?: @(-1);
+    info[@"tmpW"] =
+        @([[NSFileManager defaultManager] isWritableFileAtPath:NSTemporaryDirectory()]);
+
+    if (includeJIT) {
+        NSDictionary *jit = ProbeJITInfo();
+        info[@"jitMmap"] = jit[@"mmapRW"] ?: @NO;
+        info[@"jitRX"] = jit[@"mprotectRX"] ?: @NO;
+        info[@"jitErrno"] = jit[@"mprotectErrno"] ?: @(-1);
+        info[@"jitExec"] = jit[@"execResult"] ?: @(-1);
+        info[@"jitJIT"] = jit[@"mmapJIT"] ?: @NO;
+        info[@"jitJITErrno"] = jit[@"mmapJITErrno"] ?: @(-1);
+    }
+
+    NSData *data = [NSJSONSerialization dataWithJSONObject:info
+                                                   options:0
+                                                     error:NULL];
+    return data != nil
+        ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]
+        : @"{}";
+}
+
+int ProbeExtensionChannelRun(pid_t hostPid)
+{
+    @autoreleasepool {
+        /*
+         * Reverse bootstrap: the extension registers a service, the host
+         * looks it up and sends back a receive right for the results.
+         */
+        mach_port_t hostPort = ProbeBootChannel();
+        if (MACH_PORT_VALID(hostPort)) {
+            ServicePort = hostPort;
+        }
+
+        NSString *partial = ProbeCompactJSON(hostPid, NO);
+        if (MACH_PORT_VALID(ServicePort)) {
+            ProbeSend(@{ @"stage": @"partial",
+                         @"data": partial,
+                         @"sequence": @1 });
+        }
+        ProbePublishJSON(partial, 1);
+
+        NSString *final = ProbeCompactJSON(hostPid, YES);
+        if (MACH_PORT_VALID(ServicePort)) {
+            ProbeSend(@{ @"stage": @"final",
+                         @"data": final,
+                         @"sequence": @2 });
+            ProbeSend(@{ @"stage": @"done", @"done": @YES });
+        }
+        ProbePublishJSON(final, 2);
+        ProbeNotify(CFSTR("com.daixz.linux.probe.ext-done"));
+    }
+
+    return 0;
 }
 
 #pragma mark - Entry used by the custom NSExtensionMain
