@@ -20,6 +20,9 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
+      - name: Install signing tool
+        run: brew install ldid || true
+
       - name: Generate project
         run: xcodegen generate
 
@@ -46,13 +49,25 @@ jobs:
           mkdir Payload
           ditto "$APP" "Payload/Probe.app"
 
-          # Best-effort ad-hoc signing with the probe entitlements.
-          # TrollStore re-signs on install; keeping the entitlements embedded
-          # makes the probe meaningful when it is installed through TrollStore.
-          codesign --force --sign - --entitlements App/Probe.entitlements \
-            "Payload/Probe.app/Probe" || true
-          codesign --force --sign - --entitlements LiveProcess/LiveProcess.entitlements \
-            "Payload/Probe.app/PlugIns/LiveProcess.appex/LiveProcess" || true
+          # Best-effort signing with the probe entitlements. TrollStore
+          # re-signs on install; keeping the entitlements embedded makes the
+          # probe meaningful when it is installed through TrollStore.
+          if command -v ldid >/dev/null 2>&1; then
+            ldid -SApp/Probe.entitlements "Payload/Probe.app/Probe" \
+              || codesign --force --sign - --entitlements App/Probe.entitlements \
+                   "Payload/Probe.app/Probe" || true
+            ldid -SLiveProcess/LiveProcess.entitlements \
+              "Payload/Probe.app/PlugIns/LiveProcess.appex/LiveProcess" \
+              || codesign --force --sign - \
+                   --entitlements LiveProcess/LiveProcess.entitlements \
+                   "Payload/Probe.app/PlugIns/LiveProcess.appex/LiveProcess" || true
+          else
+            codesign --force --sign - --entitlements App/Probe.entitlements \
+              "Payload/Probe.app/Probe" || true
+            codesign --force --sign - \
+              --entitlements LiveProcess/LiveProcess.entitlements \
+              "Payload/Probe.app/PlugIns/LiveProcess.appex/LiveProcess" || true
+          fi
           codesign --force --sign - \
             "Payload/Probe.app/PlugIns/LiveProcess.appex" || true
           codesign --force --sign - \

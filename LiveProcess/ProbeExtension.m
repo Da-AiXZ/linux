@@ -47,19 +47,34 @@ extern kern_return_t task_for_pid(mach_port_t target_task,
         pid_t hostPid = hostPidNumber != nil ? hostPidNumber.intValue : 0;
 
         NSMutableDictionary *results = [NSMutableDictionary dictionary];
+
+        results[@"stage"] = @"device";
         results[@"pid"] = @(getpid());
         results[@"hostPid"] = @(hostPid);
         results[@"device"] = [self deviceInfo];
-        results[@"process"] = [self processInfoWithHostPid:hostPid];
-        results[@"mach"] = [self machProbeWithPort:hostPort];
         [self sendKind:PROBE_MSG_RESULT json:results toPort:hostPort];
+
+        /*
+         * Each risky probe is sent as its own stage, so a crash still leaves
+         * the earlier results in the host's log.
+         */
+        [self sendKind:PROBE_MSG_RESULT
+                  json:@{@"stage": @"process",
+                         @"process": [self processInfoWithHostPid:hostPid]}
+                toPort:hostPort];
+
+        [self sendKind:PROBE_MSG_RESULT
+                  json:@{@"stage": @"mach",
+                         @"mach": [self machProbeWithPort:hostPort]}
+                toPort:hostPort];
 
         /*
          * JIT is deliberately last. If executing the RX page faults, the
          * extension dies here and the host still has every earlier result.
          */
         [self sendKind:PROBE_MSG_RESULT
-                  json:@{@"jit": [self jitProbe]}
+                  json:@{@"stage": @"jit",
+                         @"jit": [self jitProbe]}
                 toPort:hostPort];
 
         [self sendKind:PROBE_MSG_DONE json:@{@"done": @YES} toPort:hostPort];
