@@ -2,18 +2,17 @@
 #import <UIKit/UIKit.h>
 
 #import <dlfcn.h>
+#import <fcntl.h>
 #import <mach/mach.h>
-#import <mach/mach_time.h>
 #import <os/proc.h>
 #import <signal.h>
 #import <spawn.h>
+#import <string.h>
 #import <sys/mman.h>
 #import <sys/resource.h>
 #import <sys/sysctl.h>
 #import <sys/wait.h>
 #import <unistd.h>
-
-#import "ProbeXPCProtocol.h"
 
 #ifndef MAP_JIT
 #define MAP_JIT 0x800
@@ -28,7 +27,7 @@ extern kern_return_t task_for_pid(mach_port_t target_task,
 @end
 
 @implementation ProbeExtension {
-    NSXPCConnection *_connection;
+    int _resultsFD;
 }
 
 - (void)loadView
@@ -41,127 +40,117 @@ extern kern_return_t task_for_pid(mach_port_t target_task,
     @autoreleasepool {
         NSExtensionItem *item = context.inputItems.firstObject;
         NSDictionary *input = item.userInfo;
-        id endpointObject = input[@"endpoint"];
 
-        if (![endpointObject isKindOfClass:[NSXPCListenerEndpoint class]]) {
-            NSLog(@"ProbeExtension: no NSXPCListenerEndpoint in input");
+        NSString *resultsPath = input[@"resultsPath"];
+        NSString *token = input[@"resultsToken"];
+        NSNumber *hostPidNumber = input[@"hostPid"];
+
+        if (![resultsPath isKindOfClass:[NSString class]]
+            || resultsPath.length == 0) {
+            NSLog(@"ProbeExtension: no resultsPath in input");
             [context completeRequestReturningItems:nil completionHandler:nil];
             return;
         }
 
-        NSNumber *hostPidNumber = input[@"hostPid"];
+        if ([token isKindOfClass:[NSString class]] && token.length > 0) {
+            typedef int64_t (*ProbeConsumeExtensionFn)(const char *);
+            ProbeConsumeExtensionFn consume =
+                (ProbeConsumeExtensionFn)dlsym(RTLD_DEFAULT,
+                                               "sandbox_extension_consume");
+            if (consume != NULL) {
+                int64_t handle = consume(token.UTF8String);
+                if (handle < 0) {
+                    NSLog(@"ProbeExtension: sandbox_extension_consume failed");
+                }
+            }
+        }
+
+        _resultsFD = open(resultsPath.fileSystemRepresentation,
+                          O_WRONLY | O_APPEND);
+        if (_resultsFD < 0) {
+            _resultsFD = open(resultsPath.fileSystemRepresentation,
+                              O_WRONLY | O_APPEND | O_CREAT,
+                              0644);
+        }
+        if (_resultsFD < 0) {
+            NSLog(@"ProbeExtension: open results file failed: %s",
+                  strerror(errno));
+            [context completeRequestReturningItems:nil completionHandler:nil];
+            return;
+        }
+
         pid_t hostPid = hostPidNumber != nil ? hostPidNumber.intValue : 0;
-
-        NSXPCConnection *connection =
-            [[NSXPCConnection alloc] initWithListenerEndpoint:endpointObject];
-        connection.remoteObjectInterface =
-            [NSXPCInterface interfaceWithProtocol:@protocol(ProbeServiceProtocol)];
-        connection.invalidationHandler = ^{
-            NSLog(@"ProbeExtension: XPC connection invalidated");
-        };
-        connection.interruptionHandler = ^{
-            NSLog(@"ProbeExtension: XPC connection interrupted");
-        };
-        [connection resume];
-        _connection = connection;
-
-        id<ProbeServiceProtocol> proxy =
-            [connection remoteObjectProxyWithErrorHandler:^(NSError *error) {
-                NSLog(@"ProbeExtension: XPC proxy error: %@", error);
-            }];
 
         NSMutableDictionary *device = [NSMutableDictionary dictionary];
         device[@"stage"] = @"device";
         device[@"pid"] = @(getpid());
         device[@"hostPid"] = @(hostPid);
         device[@"device"] = [self deviceInfo];
-        [self sendJSON:device proxy:proxy];
+        [self sendJSON:device];
 
         /*
          * Each risky probe is its own stage, so a crash still leaves the
-         * earlier results in the host's log.
+         * earlier results in the host's results file.
          */
         [self sendJSON:@{@"stage": @"process",
-                         @"process": [self processInfoWithHostPid:hostPid]}
-                 proxy:proxy];
+                         @"process": [self processInfoWithHostPid:hostPid]}];
 
-        [self sendJSON:@{@"stage": @"xpc",
-                         @"xpc": [self xpcProbeWithProxy:proxy]}
-                 proxy:proxy];
+        /*
+         * The plain-item launch path cannot carry a Mach port or XPC
+         * endpoint on this OS, so the IPC latency probe is deferred to the
+         * next milestone.
+         */
+        [self sendJSON:@{@"stage": @"ipc",
+                         @"ipc": @{@"transport": @"file",
+                                   @"skipped": @YES}}];
 
         /*
          * JIT is deliberately last. If executing the RX page faults, the
          * extension dies here and the host still has every earlier result.
          */
         [self sendJSON:@{@"stage": @"jit",
-                         @"jit": [self jitProbe]}
-                 proxy:proxy];
+                         @"jit": [self jitProbe]}];
 
-        [self sendDoneWithProxy:proxy context:context];
+        [self sendJSON:@{@"done": @YES}];
+
+        close(_resultsFD);
+        _resultsFD = -1;
+        [context completeRequestReturningItems:nil completionHandler:nil];
     }
 }
 
-#pragma mark - XPC transport
+#pragma mark - Results file
 
 - (BOOL)sendJSON:(NSDictionary *)dictionary
-           proxy:(id<ProbeServiceProtocol>)proxy
 {
+    if (_resultsFD < 0) {
+        return NO;
+    }
+
     NSData *data = [NSJSONSerialization dataWithJSONObject:dictionary
                                                    options:0
                                                      error:NULL];
-    if (data == nil || proxy == nil) {
+    if (data == nil) {
         return NO;
     }
 
-    NSString *json = [[NSString alloc] initWithData:data
-                                           encoding:NSUTF8StringEncoding];
-    if (json == nil) {
-        return NO;
-    }
+    NSMutableData *line = [NSMutableData dataWithData:data];
+    const uint8_t newline = '\n';
+    [line appendBytes:&newline length:1];
 
-    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-    [proxy logJSON:json withReply:^{
-        dispatch_semaphore_signal(semaphore);
-    }];
-
-    return dispatch_semaphore_wait(
-               semaphore,
-               dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)))
-        == 0;
-}
-
-- (void)sendDoneWithProxy:(id<ProbeServiceProtocol>)proxy
-                  context:(NSExtensionContext *)context
-{
-    NSData *data = [NSJSONSerialization dataWithJSONObject:@{@"done": @YES}
-                                                   options:0
-                                                     error:NULL];
-    NSString *json = data != nil
-        ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]
-        : @"{\"done\":true}";
-
-    __block BOOL completed = NO;
-    void (^finish)(void) = ^{
-        if (completed) {
-            return;
+    const uint8_t *bytes = line.bytes;
+    size_t remaining = line.length;
+    while (remaining > 0) {
+        ssize_t written = write(_resultsFD, bytes, remaining);
+        if (written <= 0) {
+            return NO;
         }
-        completed = YES;
-        [context completeRequestReturningItems:nil completionHandler:nil];
-    };
-
-    if (proxy != nil) {
-        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-        [proxy logJSON:json withReply:^{
-            dispatch_semaphore_signal(semaphore);
-            finish();
-        }];
-        dispatch_semaphore_wait(
-            semaphore,
-            dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)));
+        bytes += written;
+        remaining -= (size_t)written;
     }
 
-    finish();
-    [_connection invalidate];
+    fsync(_resultsFD);
+    return YES;
 }
 
 #pragma mark - Device
@@ -313,57 +302,6 @@ static NSString *ProbeSysctlString(const char *name)
     if (jitMemory != MAP_FAILED) {
         munmap(jitMemory, pageSize);
     }
-
-    return result;
-}
-
-#pragma mark - XPC round trip
-
-- (NSDictionary *)xpcProbeWithProxy:(id<ProbeServiceProtocol>)proxy
-{
-    NSMutableDictionary *result = [NSMutableDictionary dictionary];
-
-    if (proxy == nil) {
-        result[@"skipped"] = @"no XPC proxy";
-        return result;
-    }
-
-    const int count = 10;
-    int completed = 0;
-    uint64_t started = mach_absolute_time();
-
-    for (int index = 0; index < count; index++) {
-        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-        __block int64_t value = 0;
-
-        [proxy pingWithReply:^(int64_t replyValue) {
-            value = replyValue;
-            dispatch_semaphore_signal(semaphore);
-        }];
-
-        dispatch_time_t timeout =
-            dispatch_time(DISPATCH_TIME_NOW, (int64_t)(500 * NSEC_PER_MSEC));
-        if (dispatch_semaphore_wait(semaphore, timeout) != 0) {
-            result[@"timeoutAtIndex"] = @(index);
-            break;
-        }
-        if (value != 42) {
-            result[@"badReply"] = @(value);
-            break;
-        }
-        completed++;
-    }
-
-    uint64_t ended = mach_absolute_time();
-    mach_timebase_info_data_t timebase;
-    mach_timebase_info(&timebase);
-    double nanoseconds =
-        (double)(ended - started) * (double)timebase.numer / (double)timebase.denom;
-
-    result[@"roundTrips"] = @(completed);
-    result[@"totalMicroseconds"] = @(nanoseconds / 1000.0);
-    result[@"microsecondsPerRoundTrip"] =
-        completed > 0 ? @(nanoseconds / 1000.0 / completed) : @0;
 
     return result;
 }

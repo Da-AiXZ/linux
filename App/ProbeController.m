@@ -1,8 +1,10 @@
 #import "ProbeController.h"
 
-#import "ProbeXPCProtocol.h"
-
+#import <dlfcn.h>
 #import <signal.h>
+#import <stdint.h>
+#import <stdlib.h>
+#import <string.h>
 
 /*
  * Private Foundation class. It is used by the system to launch embedded
@@ -18,76 +20,32 @@
 - (void)_kill:(int)sig;
 @end
 
-@class ProbeController;
-
-@interface ProbeController (ProbeInternal)
-- (void)log:(NSString *)line;
-- (void)finish;
-@end
-
-#pragma mark - XPC service
-
-@interface ProbeService : NSObject <ProbeServiceProtocol, NSXPCListenerDelegate>
-
-@property (nonatomic, weak) ProbeController *controller;
-@property (nonatomic, strong) NSXPCConnection *connection;
-
-@end
-
-@implementation ProbeService
-
-- (BOOL)listener:(NSXPCListener *)listener
-    shouldAcceptNewConnection:(NSXPCConnection *)newConnection
-{
-    newConnection.exportedInterface =
-        [NSXPCInterface interfaceWithProtocol:@protocol(ProbeServiceProtocol)];
-    newConnection.exportedObject = self;
-    [newConnection resume];
-    self.connection = newConnection;
-    return YES;
-}
-
-- (void)logJSON:(NSString *)json withReply:(void (^)(void))reply
-{
-    [self.controller log:[NSString stringWithFormat:@"[xpc] %@", json]];
-
-    if (reply != nil) {
-        reply();
-    }
-
-    if ([json containsString:@"\"done\":true"]) {
-        __weak typeof(self) weakSelf = self;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                     (int64_t)(0.3 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            [weakSelf.controller finish];
-        });
-    }
-}
-
-- (void)pingWithReply:(void (^)(int64_t value))reply
-{
-    if (reply != nil) {
-        reply(42);
-    }
-}
-
-@end
-
-#pragma mark - Controller
+typedef char *(*ProbeIssueExtensionFn)(const char *extensionClass,
+                                       const char *path,
+                                       uint32_t flags);
 
 @interface ProbeController ()
 
 @property (nonatomic, strong) id extension;
 @property (nonatomic, strong) NSUUID *requestID;
-@property (nonatomic, strong) NSXPCListener *listener;
-@property (nonatomic, strong) ProbeService *service;
+@property (nonatomic, copy) NSString *resultsPath;
+@property (nonatomic, strong) NSMutableData *lineBuffer;
+@property (nonatomic, assign) NSUInteger readOffset;
 @property (atomic, assign) BOOL running;
 @property (atomic, assign) BOOL completed;
 
 @end
 
 @implementation ProbeController
+
+- (instancetype)init
+{
+    self = [super init];
+    if (self) {
+        _lineBuffer = [NSMutableData data];
+    }
+    return self;
+}
 
 - (BOOL)start
 {
@@ -122,87 +80,137 @@
         return NO;
     }
 
-    [self log:[NSString stringWithFormat:@"extension bundle: %@", extensionPath]];
-
     /*
-     * NSXPCListenerEndpoint is the one transport object that the extension
-     * item serializer accepts. It is the same mechanism Nyxian uses for its
-     * PEEndpoint. Custom NSSecureCoding objects and NSFileHandle both make
-     * PlugInKit fail with NSCocoaErrorDomain 4097.
+     * The extension item serializer on iPadOS 16.6.1 only accepts
+     * property-list values. Custom Mach ports, NSFileHandle and
+     * NSXPCListenerEndpoint all make PlugInKit fail with error 4097.
+     *
+     * Use a plain item and hand over a sandbox extension token for a
+     * results file in the host's container. The extension consumes the
+     * token and appends JSON lines; the host polls the file.
      */
-    NSXPCListener *listener = [NSXPCListener anonymousListener];
-    ProbeService *service = [ProbeService new];
-    service.controller = self;
-    listener.delegate = service;
-    [listener resume];
+    NSString *resultsPath =
+        [NSTemporaryDirectory() stringByAppendingPathComponent:
+            @"linux-probe-results.jsonl"];
+    [[NSFileManager defaultManager] removeItemAtPath:resultsPath error:nil];
+    [[NSFileManager defaultManager] createFileAtPath:resultsPath
+                                             contents:[NSData data]
+                                           attributes:nil];
+
+    ProbeIssueExtensionFn issue =
+        (ProbeIssueExtensionFn)dlsym(RTLD_DEFAULT,
+                                     "sandbox_extension_issue_file");
+    char *rawToken = NULL;
+    if (issue != NULL) {
+        rawToken = issue("com.apple.app-sandbox.read-write",
+                         resultsPath.fileSystemRepresentation,
+                         0);
+    }
+
+    NSString *token = nil;
+    if (rawToken != NULL) {
+        token = [NSString stringWithUTF8String:rawToken];
+        free(rawToken);
+    }
+    if (token.length == 0) {
+        [self log:@"warning: could not issue a sandbox extension token."];
+    }
 
     NSExtensionItem *item = [NSExtensionItem new];
     item.userInfo = @{
-        @"endpoint": listener.endpoint,
+        @"resultsPath": resultsPath,
+        @"resultsToken": token ?: @"",
         @"hostPid": @(getpid()),
     };
 
     NSError *requestError = nil;
     NSUUID *request = [extension beginExtensionRequestWithInputItems:@[item]
                                                                error:&requestError];
-    if (request != nil) {
-        self.extension = extension;
-        self.requestID = request;
-        self.listener = listener;
-        self.service = service;
-        self.running = YES;
+    if (request == nil) {
+        [self log:[NSString stringWithFormat:@"extension launch failed: %@",
+                   [self describeError:requestError]]];
+        return NO;
+    }
 
-        pid_t extensionPid = [extension pidForRequestIdentifier:request];
-        [self log:[NSString stringWithFormat:
-                   @"xpc launch ok: request=%@ pid=%d hostPid=%d",
-                   request.UUIDString,
-                   extensionPid,
-                   getpid()]];
+    self.extension = extension;
+    self.requestID = request;
+    self.resultsPath = resultsPath;
+    self.lineBuffer = [NSMutableData data];
+    self.readOffset = 0;
+    self.running = YES;
 
-        __weak typeof(self) weakSelf = self;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                     (int64_t)(20.0 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            if (weakSelf.running) {
-                [weakSelf log:@"probe timed out."];
-                [weakSelf finish];
+    pid_t extensionPid = [extension pidForRequestIdentifier:request];
+    [self log:[NSString stringWithFormat:
+               @"launch ok: request=%@ pid=%d hostPid=%d",
+               request.UUIDString,
+               extensionPid,
+               getpid()]];
+    [self log:[NSString stringWithFormat:@"results: %@", resultsPath]];
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                 (int64_t)(20.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (weakSelf.running) {
+            [weakSelf log:@"probe timed out."];
+            [weakSelf finish];
+        }
+    });
+
+    [self pollResults];
+    return YES;
+}
+
+- (void)pollResults
+{
+    if (!self.running) {
+        return;
+    }
+
+    NSData *data = [NSData dataWithContentsOfFile:self.resultsPath];
+    if (data.length > self.readOffset) {
+        NSData *chunk = [data subdataWithRange:
+            NSMakeRange(self.readOffset, data.length - self.readOffset)];
+        self.readOffset = data.length;
+        [self.lineBuffer appendData:chunk];
+
+        const uint8_t newline = '\n';
+        NSData *newlineData = [NSData dataWithBytes:&newline length:1];
+
+        while (self.running) {
+            NSRange range = [self.lineBuffer rangeOfData:newlineData
+                                                 options:0
+                                                   range:NSMakeRange(0, self.lineBuffer.length)];
+            if (range.location == NSNotFound) {
+                break;
             }
-        });
-        return YES;
+
+            NSData *line = [self.lineBuffer subdataWithRange:
+                NSMakeRange(0, range.location)];
+            [self.lineBuffer replaceBytesInRange:
+                NSMakeRange(0, range.location + 1)
+                                       withBytes:NULL
+                                          length:0];
+
+            NSString *json = [[NSString alloc] initWithData:line
+                                                   encoding:NSUTF8StringEncoding];
+            if (json.length > 0) {
+                [self log:[NSString stringWithFormat:@"[file] %@", json]];
+            }
+
+            if ([json containsString:@"\"done\":true"]) {
+                [self finish];
+                return;
+            }
+        }
     }
 
-    [self log:[NSString stringWithFormat:@"xpc launch failed: %@",
-               [self describeError:requestError]]];
-    [listener invalidate];
-
-    /*
-     * Diagnostic fallback: plain property-list item. This should still
-     * launch; if it does, the extension is healthy and only the transport
-     * object is the problem.
-     */
-    NSExtensionItem *plainItem = [NSExtensionItem new];
-    plainItem.userInfo = @{
-        @"hostPid": @(getpid()),
-        @"noTransport": @YES,
-    };
-
-    NSError *plainError = nil;
-    NSUUID *plainRequest =
-        [extension beginExtensionRequestWithInputItems:@[plainItem]
-                                                 error:&plainError];
-    if (plainRequest != nil) {
-        pid_t plainPid = [extension pidForRequestIdentifier:plainRequest];
-        [self log:[NSString stringWithFormat:
-                   @"plain launch succeeded (pid=%d); the XPC endpoint is the problem.",
-                   plainPid]];
-        [extension _kill:SIGKILL];
-    } else {
-        [self log:[NSString stringWithFormat:
-                   @"plain launch also failed: %@",
-                   [self describeError:plainError]]];
-    }
-
-    return NO;
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                 (int64_t)(0.3 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [weakSelf pollResults];
+    });
 }
 
 - (void)stop
@@ -217,12 +225,6 @@
     }
     self.completed = YES;
     self.running = NO;
-
-    [self.listener invalidate];
-    self.listener = nil;
-
-    [self.service.connection invalidate];
-    self.service = nil;
 
     [self log:@"probe finished."];
 
