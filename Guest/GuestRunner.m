@@ -4,6 +4,7 @@
 #import <errno.h>
 #import <fcntl.h>
 #import <mach/mach.h>
+#import <mach/thread_act.h>
 #import <mach/vm_map.h>
 #import <mach-o/dyld.h>
 #import <pthread.h>
@@ -31,9 +32,27 @@
 extern int ptrace(int request, pid_t pid, caddr_t addr, int data);
 extern boolean_t exc_server(mach_msg_header_t *request,
                             mach_msg_header_t *reply);
+extern void sys_icache_invalidate(void *start, size_t length);
+extern int csops(pid_t pid, unsigned int operation, void *buffer, size_t size);
 
 #define GUEST_PT_TRACE_ME 0
 #define GUEST_PT_SIGEXC 12
+
+#define GUEST_CS_OPS_STATUS 0
+#define GUEST_CS_DEBUGGED 0x10000000
+
+#define GUEST_ARM_THREAD_STATE64 6
+#define GUEST_ARM_THREAD_STATE64_COUNT (68)
+
+typedef struct {
+    uint64_t x[29];
+    uint64_t fp;
+    uint64_t lr;
+    uint64_t sp;
+    uint64_t pc;
+    uint32_t cpsr;
+    uint32_t padding;
+} GuestThreadState64;
 
 #define ELF_ET_DYN 3
 #define ELF_EM_AARCH64 183
@@ -83,12 +102,58 @@ kern_return_t catch_exception_raise(mach_port_t exception_port,
                                     exception_data_t code,
                                     mach_msg_type_number_t code_count)
 {
+    fprintf(stdout,
+            "[guest] exception type=%d code=0x%llx count=%u\n",
+            (int)exception,
+            code_count > 0 ? (unsigned long long)code[0] : 0ULL,
+            (unsigned)code_count);
     return KERN_FAILURE;
+}
+
+static void GuestLogCodeSignState(const char *tag)
+{
+    uint32_t flags = 0;
+    int result = csops(getpid(), GUEST_CS_OPS_STATUS, &flags, sizeof(flags));
+    fprintf(stdout, "[guest] %s: csops=%d flags=0x%08x debugged=%d\n",
+            tag,
+            result,
+            flags,
+            (flags & GUEST_CS_DEBUGGED) ? 1 : 0);
+}
+
+static uint32_t GuestJITSelfTest(void)
+{
+    uint32_t *page = mmap(NULL,
+                          0x4000,
+                          PROT_READ | PROT_WRITE,
+                          MAP_PRIVATE | MAP_ANON,
+                          -1,
+                          0);
+    if (page == MAP_FAILED) {
+        fprintf(stderr, "[guest] selftest mmap failed: %s\n", strerror(errno));
+        return 0;
+    }
+
+    page[0] = 0x52800540; /* mov w0, #42 */
+    page[1] = 0xD65F03C0; /* ret */
+    sys_icache_invalidate(page, 8);
+
+    if (mprotect(page, 0x4000, PROT_READ | PROT_EXEC) != 0) {
+        fprintf(stderr, "[guest] selftest mprotect failed: %s\n",
+                strerror(errno));
+        return 0;
+    }
+    sys_icache_invalidate(page, 8);
+
+    uint32_t (*function)(void) = (uint32_t (*)(void))page;
+    uint32_t value = function();
+    munmap(page, 0x4000);
+    return value;
 }
 
 static void *GuestExceptionThread(void *argument)
 {
-    mach_port_t port = *(mach_port_t *)argument;
+    mach_port_t port = (mach_port_t)(uintptr_t)argument;
     mach_msg_server(exc_server, 2048, port, 0);
     return NULL;
 }
@@ -101,7 +166,11 @@ static BOOL GuestEnableJIT(void)
         return NO;
     }
 
-    ptrace(GUEST_PT_SIGEXC, 0, NULL, 0);
+    errno = 0;
+    int sigexcResult = ptrace(GUEST_PT_SIGEXC, 0, NULL, 0);
+    fprintf(stdout, "[guest] ptrace(PT_SIGEXC)=%d errno=%d\n",
+            sigexcResult,
+            sigexcResult < 0 ? errno : 0);
 
     mach_port_t port = MACH_PORT_NULL;
     if (mach_port_allocate(mach_task_self(),
@@ -121,7 +190,10 @@ static BOOL GuestEnableJIT(void)
                              THREAD_STATE_NONE);
 
     pthread_t thread;
-    if (pthread_create(&thread, NULL, GuestExceptionThread, &port) != 0) {
+    if (pthread_create(&thread,
+                       NULL,
+                       GuestExceptionThread,
+                       (void *)(uintptr_t)port) != 0) {
         return NO;
     }
 
@@ -160,6 +232,18 @@ static uint64_t GuestErrno(void)
 
 uint64_t GuestSyscallDispatch(uint64_t *args, uint64_t number)
 {
+    static unsigned int traceCount = 0;
+    if (traceCount < 64) {
+        traceCount++;
+        fprintf(stdout,
+                "[guest] svc %llu x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx\n",
+                (unsigned long long)number,
+                (unsigned long long)args[0],
+                (unsigned long long)args[1],
+                (unsigned long long)args[2],
+                (unsigned long long)args[3]);
+    }
+
     switch (number) {
     case 64: { /* write */
         ssize_t result = write((int)args[0],
@@ -330,6 +414,44 @@ static void GuestJump(uint64_t entry, uint64_t stack)
                      :: "r"(stack), "r"(entry) : "memory");
 }
 
+typedef struct {
+    uint64_t entry;
+    uint64_t stack;
+} GuestStartContext;
+
+static void *GuestStartThread(void *argument)
+{
+    GuestStartContext *context = (GuestStartContext *)argument;
+    GuestJump(context->entry, context->stack);
+    return NULL;
+}
+
+static void GuestDumpThread(pthread_t thread, const char *tag)
+{
+    GuestThreadState64 state;
+    mach_msg_type_number_t count = GUEST_ARM_THREAD_STATE64_COUNT;
+    kern_return_t result = thread_get_state(pthread_mach_thread_np(thread),
+                                            GUEST_ARM_THREAD_STATE64,
+                                            (thread_state_t)&state,
+                                            &count);
+    if (result != KERN_SUCCESS) {
+        fprintf(stderr, "[guest] %s: thread_get_state=%d\n", tag, result);
+        return;
+    }
+
+    fprintf(stdout,
+            "[guest] %s: pc=0x%llx sp=0x%llx lr=0x%llx fp=0x%llx "
+            "x0=0x%llx x1=0x%llx x8=0x%llx\n",
+            tag,
+            (unsigned long long)state.pc,
+            (unsigned long long)state.sp,
+            (unsigned long long)state.lr,
+            (unsigned long long)state.fp,
+            (unsigned long long)state.x[0],
+            (unsigned long long)state.x[1],
+            (unsigned long long)state.x[8]);
+}
+
 static int GuestLoadAndRun(const char *path)
 {
     NSString *pathString = [NSString stringWithUTF8String:path];
@@ -438,9 +560,19 @@ static int GuestLoadAndRun(const char *path)
             }
             uint32_t immediate = ((uint32_t)(delta >> 2)) & 0x03FFFFFF;
             *(uint32_t *)(start + offset) = 0x94000000 | immediate;
+            if (patched < 8) {
+                fprintf(stdout,
+                        "[guest] patch site=0x%lx trampoline=0x%lx "
+                        "delta=0x%llx word=0x%08x\n",
+                        (unsigned long)(start + offset),
+                        (unsigned long)(uintptr_t)&GuestSyscallTrampoline,
+                        (unsigned long long)delta,
+                        *(uint32_t *)(start + offset));
+            }
             patched++;
         }
     }
+    sys_icache_invalidate((void *)imageStart, (size_t)imageSize);
     fprintf(stdout, "[guest] loaded %s base=0x%lx size=0x%llx patched=%u\n",
             path,
             (unsigned long)base,
@@ -471,6 +603,7 @@ static int GuestLoadAndRun(const char *path)
             return 1;
         }
     }
+    sys_icache_invalidate((void *)imageStart, (size_t)imageSize);
 
     size_t heapSize = 64 * 1024 * 1024;
     GuestHeapBase = (uintptr_t)mmap(NULL,
@@ -508,13 +641,39 @@ static int GuestLoadAndRun(const char *path)
     stackPointer = (uint64_t)cursor;
 
     uint64_t entry = base + header->e_entry;
-    fprintf(stdout, "[guest] entry=0x%llx stack=0x%llx\n",
+    const uint32_t *entryWords =
+        (const uint32_t *)(imageStart + (header->e_entry - minAddress));
+    fprintf(stdout,
+            "[guest] entry=0x%llx stack=0x%llx words=%08x %08x %08x %08x %08x\n",
             (unsigned long long)entry,
-            (unsigned long long)stackPointer);
+            (unsigned long long)stackPointer,
+            entryWords[0],
+            entryWords[1],
+            entryWords[2],
+            entryWords[3],
+            entryWords[4]);
     fflush(stdout);
 
-    GuestJump(entry, stackPointer);
-    return 0;
+    GuestStartContext context;
+    context.entry = entry;
+    context.stack = stackPointer;
+
+    pthread_t guestThread;
+    if (pthread_create(&guestThread, NULL, GuestStartThread, &context) != 0) {
+        fprintf(stderr, "[guest] guest thread create failed\n");
+        return 1;
+    }
+
+    struct timespec delay = { 1, 0 };
+    nanosleep(&delay, NULL);
+    GuestDumpThread(guestThread, "watchdog1");
+    delay.tv_sec = 2;
+    delay.tv_nsec = 0;
+    nanosleep(&delay, NULL);
+    GuestDumpThread(guestThread, "watchdog2");
+    fprintf(stdout, "[guest] watchdog: guest still running, aborting\n");
+    fflush(stdout);
+    _exit(4);
 }
 
 int main(int argc, char *argv[])
@@ -528,11 +687,20 @@ int main(int argc, char *argv[])
             fprintf(stderr, "[guest] usage: guest-runner <elf>\n");
             return 2;
         }
+        GuestLogCodeSignState("before");
         if (!GuestEnableJIT()) {
             fprintf(stderr, "[guest] JIT unavailable\n");
             return 3;
         }
+        GuestLogCodeSignState("after");
         fprintf(stdout, "[guest] jit enabled\n");
+
+        uint32_t selfTest = GuestJITSelfTest();
+        fprintf(stdout, "[guest] selftest=%u\n", selfTest);
+        if (selfTest != 42) {
+            fprintf(stderr, "[guest] self-test failed, aborting\n");
+            return 5;
+        }
 
         return GuestLoadAndRun(argv[1]);
     }
