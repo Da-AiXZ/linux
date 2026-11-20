@@ -112,11 +112,41 @@
         @"hostPid": @(getpid()),
     };
 
+    NSError *requestError = nil;
     NSUUID *request = [extension beginExtensionRequestWithInputItems:@[item]
-                                                               error:&error];
+                                                               error:&requestError];
     if (request == nil) {
         [self log:[NSString stringWithFormat:@"beginExtensionRequest failed: %@",
-                   error.localizedDescription ?: @"unknown error"]];
+                   requestError.localizedDescription ?: @"unknown error"]];
+
+        /*
+         * Diagnostic fallback: launch the same extension with a plain
+         * property-list item. If this succeeds, the extension itself is
+         * healthy and the custom Mach-port object is the problem. If it
+         * also fails, the extension bundle/signature/registration is the
+         * problem.
+         */
+        NSExtensionItem *plainItem = [NSExtensionItem new];
+        plainItem.userInfo = @{
+            @"hostPid": @(getpid()),
+            @"noPort": @YES,
+        };
+        NSError *plainError = nil;
+        NSUUID *plainRequest =
+            [extension beginExtensionRequestWithInputItems:@[plainItem]
+                                                     error:&plainError];
+        if (plainRequest != nil) {
+            pid_t plainPid = [extension pidForRequestIdentifier:plainRequest];
+            [self log:[NSString stringWithFormat:
+                       @"plain launch succeeded (pid=%d); the Mach-port item is the problem.",
+                       plainPid]];
+            [extension _kill:SIGKILL];
+        } else {
+            [self log:[NSString stringWithFormat:
+                       @"plain launch also failed: %@",
+                       plainError.localizedDescription ?: @"unknown error"]];
+        }
+
         mach_port_destroy(mach_task_self(), receivePort);
         return NO;
     }

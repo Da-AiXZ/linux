@@ -37,6 +37,8 @@ extern kern_return_t task_for_pid(mach_port_t target_task,
         id portObject = input[@"port"];
 
         if (![portObject isKindOfClass:[ProbeMachPort class]]) {
+            NSLog(@"ProbeExtension: no ProbeMachPort in input (noPort=%@)",
+                  input[@"noPort"]);
             [context completeRequestReturningItems:nil completionHandler:nil];
             return;
         }
@@ -352,3 +354,13 @@ static NSString *ProbeSysctlString(const char *name)
 }
 
 @end
+
+/*
+ * The principal class is instantiated by name from Info.plist. Keep an
+ * explicit reference so Release dead-code stripping cannot remove it.
+ */
+__attribute__((constructor))
+static void ProbeExtensionKeepPrincipalClass(void)
+{
+    (void)[ProbeExtension class];
+}
