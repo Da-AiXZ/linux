@@ -818,7 +818,7 @@ static int GuestLoadAndRun(int argc, char *argv[])
     GuestStackTop = (uint64_t)stack + stackSize;
 
     int guestArgc = argc > 2 ? argc - 2 : 1;
-    char *fallbackArgv[] = { (char *)"busybox" };
+    char *fallbackArgv[] = { (char *)"guest" };
     char **guestArgv = argc > 2 ? argv + 2 : fallbackArgv;
 
     uint64_t entry = base + header->e_entry;
