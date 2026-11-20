@@ -46,9 +46,10 @@ jobs:
           APP="build/Build/Products/Release-iphoneos/Probe.app"
           test -d "$APP"
           rm -rf Payload PayloadUnsigned LinuxProbe.ipa LinuxProbe-unsigned.ipa
-          mkdir Payload PayloadUnsigned
+          mkdir Payload
+          mkdir -p PayloadUnsigned/Payload
           ditto "$APP" "Payload/Probe.app"
-          ditto "$APP" "PayloadUnsigned/Probe.app"
+          ditto "$APP" "PayloadUnsigned/Payload/Probe.app"
 
           # Unsigned variant: let TrollStore perform the complete signature
           # pass if the pre-signed appex is rejected by PlugInKit.
