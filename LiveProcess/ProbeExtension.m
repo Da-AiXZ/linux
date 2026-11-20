@@ -32,7 +32,8 @@ extern kern_return_t task_for_pid(mach_port_t target_task,
 - (void)beginRequestWithExtensionContext:(NSExtensionContext *)context
 {
     @autoreleasepool {
-        NSDictionary *input = context.inputItems.firstObject.userInfo;
+        NSExtensionItem *item = context.inputItems.firstObject;
+        NSDictionary *input = item.userInfo;
         id portObject = input[@"port"];
 
         if (![portObject isKindOfClass:[ProbeMachPort class]]) {
