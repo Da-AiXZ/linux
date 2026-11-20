@@ -49,7 +49,9 @@ jobs:
           test -f "$HELPER"
           mkdir -p "$APP/Helpers"
           cp "$HELPER" "$APP/Helpers/probe-helper"
+          cp "$HELPER" "$APP/Helpers/probe-helper.dat"
           chmod 755 "$APP/Helpers/probe-helper"
+          chmod 644 "$APP/Helpers/probe-helper.dat"
           rm -rf Payload PayloadUnsigned LinuxProbe.ipa LinuxProbe-unsigned.ipa
           mkdir Payload
           mkdir -p PayloadUnsigned/Payload

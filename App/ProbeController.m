@@ -4,6 +4,7 @@
 #import <dlfcn.h>
 #import <errno.h>
 #import <mach/mach.h>
+#import <objc/runtime.h>
 #import <signal.h>
 #import <spawn.h>
 #import <stdint.h>
@@ -54,6 +55,8 @@ typedef char *(*ProbeIssueExtensionFn)(const char *extensionClass,
 - (void)handleJSON:(NSString *)json;
 - (BOOL)startExtensionWithResultsPath:(NSString *)resultsPath
                           serviceName:(NSString *)serviceName;
+- (NSString *)describeExtensionAPI:(id)extension;
+- (NSString *)resolveHelperPath;
 - (void)drainHelperBuffer:(NSMutableData *)buffer;
 
 @end
@@ -184,13 +187,75 @@ static CFDataRef ProbeMessagePortCallback(CFMessagePortRef localPort,
 
 #pragma mark - Direct spawn route
 
+- (NSString *)resolveHelperPath
+{
+    NSFileManager *manager = [NSFileManager defaultManager];
+    NSString *helpers = [NSBundle.mainBundle.bundlePath
+        stringByAppendingPathComponent:@"Helpers"];
+
+    BOOL isDirectory = NO;
+    BOOL directoryExists = [manager fileExistsAtPath:helpers
+                                         isDirectory:&isDirectory];
+    NSError *listError = nil;
+    NSArray *entries = directoryExists
+        ? [manager contentsOfDirectoryAtPath:helpers error:&listError]
+        : nil;
+    [self log:[NSString stringWithFormat:
+               @"helpers: %@ exists=%d isDir=%d entries=%@",
+               helpers,
+               directoryExists,
+               isDirectory,
+               entries ?: (listError.localizedDescription ?: @[])]];
+
+    NSArray *names = @[ @"probe-helper", @"probe-helper.dat" ];
+    for (NSString *name in names) {
+        NSString *candidate = [helpers stringByAppendingPathComponent:name];
+        BOOL exists = [manager fileExistsAtPath:candidate];
+        BOOL executable = [manager isExecutableFileAtPath:candidate];
+        NSDictionary *attributes = [manager attributesOfItemAtPath:candidate
+                                                             error:NULL];
+        [self log:[NSString stringWithFormat:
+                   @"helper candidate %@ exists=%d exec=%d mode=%o size=%llu",
+                   name,
+                   exists,
+                   executable,
+                   [attributes[NSFilePosixPermissions] unsignedIntValue],
+                   [attributes[NSFileSize] unsignedLongLongValue]]];
+
+        if (!exists) {
+            continue;
+        }
+        if (executable) {
+            return candidate;
+        }
+
+        /* The install lost the exec bit; run a writable copy instead. */
+        NSString *copyPath = [NSTemporaryDirectory()
+            stringByAppendingPathComponent:@"probe-helper-bin"];
+        [manager removeItemAtPath:copyPath error:nil];
+        NSError *copyError = nil;
+        if ([manager copyItemAtPath:candidate
+                             toPath:copyPath
+                              error:&copyError]) {
+            [manager setAttributes:@{ NSFilePosixPermissions: @0755 }
+                        ofItemAtPath:copyPath
+                               error:NULL];
+            [self log:[NSString stringWithFormat:@"helper copied to %@",
+                       copyPath]];
+            return copyPath;
+        }
+        [self log:[NSString stringWithFormat:@"helper copy failed: %@",
+                   copyError.localizedDescription ?: @"unknown"]];
+    }
+
+    return nil;
+}
+
 - (void)spawnHelper:(NSString *)resultsPath serviceName:(NSString *)serviceName
 {
-    NSString *path = [NSBundle.mainBundle.bundlePath
-        stringByAppendingPathComponent:@"Helpers/probe-helper"];
-
-    if (![[NSFileManager defaultManager] isExecutableFileAtPath:path]) {
-        [self log:@"helper missing: Helpers/probe-helper"];
+    NSString *path = [self resolveHelperPath];
+    if (path == nil) {
+        [self log:@"helper missing; direct-spawn route skipped."];
         self.helperFinished = YES;
         return;
     }
@@ -350,6 +415,11 @@ static CFDataRef ProbeMessagePortCallback(CFMessagePortRef localPort,
         return NO;
     }
 
+    NSDictionary *extensionInfo = extensionBundle.infoDictionary[@"NSExtension"];
+    [self log:[NSString stringWithFormat:@"extension plist: %@",
+               extensionInfo ?: @"missing"]];
+    [self log:[self describeExtensionAPI:extension]];
+
     /*
      * The extension item serializer on iPadOS 16.6.1 only accepts
      * property-list values. Custom Mach ports, NSFileHandle and
@@ -376,6 +446,9 @@ static CFDataRef ProbeMessagePortCallback(CFMessagePortRef localPort,
     }
     if (token.length == 0) {
         [self log:@"warning: could not issue a sandbox extension token."];
+    } else {
+        [self log:[NSString stringWithFormat:@"sandbox token length: %lu",
+                   (unsigned long)token.length]];
     }
 
     NSExtensionItem *item = [NSExtensionItem new];
@@ -556,6 +629,36 @@ static CFDataRef ProbeMessagePortCallback(CFMessagePortRef localPort,
     if (completion != nil) {
         dispatch_async(dispatch_get_main_queue(), completion);
     }
+}
+
+- (NSString *)describeExtensionAPI:(id)extension
+{
+    NSMutableArray *names = [NSMutableArray array];
+    Class cls = [extension class];
+
+    for (int level = 0; level < 2 && cls != Nil; level++) {
+        unsigned int count = 0;
+        Method *methods = class_copyMethodList(cls, &count);
+        for (unsigned int i = 0; i < count; i++) {
+            NSString *name = NSStringFromSelector(method_getName(methods[i]));
+            if ([name rangeOfString:@"egin"].location != NSNotFound ||
+                [name rangeOfString:@"omplet"].location != NSNotFound ||
+                [name rangeOfString:@"uest"].location != NSNotFound) {
+                [names addObject:name];
+            }
+        }
+        free(methods);
+        cls = class_getSuperclass(cls);
+    }
+
+    [names sortUsingSelector:@selector(compare:)];
+    if (names.count > 24) {
+        names = [[names subarrayWithRange:NSMakeRange(0, 24)] mutableCopy];
+    }
+
+    return [NSString stringWithFormat:@"NSExtension API (%@): %@",
+            NSStringFromClass([extension class]),
+            [names componentsJoinedByString:@", "]];
 }
 
 - (NSString *)describeError:(NSError *)error

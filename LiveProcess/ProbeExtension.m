@@ -40,6 +40,13 @@ extern kern_return_t task_for_pid(mach_port_t target_task,
 - (void)beginRequestWithExtensionContext:(NSExtensionContext *)context
 {
     @autoreleasepool {
+        /*
+         * Liveness ping. This runs before anything else, so a silent run
+         * tells us the request never reached this method.
+         */
+        [self sendURLPayload:@{ @"stage": @"hello", @"alive": @YES }
+                     context:context];
+
         NSExtensionItem *item = context.inputItems.firstObject;
         NSDictionary *input = item.userInfo;
 
@@ -56,12 +63,6 @@ extern kern_return_t task_for_pid(mach_port_t target_task,
             _remotePort = CFMessagePortCreateRemote(
                 kCFAllocatorDefault,
                 (__bridge CFStringRef)serviceName);
-        }
-
-        if (!hasPath && _remotePort == NULL) {
-            NSLog(@"ProbeExtension: no results transport in input");
-            [context completeRequestReturningItems:nil completionHandler:nil];
-            return;
         }
 
         if (hasPath && [token isKindOfClass:[NSString class]]
@@ -93,12 +94,6 @@ extern kern_return_t task_for_pid(mach_port_t target_task,
             }
         }
 
-        if (_resultsFD < 0 && _remotePort == NULL) {
-            NSLog(@"ProbeExtension: no usable results transport");
-            [context completeRequestReturningItems:nil completionHandler:nil];
-            return;
-        }
-
         pid_t hostPid = hostPidNumber != nil ? hostPidNumber.intValue : 0;
         NSMutableArray *stages = [NSMutableArray array];
 
@@ -107,8 +102,13 @@ extern kern_return_t task_for_pid(mach_port_t target_task,
         device[@"pid"] = @(getpid());
         device[@"hostPid"] = @(hostPid);
         device[@"device"] = [self deviceInfo];
+        device[@"fileWritable"] = @(_resultsFD >= 0);
+        device[@"portCreated"] = @(_remotePort != NULL);
         [stages addObject:device];
         [self sendJSON:device];
+        [self sendURLPayload:@{ @"stage": @"device",
+                                @"device": device }
+                     context:context];
 
         /*
          * Each risky probe is its own stage, so a crash still leaves the
@@ -120,6 +120,9 @@ extern kern_return_t task_for_pid(mach_port_t target_task,
         };
         [stages addObject:process];
         [self sendJSON:process];
+        [self sendURLPayload:@{ @"stage": @"process",
+                                @"process": process }
+                     context:context];
 
         /*
          * The plain-item launch path cannot carry a Mach port or XPC
@@ -133,6 +136,8 @@ extern kern_return_t task_for_pid(mach_port_t target_task,
         };
         [stages addObject:ipc];
         [self sendJSON:ipc];
+        [self sendURLPayload:@{ @"stage": @"ipc", @"ipc": ipc }
+                     context:context];
 
         /*
          * JIT is deliberately last. If executing the RX page faults, the
@@ -144,15 +149,19 @@ extern kern_return_t task_for_pid(mach_port_t target_task,
         };
         [stages addObject:jit];
         [self sendJSON:jit];
+        [self sendURLPayload:@{ @"stage": @"jit", @"jit": jit }
+                     context:context];
+
+        [self sendURLPayload:@{ @"stage": @"done", @"done": @YES }
+                     context:context];
+        [self sendJSON:@{@"done": @YES}];
 
         /*
-         * URL-scheme return channel. The extension item serializer also
-         * rejects NSXPCListenerEndpoint on this OS, but openURL works and
-         * only needs a string URL scheme registered by the host app.
+         * Canonical app-extension return channel. The host may receive
+         * these items through its private NSExtension request completion
+         * handler.
          */
-        [self sendURLWithStages:stages done:YES context:context];
-
-        [self sendJSON:@{@"done": @YES}];
+        [self completeWithStages:stages context:context];
 
         if (_remotePort != NULL) {
             CFMessagePortInvalidate(_remotePort);
@@ -163,20 +172,43 @@ extern kern_return_t task_for_pid(mach_port_t target_task,
             close(_resultsFD);
             _resultsFD = -1;
         }
+    }
+}
+
+- (void)completeWithStages:(NSArray *)stages
+                   context:(NSExtensionContext *)context
+{
+    NSData *data = [NSJSONSerialization dataWithJSONObject:@{
+        @"stages": stages,
+        @"done": @YES,
+    } options:0 error:NULL];
+    NSString *text = data != nil
+        ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]
+        : @"{}";
+
+    NSExtensionItem *item = [NSExtensionItem new];
+    item.userInfo = @{ @"probeResult": text ?: @"{}" };
+
+    if ([context respondsToSelector:
+            @selector(completeRequestReturningItems:completionHandler:)]) {
+        [context completeRequestReturningItems:@[item]
+                             completionHandler:nil];
+    } else {
         [context completeRequestReturningItems:nil completionHandler:nil];
     }
 }
 
 #pragma mark - Results file
 
-- (void)sendURLWithStages:(NSArray *)stages
-                     done:(BOOL)done
-                  context:(NSExtensionContext *)context
+- (void)sendURLPayload:(NSDictionary *)payload
+               context:(NSExtensionContext *)context
 {
-    NSDictionary *payload = @{
-        @"stages": stages,
-        @"done": @(done),
-    };
+    if (![context respondsToSelector:
+            @selector(openURL:completionHandler:)]) {
+        NSLog(@"ProbeExtension: openURL is unavailable");
+        return;
+    }
+
     NSData *data = [NSJSONSerialization dataWithJSONObject:payload
                                                    options:0
                                                      error:NULL];
