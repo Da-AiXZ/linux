@@ -58,6 +58,24 @@
 
     [self appendLog:@"Tap Run Probe. Results are printed below."];
     [self appendLog:@"Target: iPad Pro 2021 (M1), iPadOS 16.6.1."];
+
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(handleProbeURL:)
+                                                 name:@"ProbeURLNotification"
+                                               object:nil];
+}
+
+- (void)handleProbeURL:(NSNotification *)notification
+{
+    NSURL *url = notification.userInfo[@"url"];
+    if (self.probe != nil && url != nil) {
+        [self.probe handleURL:url];
+    }
+}
+
+- (void)dealloc
+{
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
 - (void)runProbe:(UIButton *)sender

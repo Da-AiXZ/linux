@@ -100,36 +100,57 @@ extern kern_return_t task_for_pid(mach_port_t target_task,
         }
 
         pid_t hostPid = hostPidNumber != nil ? hostPidNumber.intValue : 0;
+        NSMutableArray *stages = [NSMutableArray array];
 
         NSMutableDictionary *device = [NSMutableDictionary dictionary];
         device[@"stage"] = @"device";
         device[@"pid"] = @(getpid());
         device[@"hostPid"] = @(hostPid);
         device[@"device"] = [self deviceInfo];
+        [stages addObject:device];
         [self sendJSON:device];
 
         /*
          * Each risky probe is its own stage, so a crash still leaves the
-         * earlier results in the host's results file.
+         * earlier results in the host's results file or message port.
          */
-        [self sendJSON:@{@"stage": @"process",
-                         @"process": [self processInfoWithHostPid:hostPid]}];
+        NSDictionary *process = @{
+            @"stage": @"process",
+            @"process": [self processInfoWithHostPid:hostPid],
+        };
+        [stages addObject:process];
+        [self sendJSON:process];
 
         /*
          * The plain-item launch path cannot carry a Mach port or XPC
          * endpoint on this OS, so the IPC latency probe is deferred to the
          * next milestone.
          */
-        [self sendJSON:@{@"stage": @"ipc",
-                         @"ipc": @{@"transport": @"file",
-                                   @"skipped": @YES}}];
+        NSDictionary *ipc = @{
+            @"stage": @"ipc",
+            @"ipc": @{ @"transport": @"file",
+                       @"skipped": @YES },
+        };
+        [stages addObject:ipc];
+        [self sendJSON:ipc];
 
         /*
          * JIT is deliberately last. If executing the RX page faults, the
          * extension dies here and the host still has every earlier result.
          */
-        [self sendJSON:@{@"stage": @"jit",
-                         @"jit": [self jitProbe]}];
+        NSDictionary *jit = @{
+            @"stage": @"jit",
+            @"jit": [self jitProbe],
+        };
+        [stages addObject:jit];
+        [self sendJSON:jit];
+
+        /*
+         * URL-scheme return channel. The extension item serializer also
+         * rejects NSXPCListenerEndpoint on this OS, but openURL works and
+         * only needs a string URL scheme registered by the host app.
+         */
+        [self sendURLWithStages:stages done:YES context:context];
 
         [self sendJSON:@{@"done": @YES}];
 
@@ -147,6 +168,41 @@ extern kern_return_t task_for_pid(mach_port_t target_task,
 }
 
 #pragma mark - Results file
+
+- (void)sendURLWithStages:(NSArray *)stages
+                     done:(BOOL)done
+                  context:(NSExtensionContext *)context
+{
+    NSDictionary *payload = @{
+        @"stages": stages,
+        @"done": @(done),
+    };
+    NSData *data = [NSJSONSerialization dataWithJSONObject:payload
+                                                   options:0
+                                                     error:NULL];
+    if (data == nil) {
+        return;
+    }
+
+    NSString *base64 = [data base64EncodedStringWithOptions:0];
+    NSURLComponents *components =
+        [NSURLComponents componentsWithString:@"linuxprobe://results"];
+    components.queryItems = @[
+        [NSURLQueryItem queryItemWithName:@"payload" value:base64],
+    ];
+
+    NSURL *url = components.URL;
+    if (url == nil) {
+        NSLog(@"ProbeExtension: result URL is too large");
+        return;
+    }
+
+    [context openURL:url completionHandler:^(BOOL success, NSError *error) {
+        if (!success) {
+            NSLog(@"ProbeExtension: openURL failed: %@", error);
+        }
+    }];
+}
 
 - (BOOL)sendJSON:(NSDictionary *)dictionary
 {

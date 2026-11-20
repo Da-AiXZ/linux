@@ -14,4 +14,18 @@ didFinishLaunchingWithOptions:(NSDictionary *)launchOptions
     return YES;
 }
 
+- (BOOL)application:(UIApplication *)application
+            openURL:(NSURL *)url
+            options:(NSDictionary<UIApplicationOpenURLOptionsKey, id> *)options
+{
+    if ([url.scheme isEqualToString:@"linuxprobe"]) {
+        [[NSNotificationCenter defaultCenter]
+            postNotificationName:@"ProbeURLNotification"
+                          object:nil
+                        userInfo:@{ @"url": url }];
+        return YES;
+    }
+    return NO;
+}
+
 @end

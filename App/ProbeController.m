@@ -266,6 +266,59 @@ static CFDataRef ProbeMessagePortCallback(CFMessagePortRef localPort,
     });
 }
 
+- (void)handleURL:(NSURL *)url
+{
+    NSURLComponents *components =
+        [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
+    NSString *payloadString = nil;
+    for (NSURLQueryItem *item in components.queryItems) {
+        if ([item.name isEqualToString:@"payload"]) {
+            payloadString = item.value;
+            break;
+        }
+    }
+
+    if (payloadString.length == 0) {
+        return;
+    }
+
+    NSData *data = [[NSData alloc] initWithBase64EncodedString:payloadString
+                                                       options:0];
+    if (data == nil) {
+        return;
+    }
+
+    id object = [NSJSONSerialization JSONObjectWithData:data
+                                                options:0
+                                                  error:NULL];
+    if (![object isKindOfClass:[NSDictionary class]]) {
+        return;
+    }
+
+    NSDictionary *payload = (NSDictionary *)object;
+    NSArray *stages = payload[@"stages"];
+    if ([stages isKindOfClass:[NSArray class]]) {
+        for (id stage in stages) {
+            if (![stage isKindOfClass:[NSDictionary class]]) {
+                continue;
+            }
+            NSData *stageData = [NSJSONSerialization dataWithJSONObject:stage
+                                                               options:0
+                                                                 error:NULL];
+            NSString *json = stageData != nil
+                ? [[NSString alloc] initWithData:stageData
+                                        encoding:NSUTF8StringEncoding]
+                : nil;
+            [self log:[NSString stringWithFormat:@"[url] %@",
+                       json ?: [stage description]]];
+        }
+    }
+
+    if ([payload[@"done"] boolValue]) {
+        [self finish];
+    }
+}
+
 - (void)handleJSON:(NSString *)json
 {
     if (json.length == 0) {
