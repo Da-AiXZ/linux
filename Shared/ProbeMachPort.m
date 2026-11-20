@@ -78,7 +78,6 @@ extern mach_port_t xpc_dictionary_copy_mach_send(xpc_object_t dictionary,
                                                    &extracted,
                                                    &type);
         if (kr != KERN_SUCCESS) {
-            xpc_release(dictionary);
             return;
         }
         port = extracted;
@@ -88,14 +87,12 @@ extern mach_port_t xpc_dictionary_copy_mach_send(xpc_object_t dictionary,
                                               MACH_PORT_RIGHT_SEND,
                                               1);
         if (kr != KERN_SUCCESS) {
-            xpc_release(dictionary);
             return;
         }
     }
 
     xpc_dictionary_set_mach_send(dictionary, "port", port);
     [(id)coder encodeXPCObject:dictionary forKey:@"port"];
-    xpc_release(dictionary);
 }
 
 - (instancetype)initWithCoder:(NSCoder *)coder
