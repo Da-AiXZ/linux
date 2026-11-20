@@ -1,4 +1,5 @@
 #import "ProbeController.h"
+#import "ProbeMach.h"
 
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
@@ -15,6 +16,10 @@
 #import <unistd.h>
 
 extern char **environ;
+extern mach_port_t bootstrap_port;
+extern kern_return_t bootstrap_check_in(mach_port_t bootstrap,
+                                        const char *name,
+                                        mach_port_t *port);
 extern kern_return_t task_for_pid(mach_port_t target_task,
                                   int pid,
                                   mach_port_t *task);
@@ -47,7 +52,7 @@ typedef char *(*ProbeIssueExtensionFn)(const char *extensionClass,
 @property (nonatomic, copy) NSString *resultsPath;
 @property (nonatomic, strong) NSMutableData *lineBuffer;
 @property (nonatomic, assign) NSUInteger readOffset;
-@property (nonatomic, assign) CFMessagePortRef localPort;
+@property (nonatomic, assign) mach_port_t machServicePort;
 @property (atomic, assign) BOOL running;
 @property (atomic, assign) BOOL completed;
 @property (atomic, assign) BOOL launchAttempted;
@@ -55,8 +60,9 @@ typedef char *(*ProbeIssueExtensionFn)(const char *extensionClass,
 @property (atomic, assign) BOOL startCompleted;
 @property (atomic, assign) pid_t helperPid;
 
-- (void)handleJSON:(NSString *)json;
 - (void)handleDarwinNotification:(NSString *)name;
+- (void)startMachService;
+- (void)startMachReceiver;
 - (BOOL)startExtensionWithResultsPath:(NSString *)resultsPath
                           serviceName:(NSString *)serviceName;
 - (NSString *)describeExtensionAPI:(id)extension;
@@ -68,20 +74,6 @@ typedef char *(*ProbeIssueExtensionFn)(const char *extensionClass,
 - (void)drainHelperBuffer:(NSMutableData *)buffer;
 
 @end
-
-static CFDataRef ProbeMessagePortCallback(CFMessagePortRef localPort,
-                                          SInt32 messageID,
-                                          CFDataRef data,
-                                          void *info)
-{
-    ProbeController *controller = (__bridge ProbeController *)info;
-    if (data != NULL) {
-        NSString *json = [[NSString alloc] initWithData:(__bridge NSData *)data
-                                               encoding:NSUTF8StringEncoding];
-        [controller handleJSON:json];
-    }
-    return NULL;
-}
 
 static void ProbeDarwinNotifyCallback(CFNotificationCenterRef center,
                                       void *observer,
@@ -138,65 +130,48 @@ static void ProbeDarwinNotifyCallback(CFNotificationCenterRef center,
     self.readOffset = 0;
 
     /*
-     * The service name travels to the extension as a plain string. The
-     * direct-spawn helper receives it as argv[3].
+     * The extension learns the service name from its launch properties
+     * (host PID) and looks it up with bootstrap_look_up. The port is a
+     * plain Mach receive right, so results do not depend on the extension
+     * context handshake at all.
      */
-    NSString *serviceName = @"com.daixz.linux.probe.results";
-    CFMessagePortContext portContext = {
-        0, (__bridge void *)self, NULL, NULL, NULL
-    };
-    CFMessagePortRef localPort =
-        CFMessagePortCreateLocal(kCFAllocatorDefault,
-                                 CFSTR("com.daixz.linux.probe.results"),
-                                 ProbeMessagePortCallback,
-                                 &portContext,
-                                 NULL);
-    if (localPort != NULL) {
-        CFRunLoopSourceRef source =
-            CFMessagePortCreateRunLoopSource(kCFAllocatorDefault, localPort, 0);
-        if (source != NULL) {
-            CFRunLoopAddSource(CFRunLoopGetMain(),
-                               source,
-                               kCFRunLoopDefaultMode);
-            CFRelease(source);
-        }
-        self.localPort = localPort;
-        [self log:@"message port ready."];
-    } else {
-        [self log:@"warning: CFMessagePort unavailable."];
-        serviceName = @"";
-    }
+    [self startMachService];
 
     /*
-     * Darwin notifications are the only channel that survives if both the
-     * extension context handshake and every item transport fail.
+     * Darwin notifications mark exactly how far the extension entry got:
+     * loaded, read launch properties, found the Mach service, gave up.
      */
     CFNotificationCenterRef darwin = CFNotificationCenterGetDarwinNotifyCenter();
-    CFNotificationCenterAddObserver(darwin,
-                                    (__bridge const void *)self,
-                                    ProbeDarwinNotifyCallback,
-                                    CFSTR("com.daixz.linux.probe.ext-alive"),
-                                    NULL,
-                                    CFNotificationSuspensionBehaviorDeliverImmediately);
-    CFNotificationCenterAddObserver(darwin,
-                                    (__bridge const void *)self,
-                                    ProbeDarwinNotifyCallback,
-                                    CFSTR("com.daixz.linux.probe.ext-begin"),
-                                    NULL,
-                                    CFNotificationSuspensionBehaviorDeliverImmediately);
+    NSArray *notifications = @[
+        @"com.daixz.linux.probe.ext-alive",
+        @"com.daixz.linux.probe.ext-props",
+        @"com.daixz.linux.probe.ext-mach",
+        @"com.daixz.linux.probe.ext-nomatch",
+        @"com.daixz.linux.probe.ext-run",
+        @"com.daixz.linux.probe.ext-begin",
+    ];
+    for (NSString *name in notifications) {
+        CFNotificationCenterAddObserver(
+            darwin,
+            (__bridge const void *)self,
+            ProbeDarwinNotifyCallback,
+            (__bridge CFStringRef)name,
+            NULL,
+            CFNotificationSuspensionBehaviorDeliverImmediately);
+    }
     [self log:@"darwin observers installed."];
 
     /*
      * Route A: spawn a plain executable from our own bundle. This needs no
      * PlugInKit registration and no extension item serializer.
      */
-    [self spawnHelper:resultsPath serviceName:serviceName];
+    [self spawnHelper:resultsPath serviceName:@""];
 
     /*
      * Route B: the NSExtension path, kept for comparison.
      */
     self.launchAttempted = [self startExtensionWithResultsPath:resultsPath
-                                                   serviceName:serviceName];
+                                                   serviceName:@""];
 
     __weak typeof(self) weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
@@ -528,9 +503,14 @@ static void ProbeDarwinNotifyCallback(CFNotificationCenterRef center,
             @selector(set_requestPostCompletionBlockWithItems:)]) {
         [extension set_requestPostCompletionBlockWithItems:^(id items) {
             dispatch_async(dispatch_get_main_queue(), ^{
+                NSArray *returned = [items isKindOfClass:[NSArray class]]
+                    ? items
+                    : nil;
                 [self log:[NSString stringWithFormat:@"[items] %@",
-                           items ?: @[]]];
-                [self finish];
+                           returned ?: @[]]];
+                if (returned.count > 0) {
+                    [self finish];
+                }
             });
         }];
         [self log:@"request completion block installed."];
@@ -645,6 +625,80 @@ static void ProbeDarwinNotifyCallback(CFNotificationCenterRef center,
     }
 }
 
+#pragma mark - Mach service
+
+- (void)startMachService
+{
+    char name[160] = { 0 };
+    ProbeMachServiceName(name, sizeof(name), getpid());
+
+    mach_port_t port = MACH_PORT_NULL;
+    kern_return_t kr = bootstrap_check_in(bootstrap_port, name, &port);
+    if (kr != KERN_SUCCESS || !MACH_PORT_VALID(port)) {
+        [self log:[NSString stringWithFormat:
+                   @"bootstrap_check_in failed: %d", kr]];
+        return;
+    }
+
+    self.machServicePort = port;
+    [self log:[NSString stringWithFormat:@"mach service: %s", name]];
+    [self startMachReceiver];
+}
+
+- (void)startMachReceiver
+{
+    mach_port_t port = self.machServicePort;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        for (;;) {
+            ProbeMachMessage message;
+            mach_msg_return_t result =
+                mach_msg(&message.header,
+                         MACH_RCV_MSG | MACH_RCV_TIMEOUT,
+                         0,
+                         (mach_msg_size_t)sizeof(message),
+                         port,
+                         1000,
+                         MACH_PORT_NULL);
+
+            if (result == MACH_RCV_TIMED_OUT) {
+                if (self.completed) {
+                    break;
+                }
+                continue;
+            }
+            if (result != MACH_MSG_SUCCESS) {
+                if (!self.completed) {
+                    [self log:[NSString stringWithFormat:
+                               @"mach receive ended: %d", result]];
+                }
+                break;
+            }
+
+            if (message.magic != PROBE_MACH_MAGIC ||
+                message.length > PROBE_MACH_PAYLOAD_MAX) {
+                [self log:@"mach message rejected"];
+                continue;
+            }
+
+            NSString *json =
+                [[NSString alloc] initWithBytes:message.payload
+                                         length:message.length
+                                       encoding:NSUTF8StringEncoding];
+            if (json.length == 0) {
+                continue;
+            }
+
+            [self log:[NSString stringWithFormat:@"[mach] %@", json]];
+
+            if ([json containsString:@"\"done\":true"]) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [self finish];
+                });
+            }
+        }
+    });
+}
+
 - (void)pollResults
 {
     if (!self.running) {
@@ -757,24 +811,6 @@ static void ProbeDarwinNotifyCallback(CFNotificationCenterRef center,
     });
 }
 
-- (void)handleJSON:(NSString *)json
-{
-    if (json.length == 0) {
-        return;
-    }
-
-    [self log:[NSString stringWithFormat:@"[port] %@", json]];
-
-    if ([json containsString:@"\"done\":true"]) {
-        __weak typeof(self) weakSelf = self;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                     (int64_t)(0.3 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            [weakSelf finish];
-        });
-    }
-}
-
 - (void)stop
 {
     [self finish];
@@ -788,21 +824,30 @@ static void ProbeDarwinNotifyCallback(CFNotificationCenterRef center,
     self.completed = YES;
     self.running = NO;
 
-    if (self.localPort != NULL) {
-        CFMessagePortInvalidate(self.localPort);
-        CFRelease(self.localPort);
-        self.localPort = NULL;
+    if (MACH_PORT_VALID(self.machServicePort)) {
+        mach_port_mod_refs(mach_task_self(),
+                           self.machServicePort,
+                           MACH_PORT_RIGHT_RECEIVE,
+                           -1);
+        self.machServicePort = MACH_PORT_NULL;
     }
 
     CFNotificationCenterRef darwin = CFNotificationCenterGetDarwinNotifyCenter();
-    CFNotificationCenterRemoveObserver(darwin,
-                                       (__bridge const void *)self,
-                                       CFSTR("com.daixz.linux.probe.ext-alive"),
-                                       NULL);
-    CFNotificationCenterRemoveObserver(darwin,
-                                       (__bridge const void *)self,
-                                       CFSTR("com.daixz.linux.probe.ext-begin"),
-                                       NULL);
+    NSArray *notifications = @[
+        @"com.daixz.linux.probe.ext-alive",
+        @"com.daixz.linux.probe.ext-props",
+        @"com.daixz.linux.probe.ext-mach",
+        @"com.daixz.linux.probe.ext-nomatch",
+        @"com.daixz.linux.probe.ext-run",
+        @"com.daixz.linux.probe.ext-begin",
+    ];
+    for (NSString *name in notifications) {
+        CFNotificationCenterRemoveObserver(
+            darwin,
+            (__bridge const void *)self,
+            (__bridge CFStringRef)name,
+            NULL);
+    }
 
     [self log:@"probe finished."];
 
