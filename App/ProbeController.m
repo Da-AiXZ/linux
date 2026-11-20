@@ -74,6 +74,7 @@ typedef char *(*ProbeIssueExtensionFn)(const char *extensionClass,
 - (void)logForkProbe;
 - (void)startProbeChannels;
 - (void)pollChannels;
+- (void)scheduleFinishAfterChannels;
 - (void)connectExtensionBootService;
 - (void)startMachService;
 - (void)startMachReceiver;
@@ -107,6 +108,7 @@ static void ProbeDarwinNotifyCallback(CFNotificationCenterRef center,
     int _shmFD;
     ProbeShmBlock *_shmBlock;
     uint64_t _lastShmSequence;
+    BOOL _finishScheduled;
 }
 
 - (instancetype)init
@@ -203,6 +205,9 @@ static void ProbeDarwinNotifyCallback(CFNotificationCenterRef center,
         NSString *text = [UIPasteboard generalPasteboard].string;
         [controller log:[NSString stringWithFormat:@"[paste] %@",
                          text ?: @"(nil)"]];
+        if ([text containsString:@"\"jitRX\""]) {
+            [controller scheduleFinishAfterChannels];
+        }
     });
 
     /*
@@ -576,16 +581,13 @@ static void ProbeDarwinNotifyCallback(CFNotificationCenterRef center,
             NSUUID *request = [first isKindOfClass:[NSUUID class]]
                 ? first
                 : nil;
-            NSError *launchError = [first isKindOfClass:[NSError class]]
-                ? first
-                : nil;
 
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (request == nil) {
                     [self log:[NSString stringWithFormat:
-                               @"extension launch failed: %@",
-                               [self describeError:launchError]]];
-                    [self finish];
+                               @"launch callback had no request (first=%@, second=%@); waiting for channels",
+                               [first class] ?: Nil,
+                               [second class] ?: Nil]];
                     return;
                 }
 
@@ -800,6 +802,9 @@ static void ProbeDarwinNotifyCallback(CFNotificationCenterRef center,
                                        encoding:NSUTF8StringEncoding];
             if (json.length > 0) {
                 [self log:[NSString stringWithFormat:@"[notify] %@", json]];
+                if ([json containsString:@"\"jitRX\""]) {
+                    [self scheduleFinishAfterChannels];
+                }
             }
         }
     }
@@ -836,6 +841,9 @@ static void ProbeDarwinNotifyCallback(CFNotificationCenterRef center,
                                        encoding:NSUTF8StringEncoding];
             if (json.length > 0) {
                 [self log:[NSString stringWithFormat:@"[shm] %@", json]];
+                if ([json containsString:@"\"jitRX\""]) {
+                    [self scheduleFinishAfterChannels];
+                }
             }
         }
     }
@@ -845,6 +853,21 @@ static void ProbeDarwinNotifyCallback(CFNotificationCenterRef center,
                                  (int64_t)(0.3 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         [weakSelf pollChannels];
+    });
+}
+
+- (void)scheduleFinishAfterChannels
+{
+    if (_finishScheduled) {
+        return;
+    }
+    _finishScheduled = YES;
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                 (int64_t)(1.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [weakSelf finish];
     });
 }
 
@@ -980,6 +1003,8 @@ static void ProbeDarwinNotifyCallback(CFNotificationCenterRef center,
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [self finish];
                 });
+            } else if ([json containsString:@"\"jitRX\""]) {
+                [self scheduleFinishAfterChannels];
             }
         }
     });
