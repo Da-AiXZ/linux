@@ -27,6 +27,27 @@ extern kern_return_t task_for_pid(mach_port_t target_task,
 @interface ProbeExtension : UIViewController <NSExtensionRequestHandling>
 @end
 
+static void ProbePostDarwin(CFStringRef name)
+{
+    CFNotificationCenterPostNotification(
+        CFNotificationCenterGetDarwinNotifyCenter(),
+        name,
+        NULL,
+        NULL,
+        true);
+}
+
+/*
+ * Runs as soon as the extension binary is loaded, before NSExtensionMain
+ * talks to the host. A Darwin notification is the only channel that does
+ * not depend on the extension context handshake.
+ */
+__attribute__((constructor))
+static void ProbeExtensionDidLoad(void)
+{
+    ProbePostDarwin(CFSTR("com.daixz.linux.probe.ext-alive"));
+}
+
 @implementation ProbeExtension {
     int _resultsFD;
     CFMessagePortRef _remotePort;
@@ -40,6 +61,7 @@ extern kern_return_t task_for_pid(mach_port_t target_task,
 - (void)beginRequestWithExtensionContext:(NSExtensionContext *)context
 {
     @autoreleasepool {
+        ProbePostDarwin(CFSTR("com.daixz.linux.probe.ext-begin"));
         /*
          * Liveness ping. This runs before anything else, so a silent run
          * tells us the request never reached this method.

@@ -29,6 +29,9 @@ extern kern_return_t task_for_pid(mach_port_t target_task,
                                            error:(NSError **)error;
 - (nullable NSUUID *)beginExtensionRequestWithInputItems:(NSArray *)items
                                                    error:(NSError **)error;
+- (void)beginExtensionRequestWithInputItems:(NSArray *)items
+                                 completion:(id)completion;
+- (void)set_requestPostCompletionBlockWithItems:(id)block;
 - (pid_t)pidForRequestIdentifier:(NSUUID *)identifier;
 - (void)_kill:(int)sig;
 @end
@@ -47,16 +50,21 @@ typedef char *(*ProbeIssueExtensionFn)(const char *extensionClass,
 @property (nonatomic, assign) CFMessagePortRef localPort;
 @property (atomic, assign) BOOL running;
 @property (atomic, assign) BOOL completed;
-@property (atomic, assign) BOOL extensionLaunched;
+@property (atomic, assign) BOOL launchAttempted;
 @property (atomic, assign) BOOL helperFinished;
 @property (atomic, assign) BOOL startCompleted;
 @property (atomic, assign) pid_t helperPid;
 
 - (void)handleJSON:(NSString *)json;
+- (void)handleDarwinNotification:(NSString *)name;
 - (BOOL)startExtensionWithResultsPath:(NSString *)resultsPath
                           serviceName:(NSString *)serviceName;
 - (NSString *)describeExtensionAPI:(id)extension;
-- (NSString *)resolveHelperPath;
+- (NSArray<NSString *> *)helperCandidates;
+- (int)spawnHelperAtPath:(NSString *)path
+             resultsPath:(NSString *)resultsPath
+             serviceName:(NSString *)serviceName;
+- (void)scheduleLivenessChecks:(pid_t)pid;
 - (void)drainHelperBuffer:(NSMutableData *)buffer;
 
 @end
@@ -73,6 +81,16 @@ static CFDataRef ProbeMessagePortCallback(CFMessagePortRef localPort,
         [controller handleJSON:json];
     }
     return NULL;
+}
+
+static void ProbeDarwinNotifyCallback(CFNotificationCenterRef center,
+                                      void *observer,
+                                      CFNotificationName name,
+                                      const void *object,
+                                      CFDictionaryRef userInfo)
+{
+    ProbeController *controller = (__bridge ProbeController *)observer;
+    [controller handleDarwinNotification:(__bridge NSString *)name];
 }
 
 @implementation ProbeController
@@ -94,7 +112,7 @@ static CFDataRef ProbeMessagePortCallback(CFMessagePortRef localPort,
 
     self.running = YES;
     self.completed = NO;
-    self.extensionLaunched = NO;
+    self.launchAttempted = NO;
     self.helperFinished = NO;
     self.startCompleted = NO;
 
@@ -150,6 +168,25 @@ static CFDataRef ProbeMessagePortCallback(CFMessagePortRef localPort,
     }
 
     /*
+     * Darwin notifications are the only channel that survives if both the
+     * extension context handshake and every item transport fail.
+     */
+    CFNotificationCenterRef darwin = CFNotificationCenterGetDarwinNotifyCenter();
+    CFNotificationCenterAddObserver(darwin,
+                                    (__bridge const void *)self,
+                                    ProbeDarwinNotifyCallback,
+                                    CFSTR("com.daixz.linux.probe.ext-alive"),
+                                    NULL,
+                                    CFNotificationSuspensionBehaviorDeliverImmediately);
+    CFNotificationCenterAddObserver(darwin,
+                                    (__bridge const void *)self,
+                                    ProbeDarwinNotifyCallback,
+                                    CFSTR("com.daixz.linux.probe.ext-begin"),
+                                    NULL,
+                                    CFNotificationSuspensionBehaviorDeliverImmediately);
+    [self log:@"darwin observers installed."];
+
+    /*
      * Route A: spawn a plain executable from our own bundle. This needs no
      * PlugInKit registration and no extension item serializer.
      */
@@ -158,8 +195,8 @@ static CFDataRef ProbeMessagePortCallback(CFMessagePortRef localPort,
     /*
      * Route B: the NSExtension path, kept for comparison.
      */
-    self.extensionLaunched = [self startExtensionWithResultsPath:resultsPath
-                                                     serviceName:serviceName];
+    self.launchAttempted = [self startExtensionWithResultsPath:resultsPath
+                                                   serviceName:serviceName];
 
     __weak typeof(self) weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
@@ -173,12 +210,8 @@ static CFDataRef ProbeMessagePortCallback(CFMessagePortRef localPort,
         [controller finish];
     });
 
-    if (self.extensionLaunched) {
-        [self pollResults];
-    }
-
     self.startCompleted = YES;
-    if (!self.extensionLaunched && self.helperFinished) {
+    if (!self.launchAttempted && self.helperFinished) {
         [self finish];
     }
 
@@ -187,7 +220,7 @@ static CFDataRef ProbeMessagePortCallback(CFMessagePortRef localPort,
 
 #pragma mark - Direct spawn route
 
-- (NSString *)resolveHelperPath
+- (NSArray<NSString *> *)helperCandidates
 {
     NSFileManager *manager = [NSFileManager defaultManager];
     NSString *helpers = [NSBundle.mainBundle.bundlePath
@@ -207,8 +240,10 @@ static CFDataRef ProbeMessagePortCallback(CFMessagePortRef localPort,
                isDirectory,
                entries ?: (listError.localizedDescription ?: @[])]];
 
-    NSArray *names = @[ @"probe-helper", @"probe-helper.dat" ];
-    for (NSString *name in names) {
+    NSMutableArray<NSString *> *candidates = [NSMutableArray array];
+    NSString *firstExisting = nil;
+
+    for (NSString *name in @[ @"probe-helper", @"probe-helper.dat" ]) {
         NSString *candidate = [helpers stringByAppendingPathComponent:name];
         BOOL exists = [manager fileExistsAtPath:candidate];
         BOOL executable = [manager isExecutableFileAtPath:candidate];
@@ -225,47 +260,74 @@ static CFDataRef ProbeMessagePortCallback(CFMessagePortRef localPort,
         if (!exists) {
             continue;
         }
-        if (executable) {
-            return candidate;
+        [candidates addObject:candidate];
+        if (firstExisting == nil) {
+            firstExisting = candidate;
         }
+    }
 
-        /* The install lost the exec bit; run a writable copy instead. */
+    /*
+     * Executing in place is tried first. The copy is only a fallback for
+     * an install that lost the executable bit; iOS may refuse to exec it
+     * because it lives in the data container.
+     */
+    if (firstExisting != nil) {
         NSString *copyPath = [NSTemporaryDirectory()
             stringByAppendingPathComponent:@"probe-helper-bin"];
         [manager removeItemAtPath:copyPath error:nil];
         NSError *copyError = nil;
-        if ([manager copyItemAtPath:candidate
+        if ([manager copyItemAtPath:firstExisting
                              toPath:copyPath
                               error:&copyError]) {
             [manager setAttributes:@{ NSFilePosixPermissions: @0755 }
                         ofItemAtPath:copyPath
                                error:NULL];
+            [candidates addObject:copyPath];
             [self log:[NSString stringWithFormat:@"helper copied to %@",
                        copyPath]];
-            return copyPath;
+        } else {
+            [self log:[NSString stringWithFormat:@"helper copy failed: %@",
+                       copyError.localizedDescription ?: @"unknown"]];
         }
-        [self log:[NSString stringWithFormat:@"helper copy failed: %@",
-                   copyError.localizedDescription ?: @"unknown"]];
     }
 
-    return nil;
+    return candidates;
 }
 
 - (void)spawnHelper:(NSString *)resultsPath serviceName:(NSString *)serviceName
 {
-    NSString *path = [self resolveHelperPath];
-    if (path == nil) {
+    NSArray<NSString *> *candidates = [self helperCandidates];
+    if (candidates.count == 0) {
         [self log:@"helper missing; direct-spawn route skipped."];
         self.helperFinished = YES;
         return;
     }
 
+    for (NSString *candidate in candidates) {
+        int result = [self spawnHelperAtPath:candidate
+                                 resultsPath:resultsPath
+                                 serviceName:serviceName];
+        if (result == 0) {
+            return;
+        }
+        [self log:[NSString stringWithFormat:
+                   @"helper exec failed: %@ -> %d (%s)",
+                   candidate.lastPathComponent,
+                   result,
+                   strerror(result)]];
+    }
+
+    [self log:@"all helper candidates failed; direct-spawn route skipped."];
+    self.helperFinished = YES;
+}
+
+- (int)spawnHelperAtPath:(NSString *)path
+             resultsPath:(NSString *)resultsPath
+             serviceName:(NSString *)serviceName
+{
     int fds[2] = { -1, -1 };
     if (pipe(fds) != 0) {
-        [self log:[NSString stringWithFormat:@"pipe failed: %s",
-                   strerror(errno)]];
-        self.helperFinished = YES;
-        return;
+        return errno;
     }
 
     posix_spawn_file_actions_t actions;
@@ -298,16 +360,12 @@ static CFDataRef ProbeMessagePortCallback(CFMessagePortRef localPort,
 
     if (result != 0) {
         close(fds[0]);
-        [self log:[NSString stringWithFormat:
-                   @"helper spawn failed: %d (%s)",
-                   result,
-                   strerror(result)]];
-        self.helperFinished = YES;
-        return;
+        return result;
     }
 
     self.helperPid = pid;
-    [self log:[NSString stringWithFormat:@"helper spawned: pid=%d", pid]];
+    [self log:[NSString stringWithFormat:@"helper spawned: pid=%d from %@",
+               pid, path.lastPathComponent]];
 
     mach_port_t task = MACH_PORT_NULL;
     kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
@@ -348,12 +406,14 @@ static CFDataRef ProbeMessagePortCallback(CFMessagePortRef localPort,
         }
 
         self.helperFinished = YES;
-        if (self.startCompleted && !self.extensionLaunched) {
+        if (self.startCompleted && !self.launchAttempted) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self finish];
             });
         }
     });
+
+    return 0;
 }
 
 - (void)drainHelperBuffer:(NSMutableData *)buffer
@@ -459,6 +519,73 @@ static CFDataRef ProbeMessagePortCallback(CFMessagePortRef localPort,
         @"hostPid": @(getpid()),
     };
 
+    /*
+     * The extension's returned items arrive through this private block.
+     * Installing it before the request starts is what makes the extension
+     * context handshake complete.
+     */
+    if ([extension respondsToSelector:
+            @selector(set_requestPostCompletionBlockWithItems:)]) {
+        [extension set_requestPostCompletionBlockWithItems:^(id items) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self log:[NSString stringWithFormat:@"[items] %@",
+                           items ?: @[]]];
+                [self finish];
+            });
+        }];
+        [self log:@"request completion block installed."];
+    } else {
+        [self log:@"warning: request completion block unavailable."];
+    }
+
+    /*
+     * The synchronous ...error: variant only creates the request record.
+     * The async variant is the one that actually delivers the input item
+     * to the extension and starts the context handshake.
+     */
+    if ([extension respondsToSelector:
+            @selector(beginExtensionRequestWithInputItems:completion:)]) {
+        [self log:@"using async beginExtensionRequest."];
+        [extension beginExtensionRequestWithInputItems:@[item]
+                                           completion:^(id first,
+                                                         __unused id second) {
+            NSUUID *request = [first isKindOfClass:[NSUUID class]]
+                ? first
+                : nil;
+            NSError *launchError = [first isKindOfClass:[NSError class]]
+                ? first
+                : nil;
+
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (request == nil) {
+                    [self log:[NSString stringWithFormat:
+                               @"extension launch failed: %@",
+                               [self describeError:launchError]]];
+                    [self finish];
+                    return;
+                }
+
+                self.extension = extension;
+                self.requestID = request;
+
+                pid_t extensionPid =
+                    [extension pidForRequestIdentifier:request];
+                [self log:[NSString stringWithFormat:
+                           @"launch ok: request=%@ pid=%d hostPid=%d",
+                           request.UUIDString,
+                           extensionPid,
+                           getpid()]];
+                [self log:[NSString stringWithFormat:@"results: %@",
+                           resultsPath]];
+
+                [self scheduleLivenessChecks:extensionPid];
+                [self pollResults];
+            });
+        }];
+        return YES;
+    }
+
+    [self log:@"warning: async request API unavailable."];
     NSError *requestError = nil;
     NSUUID *request = [extension beginExtensionRequestWithInputItems:@[item]
                                                                error:&requestError];
@@ -473,12 +600,49 @@ static CFDataRef ProbeMessagePortCallback(CFMessagePortRef localPort,
 
     pid_t extensionPid = [extension pidForRequestIdentifier:request];
     [self log:[NSString stringWithFormat:
-               @"launch ok: request=%@ pid=%d hostPid=%d",
+               @"launch ok (sync): request=%@ pid=%d hostPid=%d",
                request.UUIDString,
                extensionPid,
                getpid()]];
     [self log:[NSString stringWithFormat:@"results: %@", resultsPath]];
+
+    [self scheduleLivenessChecks:extensionPid];
+    [self pollResults];
     return YES;
+}
+
+- (void)scheduleLivenessChecks:(pid_t)pid
+{
+    [self log:[NSString stringWithFormat:@"watching pid=%d", pid]];
+
+    NSArray *delays = @[ @1.0, @3.0, @6.0 ];
+    for (NSUInteger index = 0; index < delays.count; index++) {
+        double delay = [delays[index] doubleValue];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                     (int64_t)(delay * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            errno = 0;
+            int result = pid > 0 ? kill(pid, 0) : -1;
+            int errorNumber = errno;
+            [self log:[NSString stringWithFormat:
+                       @"pid %d check +%.0fs: kill=%d errno=%d",
+                       pid,
+                       delay,
+                       result,
+                       errorNumber]];
+
+            if (index == 0) {
+                mach_port_t task = MACH_PORT_NULL;
+                kern_return_t kr =
+                    task_for_pid(mach_task_self(), pid, &task);
+                [self log:[NSString stringWithFormat:
+                           @"task_for_pid(%d)=%d", pid, kr]];
+                if (task != MACH_PORT_NULL) {
+                    mach_port_deallocate(mach_task_self(), task);
+                }
+            }
+        });
+    }
 }
 
 - (void)pollResults
@@ -586,6 +750,13 @@ static CFDataRef ProbeMessagePortCallback(CFMessagePortRef localPort,
     }
 }
 
+- (void)handleDarwinNotification:(NSString *)name
+{
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self log:[NSString stringWithFormat:@"[darwin] %@", name]];
+    });
+}
+
 - (void)handleJSON:(NSString *)json
 {
     if (json.length == 0) {
@@ -622,6 +793,16 @@ static CFDataRef ProbeMessagePortCallback(CFMessagePortRef localPort,
         CFRelease(self.localPort);
         self.localPort = NULL;
     }
+
+    CFNotificationCenterRef darwin = CFNotificationCenterGetDarwinNotifyCenter();
+    CFNotificationCenterRemoveObserver(darwin,
+                                       (__bridge const void *)self,
+                                       CFSTR("com.daixz.linux.probe.ext-alive"),
+                                       NULL);
+    CFNotificationCenterRemoveObserver(darwin,
+                                       (__bridge const void *)self,
+                                       CFSTR("com.daixz.linux.probe.ext-begin"),
+                                       NULL);
 
     [self log:@"probe finished."];
 
