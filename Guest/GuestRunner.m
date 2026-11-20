@@ -137,6 +137,7 @@ __attribute__((naked, noinline, used))
 static void GuestSyscallTrampoline(void)
 {
     __asm__ volatile(
+        "stp x29, x30, [sp, #-16]!\n"
         "stp x4, x5, [sp, #-16]!\n"
         "stp x2, x3, [sp, #-16]!\n"
         "stp x0, x1, [sp, #-16]!\n"
