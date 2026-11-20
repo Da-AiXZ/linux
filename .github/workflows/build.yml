@@ -53,9 +53,11 @@ jobs:
           cp "$HELPER" "$APP/Helpers/probe-helper"
           cp "$HELPER" "$APP/Helpers/probe-helper.dat"
           cp "$GUEST" "$APP/Helpers/guest-runner"
+          cp Tools/busybox.static "$APP/Helpers/busybox"
           chmod 755 "$APP/Helpers/probe-helper"
           chmod 644 "$APP/Helpers/probe-helper.dat"
           chmod 755 "$APP/Helpers/guest-runner"
+          chmod 755 "$APP/Helpers/busybox"
           python3 tools/make_guest_elf.py "$APP/guest-hello.elf"
           rm -rf Payload PayloadUnsigned LinuxProbe.ipa LinuxProbe-unsigned.ipa
           mkdir Payload

@@ -9,8 +9,8 @@ options:
 settings:
   base:
     IPHONEOS_DEPLOYMENT_TARGET: "16.0"
-    MARKETING_VERSION: "0.15.1"
-    CURRENT_PROJECT_VERSION: "20"
+    MARKETING_VERSION: "0.16.0"
+    CURRENT_PROJECT_VERSION: "21"
     CLANG_ENABLE_OBJC_ARC: YES
     CLANG_ENABLE_MODULES: YES
     CODE_SIGNING_ALLOWED: NO
@@ -89,7 +89,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.daixz.linux.probe.guest
         MACH_O_TYPE: mh_execute
         SKIP_INSTALL: YES
-        OTHER_LDFLAGS: "-framework Foundation -framework CoreFoundation"
+        OTHER_LDFLAGS: "-framework Foundation -framework CoreFoundation -Wl,-pagezero_size,0x1000"
         TARGETED_DEVICE_FAMILY: "1,2"
 
 schemes:

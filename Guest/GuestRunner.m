@@ -312,6 +312,27 @@ uint64_t GuestSyscallDispatch(uint64_t *args, uint64_t number)
     case 135: /* rt_sigprocmask */
     case 233: /* madvise */
         return 0;
+    case 293: /* rseq */
+        return (uint64_t)(-ENOSYS);
+    case 29: /* ioctl */
+        return (uint64_t)(-ENOTTY);
+    case 169: { /* gettimeofday */
+        struct timeval value;
+        if (gettimeofday(&value, NULL) != 0) {
+            return GuestErrno();
+        }
+        if (args[0] != 0) {
+            uint64_t *output = (uint64_t *)args[0];
+            output[0] = (uint64_t)value.tv_sec;
+            output[1] = (uint64_t)value.tv_usec;
+        }
+        if (args[1] != 0) {
+            uint64_t *zone = (uint64_t *)args[1];
+            zone[0] = 0;
+            zone[1] = 0;
+        }
+        return 0;
+    }
     case 261: { /* prlimit64 */
         uint64_t *output = (uint64_t *)args[3];
         if (output != NULL) {
@@ -376,6 +397,23 @@ static BOOL GuestRangeFree(uintptr_t address, size_t size)
                                        &target,
                                        (vm_size_t)size,
                                        VM_FLAGS_FIXED);
+
+    if (result != KERN_SUCCESS && address < 0x100000000ULL) {
+        /* The Mach-O __PAGEZERO reservation owns the low address space.
+         * Release it so a fixed-address guest can live there. */
+        for (uint64_t offset = 0; offset < 0x100000000ULL;
+             offset += 0x40000000ULL) {
+            vm_deallocate(mach_task_self(),
+                          (vm_address_t)offset,
+                          (vm_size_t)0x40000000ULL);
+        }
+        target = (vm_address_t)address;
+        result = vm_allocate(mach_task_self(),
+                             &target,
+                             (vm_size_t)size,
+                             VM_FLAGS_FIXED);
+    }
+
     if (result != KERN_SUCCESS) {
         return NO;
     }
@@ -459,8 +497,137 @@ static void *GuestWatchdogThread(void *argument)
     _exit(4);
 }
 
-static int GuestLoadAndRun(const char *path)
+#define GUEST_AT_NULL 0
+#define GUEST_AT_PHDR 3
+#define GUEST_AT_PHENT 4
+#define GUEST_AT_PHNUM 5
+#define GUEST_AT_PAGESZ 6
+#define GUEST_AT_BASE 7
+#define GUEST_AT_FLAGS 8
+#define GUEST_AT_ENTRY 9
+#define GUEST_AT_UID 11
+#define GUEST_AT_EUID 12
+#define GUEST_AT_GID 13
+#define GUEST_AT_EGID 14
+#define GUEST_AT_HWCAP 16
+#define GUEST_AT_CLKTCK 17
+#define GUEST_AT_SECURE 23
+#define GUEST_AT_RANDOM 25
+#define GUEST_AT_EXECFN 31
+
+static uint64_t GuestBuildStack(uint64_t stackTop,
+                                int count,
+                                char *items[],
+                                uintptr_t imageStart,
+                                const GuestElfHeader *header,
+                                uint64_t entry)
 {
+    if (count > 64) {
+        count = 64;
+    }
+
+    uint64_t cursor = stackTop & ~0xFULL;
+    uint64_t pointers[64];
+    for (int index = count - 1; index >= 0; index--) {
+        size_t length = strlen(items[index]) + 1;
+        cursor = (cursor - length) & ~0xFULL;
+        memcpy((void *)cursor, items[index], length);
+        pointers[index] = cursor;
+    }
+
+    cursor = (cursor - 16) & ~0xFULL;
+    uint64_t randomAddress = cursor;
+    arc4random_buf((void *)randomAddress, 16);
+
+    uint64_t values[][2] = {
+        { GUEST_AT_PHDR, (uint64_t)(imageStart + header->e_phoff) },
+        { GUEST_AT_PHENT, (uint64_t)header->e_phentsize },
+        { GUEST_AT_PHNUM, (uint64_t)header->e_phnum },
+        { GUEST_AT_PAGESZ, 4096 },
+        { GUEST_AT_BASE, 0 },
+        { GUEST_AT_FLAGS, 0 },
+        { GUEST_AT_ENTRY, entry },
+        { GUEST_AT_UID, (uint64_t)getuid() },
+        { GUEST_AT_EUID, (uint64_t)geteuid() },
+        { GUEST_AT_GID, (uint64_t)getgid() },
+        { GUEST_AT_EGID, (uint64_t)getegid() },
+        { GUEST_AT_HWCAP, 0 },
+        { GUEST_AT_CLKTCK, 100 },
+        { GUEST_AT_SECURE, 0 },
+        { GUEST_AT_RANDOM, randomAddress },
+        { GUEST_AT_EXECFN, pointers[0] },
+        { GUEST_AT_NULL, 0 },
+    };
+    size_t valueCount = sizeof(values) / sizeof(values[0]);
+
+    size_t words = 1 + (size_t)count + 1 + 1 + valueCount * 2;
+    cursor = (cursor - words * sizeof(uint64_t)) & ~0xFULL;
+
+    uint64_t *table = (uint64_t *)cursor;
+    *table++ = (uint64_t)count;
+    for (int index = 0; index < count; index++) {
+        *table++ = pointers[index];
+    }
+    *table++ = 0; /* argv terminator */
+    *table++ = 0; /* envp terminator */
+    for (size_t index = 0; index < valueCount; index++) {
+        *table++ = values[index][0];
+        *table++ = values[index][1];
+    }
+
+    return cursor;
+}
+
+static uintptr_t GuestMapStub(uintptr_t imageStart,
+                              uint64_t imageSize,
+                              uintptr_t target)
+{
+    const int64_t offsets[] = {
+        (int64_t)imageSize + 0x10000,
+        -0x1000000,
+        0x1000000,
+        -0x2000000,
+        0x2000000,
+    };
+
+    for (size_t index = 0; index < sizeof(offsets) / sizeof(offsets[0]);
+         index++) {
+        uintptr_t candidate = (uintptr_t)((int64_t)imageStart + offsets[index]);
+        candidate &= ~0xFFFULL;
+
+        int64_t distance = (int64_t)candidate - (int64_t)imageStart;
+        if (distance < -(1LL << 26) || distance > (1LL << 26)) {
+            continue;
+        }
+        if (!GuestRangeFree(candidate, 0x4000)) {
+            continue;
+        }
+
+        uint8_t *page = mmap((void *)candidate,
+                             0x4000,
+                             PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANON | MAP_FIXED,
+                             -1,
+                             0);
+        if (page == MAP_FAILED) {
+            continue;
+        }
+
+        uint32_t *code = (uint32_t *)page;
+        code[0] = 0x58000050; /* ldr x16, #8 */
+        code[1] = 0xD61F0200; /* br x16 */
+        *(uint64_t *)(page + 8) = (uint64_t)target;
+        sys_icache_invalidate(page, 16);
+        mprotect(page, 0x4000, PROT_READ | PROT_EXEC);
+        return candidate;
+    }
+
+    return 0;
+}
+
+static int GuestLoadAndRun(int argc, char *argv[])
+{
+    const char *path = argv[1];
     NSString *pathString = [NSString stringWithUTF8String:path];
     NSData *data = pathString != nil
         ? [NSData dataWithContentsOfFile:pathString]
@@ -545,6 +712,15 @@ static int GuestLoadAndRun(const char *path)
     }
 
     uint32_t patched = 0;
+    uintptr_t island = GuestMapStub(imageStart,
+                                    imageSize,
+                                    (uintptr_t)&GuestSyscallTrampoline);
+    if (island == 0) {
+        fprintf(stderr, "[guest] no trampoline island near image\n");
+        return 1;
+    }
+    fprintf(stdout, "[guest] island=0x%lx\n", (unsigned long)island);
+
     for (uint16_t index = 0; index < header->e_phnum; index++) {
         const GuestElfProgramHeader *program = &programs[index];
         if (program->p_type != ELF_PT_LOAD ||
@@ -559,8 +735,7 @@ static int GuestLoadAndRun(const char *path)
                 continue;
             }
 
-            int64_t delta = (int64_t)((uintptr_t)&GuestSyscallTrampoline -
-                                      (uintptr_t)(start + offset));
+            int64_t delta = (int64_t)(island - (uintptr_t)(start + offset));
             if (delta < -(1LL << 27) || delta >= (1LL << 27)) {
                 fprintf(stderr, "[guest] svc site out of bl range\n");
                 return 1;
@@ -569,10 +744,10 @@ static int GuestLoadAndRun(const char *path)
             *(uint32_t *)(start + offset) = 0x94000000 | immediate;
             if (patched < 8) {
                 fprintf(stdout,
-                        "[guest] patch site=0x%lx trampoline=0x%lx "
+                        "[guest] patch site=0x%lx island=0x%lx "
                         "delta=0x%llx word=0x%08x\n",
                         (unsigned long)(start + offset),
-                        (unsigned long)(uintptr_t)&GuestSyscallTrampoline,
+                        (unsigned long)island,
                         (unsigned long long)delta,
                         *(uint32_t *)(start + offset));
             }
@@ -592,10 +767,10 @@ static int GuestLoadAndRun(const char *path)
             continue;
         }
 
-        uintptr_t segmentStart =
-            (imageStart + program->p_vaddr) & ~0xFFFULL;
-        uintptr_t segmentEnd =
-            (imageStart + program->p_vaddr + program->p_memsz + 0xFFF) & ~0xFFFULL;
+        uintptr_t segmentBase =
+            (uintptr_t)image + (program->p_vaddr - minAddress);
+        uintptr_t segmentStart = segmentBase & ~0xFFFULL;
+        uintptr_t segmentEnd = (segmentBase + program->p_memsz + 0xFFF) & ~0xFFFULL;
         int protection = 0;
         if (program->p_flags & ELF_PF_R) protection |= PROT_READ;
         if (program->p_flags & ELF_PF_W) protection |= PROT_WRITE;
@@ -638,25 +813,28 @@ static int GuestLoadAndRun(const char *path)
     }
     GuestStackTop = (uint64_t)stack + stackSize;
 
-    uint64_t stackPointer = (GuestStackTop - 16) & ~0xFULL;
-    uint64_t *cursor = (uint64_t *)stackPointer;
-    *--cursor = 0;  /* padding: keeps sp 16-byte aligned */
-    *--cursor = 0;  /* auxv AT_NULL value */
-    *--cursor = 0;  /* auxv AT_NULL type */
-    *--cursor = 0;  /* envp NULL */
-    *--cursor = 0;  /* argv[0] */
-    *--cursor = 1;  /* argc */
-    stackPointer = (uint64_t)cursor;
+    int guestArgc = argc > 2 ? argc - 2 : 1;
+    char *fallbackArgv[] = { (char *)"busybox" };
+    char **guestArgv = argc > 2 ? argv + 2 : fallbackArgv;
 
     uint64_t entry = base + header->e_entry;
+    uint64_t stackPointer = GuestBuildStack(GuestStackTop,
+                                            guestArgc,
+                                            guestArgv,
+                                            imageStart,
+                                            header,
+                                            entry);
+
     const uint32_t *entryWords =
         (const uint32_t *)(imageStart + (header->e_entry - minAddress));
     fprintf(stdout,
-            "[guest] entry=0x%llx stack=0x%llx aligned=%d "
+            "[guest] entry=0x%llx stack=0x%llx aligned=%d argc=%d argv0=%s "
             "words=%08x %08x %08x %08x %08x\n",
             (unsigned long long)entry,
             (unsigned long long)stackPointer,
             (stackPointer & 0xF) == 0 ? 1 : 0,
+            guestArgc,
+            guestArgv[0],
             entryWords[0],
             entryWords[1],
             entryWords[2],
@@ -709,6 +887,6 @@ int main(int argc, char *argv[])
             return 5;
         }
 
-        return GuestLoadAndRun(argv[1]);
+        return GuestLoadAndRun(argc, argv);
     }
 }

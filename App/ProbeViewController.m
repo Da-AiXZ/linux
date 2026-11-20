@@ -7,6 +7,7 @@
 @property (nonatomic, strong) UITextView *logView;
 @property (nonatomic, strong) UIButton *runButton;
 @property (nonatomic, strong) UIButton *guestButton;
+@property (nonatomic, strong) UIButton *busyboxButton;
 @property (nonatomic, strong) ProbeController *probe;
 @property (nonatomic, strong) GuestLauncher *guestLauncher;
 @property (nonatomic, strong) NSDateFormatter *formatter;
@@ -58,13 +59,28 @@
                forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:self.guestButton];
 
+    self.busyboxButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [self.busyboxButton setTitle:@"Run BusyBox" forState:UIControlStateNormal];
+    self.busyboxButton.titleLabel.font = [UIFont boldSystemFontOfSize:17];
+    self.busyboxButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.busyboxButton addTarget:self
+                           action:@selector(runBusyBox:)
+                 forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:self.busyboxButton];
+
     UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
         [self.logView.topAnchor constraintEqualToAnchor:safe.topAnchor],
         [self.logView.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
         [self.logView.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
-        [self.logView.bottomAnchor constraintEqualToAnchor:self.guestButton.topAnchor
+        [self.logView.bottomAnchor constraintEqualToAnchor:self.busyboxButton.topAnchor
                                                   constant:-8],
+
+        [self.busyboxButton.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
+        [self.busyboxButton.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
+        [self.busyboxButton.bottomAnchor constraintEqualToAnchor:self.guestButton.topAnchor
+                                                        constant:-8],
+        [self.busyboxButton.heightAnchor constraintEqualToConstant:44],
 
         [self.guestButton.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
         [self.guestButton.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
@@ -125,9 +141,28 @@
 
 - (void)runGuest:(UIButton *)sender
 {
-    self.guestButton.enabled = NO;
+    [self startGuestNamed:@"guest-hello.elf"
+                arguments:@[]
+                   button:self.guestButton
+                    label:@"Starting Linux guest..."];
+}
+
+- (void)runBusyBox:(UIButton *)sender
+{
+    [self startGuestNamed:@"Helpers/busybox"
+                arguments:@[ @"busybox", @"uname", @"-a" ]
+                   button:self.busyboxButton
+                    label:@"Starting BusyBox..."];
+}
+
+- (void)startGuestNamed:(NSString *)relativePath
+              arguments:(NSArray<NSString *> *)arguments
+                 button:(UIButton *)button
+                  label:(NSString *)label
+{
+    button.enabled = NO;
     self.logView.text = @"";
-    [self appendLog:@"Starting Linux guest..."];
+    [self appendLog:label];
 
     self.guestLauncher = [GuestLauncher new];
     __weak typeof(self) weakSelf = self;
@@ -135,11 +170,11 @@
         [weakSelf appendLog:line];
     };
     self.guestLauncher.completionHandler = ^(int status) {
-        weakSelf.guestButton.enabled = YES;
+        button.enabled = YES;
     };
 
-    if (![self.guestLauncher runBundledGuest]) {
-        self.guestButton.enabled = YES;
+    if (![self.guestLauncher runGuestNamed:relativePath arguments:arguments]) {
+        button.enabled = YES;
     }
 }
 

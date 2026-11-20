@@ -18,11 +18,16 @@ extern char **environ;
 
 - (BOOL)runBundledGuest
 {
+    return [self runGuestNamed:@"guest-hello.elf" arguments:@[]];
+}
+
+- (BOOL)runGuestNamed:(NSString *)relativePath
+            arguments:(NSArray<NSString *> *)arguments
+{
     NSString *bundle = NSBundle.mainBundle.bundlePath;
     NSString *runner = [bundle stringByAppendingPathComponent:
         @"Helpers/guest-runner"];
-    NSString *guest = [bundle stringByAppendingPathComponent:
-        @"guest-hello.elf"];
+    NSString *guest = [bundle stringByAppendingPathComponent:relativePath];
 
     NSFileManager *manager = [NSFileManager defaultManager];
     if (![manager isExecutableFileAtPath:runner]) {
@@ -48,11 +53,22 @@ extern char **environ;
     posix_spawn_file_actions_addclose(&actions, fds[0]);
     posix_spawn_file_actions_addclose(&actions, fds[1]);
 
-    char *argv[] = {
-        (char *)runner.fileSystemRepresentation,
-        (char *)guest.fileSystemRepresentation,
-        NULL,
-    };
+    NSMutableArray<NSString *> *all = [NSMutableArray arrayWithObject:runner];
+    [all addObject:guest];
+    [all addObjectsFromArray:arguments];
+
+    char **argv = calloc(all.count + 1, sizeof(char *));
+    if (argv == NULL) {
+        posix_spawn_file_actions_destroy(&actions);
+        close(fds[0]);
+        close(fds[1]);
+        [self log:@"guest argv allocation failed"];
+        return NO;
+    }
+    for (NSUInteger index = 0; index < all.count; index++) {
+        argv[index] = (char *)all[index].fileSystemRepresentation;
+    }
+    argv[all.count] = NULL;
 
     pid_t pid = 0;
     int result = posix_spawn(&pid,
@@ -61,6 +77,7 @@ extern char **environ;
                              NULL,
                              argv,
                              environ);
+    free(argv);
     posix_spawn_file_actions_destroy(&actions);
     close(fds[1]);
 

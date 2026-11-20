@@ -6,5 +6,7 @@
 @property (nonatomic, copy) void (^completionHandler)(int status);
 
 - (BOOL)runBundledGuest;
+- (BOOL)runGuestNamed:(NSString *)relativePath
+            arguments:(NSArray<NSString *> *)arguments;
 
 @end
