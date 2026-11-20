@@ -415,22 +415,14 @@ static void GuestJump(uint64_t entry, uint64_t stack)
 }
 
 typedef struct {
-    uint64_t entry;
-    uint64_t stack;
-} GuestStartContext;
+    mach_port_t thread;
+} GuestWatchdogContext;
 
-static void *GuestStartThread(void *argument)
-{
-    GuestStartContext *context = (GuestStartContext *)argument;
-    GuestJump(context->entry, context->stack);
-    return NULL;
-}
-
-static void GuestDumpThread(pthread_t thread, const char *tag)
+static void GuestDumpMachThread(mach_port_t thread, const char *tag)
 {
     GuestThreadState64 state;
     mach_msg_type_number_t count = GUEST_ARM_THREAD_STATE64_COUNT;
-    kern_return_t result = thread_get_state(pthread_mach_thread_np(thread),
+    kern_return_t result = thread_get_state(thread,
                                             GUEST_ARM_THREAD_STATE64,
                                             (thread_state_t)&state,
                                             &count);
@@ -450,6 +442,21 @@ static void GuestDumpThread(pthread_t thread, const char *tag)
             (unsigned long long)state.x[0],
             (unsigned long long)state.x[1],
             (unsigned long long)state.x[8]);
+}
+
+static void *GuestWatchdogThread(void *argument)
+{
+    GuestWatchdogContext *context = (GuestWatchdogContext *)argument;
+    struct timespec delay = { 1, 0 };
+    nanosleep(&delay, NULL);
+    GuestDumpMachThread(context->thread, "watchdog1");
+    delay.tv_sec = 2;
+    delay.tv_nsec = 0;
+    nanosleep(&delay, NULL);
+    GuestDumpMachThread(context->thread, "watchdog2");
+    fprintf(stdout, "[guest] watchdog: guest still running, aborting\n");
+    fflush(stdout);
+    _exit(4);
 }
 
 static int GuestLoadAndRun(const char *path)
@@ -633,6 +640,7 @@ static int GuestLoadAndRun(const char *path)
 
     uint64_t stackPointer = (GuestStackTop - 16) & ~0xFULL;
     uint64_t *cursor = (uint64_t *)stackPointer;
+    *--cursor = 0;  /* padding: keeps sp 16-byte aligned */
     *--cursor = 0;  /* auxv AT_NULL value */
     *--cursor = 0;  /* auxv AT_NULL type */
     *--cursor = 0;  /* envp NULL */
@@ -644,9 +652,11 @@ static int GuestLoadAndRun(const char *path)
     const uint32_t *entryWords =
         (const uint32_t *)(imageStart + (header->e_entry - minAddress));
     fprintf(stdout,
-            "[guest] entry=0x%llx stack=0x%llx words=%08x %08x %08x %08x %08x\n",
+            "[guest] entry=0x%llx stack=0x%llx aligned=%d "
+            "words=%08x %08x %08x %08x %08x\n",
             (unsigned long long)entry,
             (unsigned long long)stackPointer,
+            (stackPointer & 0xF) == 0 ? 1 : 0,
             entryWords[0],
             entryWords[1],
             entryWords[2],
@@ -654,26 +664,23 @@ static int GuestLoadAndRun(const char *path)
             entryWords[4]);
     fflush(stdout);
 
-    GuestStartContext context;
-    context.entry = entry;
-    context.stack = stackPointer;
+    static GuestWatchdogContext watchdogContext;
+    watchdogContext.thread = pthread_mach_thread_np(pthread_self());
 
-    pthread_t guestThread;
-    if (pthread_create(&guestThread, NULL, GuestStartThread, &context) != 0) {
-        fprintf(stderr, "[guest] guest thread create failed\n");
+    pthread_t watchdog;
+    if (pthread_create(&watchdog,
+                       NULL,
+                       GuestWatchdogThread,
+                       &watchdogContext) != 0) {
+        fprintf(stderr, "[guest] watchdog thread create failed\n");
         return 1;
     }
 
-    struct timespec delay = { 1, 0 };
-    nanosleep(&delay, NULL);
-    GuestDumpThread(guestThread, "watchdog1");
-    delay.tv_sec = 2;
-    delay.tv_nsec = 0;
-    nanosleep(&delay, NULL);
-    GuestDumpThread(guestThread, "watchdog2");
-    fprintf(stdout, "[guest] watchdog: guest still running, aborting\n");
+    fprintf(stdout, "[guest] jump\n");
     fflush(stdout);
-    _exit(4);
+
+    GuestJump(entry, stackPointer);
+    return 0;
 }
 
 int main(int argc, char *argv[])
