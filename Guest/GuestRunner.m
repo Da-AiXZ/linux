@@ -91,6 +91,7 @@ typedef struct {
 
 static uintptr_t GuestHeapBase = 0;
 static uintptr_t GuestHeapEnd = 0;
+static uintptr_t GuestBrkCurrent = 0;
 static uint64_t GuestStackTop = 0;
 
 #pragma mark - JIT
@@ -102,11 +103,23 @@ kern_return_t catch_exception_raise(mach_port_t exception_port,
                                     exception_data_t code,
                                     mach_msg_type_number_t code_count)
 {
+    GuestThreadState64 state;
+    mach_msg_type_number_t count = GUEST_ARM_THREAD_STATE64_COUNT;
+    kern_return_t result = thread_get_state(thread,
+                                            GUEST_ARM_THREAD_STATE64,
+                                            (thread_state_t)&state,
+                                            &count);
     fprintf(stdout,
-            "[guest] exception type=%d code=0x%llx count=%u\n",
+            "[guest] exception type=%d code=0x%llx pc=0x%llx lr=0x%llx "
+            "sp=0x%llx x0=0x%llx x8=0x%llx state=%d\n",
             (int)exception,
             code_count > 0 ? (unsigned long long)code[0] : 0ULL,
-            (unsigned)code_count);
+            result == KERN_SUCCESS ? (unsigned long long)state.pc : 0ULL,
+            result == KERN_SUCCESS ? (unsigned long long)state.lr : 0ULL,
+            result == KERN_SUCCESS ? (unsigned long long)state.sp : 0ULL,
+            result == KERN_SUCCESS ? (unsigned long long)state.x[0] : 0ULL,
+            result == KERN_SUCCESS ? (unsigned long long)state.x[8] : 0ULL,
+            result);
     return KERN_FAILURE;
 }
 
@@ -184,7 +197,9 @@ static BOOL GuestEnableJIT(void)
                            port,
                            MACH_MSG_TYPE_MAKE_SEND);
     task_set_exception_ports(mach_task_self(),
-                             EXC_MASK_SOFTWARE,
+                             EXC_MASK_SOFTWARE |
+                                 EXC_MASK_BAD_ACCESS |
+                                 EXC_MASK_BAD_INSTRUCTION,
                              port,
                              EXCEPTION_DEFAULT,
                              THREAD_STATE_NONE);
@@ -202,7 +217,9 @@ static BOOL GuestEnableJIT(void)
 
 #pragma mark - Syscall trampoline
 
-uint64_t GuestSyscallDispatch(uint64_t *args, uint64_t number)
+uint64_t GuestSyscallDispatch(uint64_t *args,
+                              uint64_t number,
+                              uint64_t returnAddress)
     __attribute__((used));
 
 __attribute__((naked, noinline, used))
@@ -215,6 +232,7 @@ static void GuestSyscallTrampoline(void)
         "stp x0, x1, [sp, #-16]!\n"
         "mov x0, sp\n"
         "mov x1, x8\n"
+        "mov x2, x30\n"
         "bl _GuestSyscallDispatch\n"
         "ldp x9, x1, [sp], #16\n"
         "ldp x2, x3, [sp], #16\n"
@@ -230,18 +248,31 @@ static uint64_t GuestErrno(void)
 
 #pragma mark - Syscalls
 
-uint64_t GuestSyscallDispatch(uint64_t *args, uint64_t number)
+uint64_t GuestSyscallDispatch(uint64_t *args,
+                              uint64_t number,
+                              uint64_t returnAddress)
 {
     static unsigned int traceCount = 0;
-    if (traceCount < 64) {
+    if (traceCount < 40) {
         traceCount++;
         fprintf(stdout,
-                "[guest] svc %llu x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx\n",
+                "[guest] svc %llu site=0x%llx x0=0x%llx x1=0x%llx "
+                "x2=0x%llx x3=0x%llx\n",
                 (unsigned long long)number,
+                (unsigned long long)(returnAddress - 4),
                 (unsigned long long)args[0],
                 (unsigned long long)args[1],
                 (unsigned long long)args[2],
                 (unsigned long long)args[3]);
+    }
+
+    if (number > 500) {
+        const uint32_t *site = (const uint32_t *)(uintptr_t)(returnAddress - 4);
+        fprintf(stdout, "[guest] site code:");
+        for (int index = -3; index <= 1; index++) {
+            fprintf(stdout, " %08x", site[index]);
+        }
+        fprintf(stdout, "\n");
     }
 
     switch (number) {
@@ -355,12 +386,13 @@ uint64_t GuestSyscallDispatch(uint64_t *args, uint64_t number)
     }
     case 214: { /* brk */
         if (args[0] == 0) {
-            return GuestHeapEnd;
+            return GuestBrkCurrent;
         }
         if (args[0] >= GuestHeapBase && args[0] <= GuestHeapEnd) {
-            return args[0];
+            GuestBrkCurrent = (uintptr_t)args[0];
+            return GuestBrkCurrent;
         }
-        return GuestHeapEnd;
+        return GuestBrkCurrent;
     }
     case 222: { /* mmap */
         void *result = mmap((void *)args[0],
@@ -803,6 +835,11 @@ static int GuestLoadAndRun(int argc, char *argv[])
         return 1;
     }
     GuestHeapEnd = GuestHeapBase + heapSize;
+    GuestBrkCurrent = GuestHeapBase;
+    fprintf(stdout,
+            "[guest] heap=0x%lx..0x%lx\n",
+            (unsigned long)GuestHeapBase,
+            (unsigned long)GuestHeapEnd);
 
     size_t stackSize = 8 * 1024 * 1024;
     void *stack = mmap(NULL,
