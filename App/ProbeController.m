@@ -702,6 +702,8 @@ static void ProbeDarwinNotifyCallback(CFNotificationCenterRef center,
         @"application-identifier",
         @"platform-application",
         @"com.apple.private.cs.debugger",
+        @"com.apple.security.cs.allow-jit",
+        @"dynamic-codesigning",
     ];
     for (NSString *key in keys) {
         xpc_object_t value = copyEntitlement(key.UTF8String);
@@ -780,8 +782,6 @@ static void ProbeDarwinNotifyCallback(CFNotificationCenterRef center,
     uint64_t done = 0;
     if (notify_get_state(_notifyDoneToken, &done) == NOTIFY_STATUS_OK &&
         done != _lastNotifySequence) {
-        _lastNotifySequence = done;
-
         uint64_t length = 0;
         notify_get_state(_notifyLenToken, &length);
         if (length > 0 && length <= PROBE_NOTIFY_BYTES) {
@@ -796,14 +796,21 @@ static void ProbeDarwinNotifyCallback(CFNotificationCenterRef center,
                 memcpy(buffer + (NSUInteger)index * 8, &word, 8);
             }
 
-            NSString *json =
-                [[NSString alloc] initWithBytes:buffer
-                                         length:(NSUInteger)length
-                                       encoding:NSUTF8StringEncoding];
-            if (json.length > 0) {
-                [self log:[NSString stringWithFormat:@"[notify] %@", json]];
-                if ([json containsString:@"\"jitRX\""]) {
-                    [self scheduleFinishAfterChannels];
+            uint64_t verify = 0;
+            notify_get_state(_notifyDoneToken, &verify);
+            if (verify == done) {
+                _lastNotifySequence = done;
+
+                NSString *json =
+                    [[NSString alloc] initWithBytes:buffer
+                                             length:(NSUInteger)length
+                                           encoding:NSUTF8StringEncoding];
+                if (json.length > 0) {
+                    [self log:[NSString stringWithFormat:
+                               @"[notify] seq=%llu %@", done, json]];
+                    if ([json containsString:@"\"jitRX\""]) {
+                        [self scheduleFinishAfterChannels];
+                    }
                 }
             }
         }

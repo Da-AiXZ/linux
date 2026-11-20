@@ -18,6 +18,7 @@
 #import <sys/sysctl.h>
 #import <sys/wait.h>
 #import <unistd.h>
+#import <xpc/xpc.h>
 
 #import "ProbeChannels.h"
 #import "ProbeExtension.h"
@@ -409,13 +410,43 @@ static mach_port_t ProbeBootChannel(void)
     return MACH_PORT_NULL;
 }
 
-static NSString *ProbeCompactJSON(pid_t hostPid, BOOL includeJIT)
+static void ProbePublishDictionary(NSDictionary *info, uint64_t sequence)
+{
+    NSData *data = [NSJSONSerialization dataWithJSONObject:info
+                                                   options:0
+                                                     error:NULL];
+    NSString *json = data != nil
+        ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]
+        : @"{}";
+    ProbePublishJSON(json, sequence);
+}
+
+static BOOL ProbeEntitlementBool(const char *name)
+{
+    typedef xpc_object_t (*ProbeCopyEntitlementFn)(const char *);
+    ProbeCopyEntitlementFn copyEntitlement =
+        (ProbeCopyEntitlementFn)dlsym(RTLD_DEFAULT,
+                                      "xpc_copy_entitlement_for_self");
+    if (copyEntitlement == NULL) {
+        return NO;
+    }
+
+    xpc_object_t value = copyEntitlement(name);
+    if (value == NULL || xpc_get_type(value) != XPC_TYPE_BOOL) {
+        return NO;
+    }
+    return xpc_bool_get_value(value);
+}
+
+static NSMutableDictionary *ProbeBaseInfo(pid_t hostPid)
 {
     NSMutableDictionary *info = [NSMutableDictionary dictionary];
     info[@"machine"] = ProbeSysctlString("hw.machine");
     info[@"os"] = ProbeSysctlString("kern.osversion");
     info[@"pid"] = @(getpid());
     info[@"host"] = @(hostPid);
+    info[@"jitEnt"] = @(ProbeEntitlementBool("com.apple.security.cs.allow-jit"));
+    info[@"dynCs"] = @(ProbeEntitlementBool("dynamic-codesigning"));
 
     NSDictionary *process = ProbeProcessInfo(hostPid);
     info[@"fork"] = process[@"fork"] ?: @(-1);
@@ -429,52 +460,75 @@ static NSString *ProbeCompactJSON(pid_t hostPid, BOOL includeJIT)
     info[@"tmpW"] =
         @([[NSFileManager defaultManager] isWritableFileAtPath:NSTemporaryDirectory()]);
 
-    if (includeJIT) {
-        NSDictionary *jit = ProbeJITInfo();
-        info[@"jitMmap"] = jit[@"mmapRW"] ?: @NO;
-        info[@"jitRX"] = jit[@"mprotectRX"] ?: @NO;
-        info[@"jitErrno"] = jit[@"mprotectErrno"] ?: @(-1);
-        info[@"jitExec"] = jit[@"execResult"] ?: @(-1);
-        info[@"jitJIT"] = jit[@"mmapJIT"] ?: @NO;
-        info[@"jitJITErrno"] = jit[@"mmapJITErrno"] ?: @(-1);
-    }
-
-    NSData *data = [NSJSONSerialization dataWithJSONObject:info
-                                                   options:0
-                                                     error:NULL];
-    return data != nil
-        ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]
-        : @"{}";
+    return info;
 }
 
 int ProbeExtensionChannelRun(pid_t hostPid)
 {
     @autoreleasepool {
-        /*
-         * Reverse bootstrap: the extension registers a service, the host
-         * looks it up and sends back a receive right for the results.
-         */
         mach_port_t hostPort = ProbeBootChannel();
         if (MACH_PORT_VALID(hostPort)) {
             ServicePort = hostPort;
         }
 
-        NSString *partial = ProbeCompactJSON(hostPid, NO);
-        if (MACH_PORT_VALID(ServicePort)) {
-            ProbeSend(@{ @"stage": @"partial",
-                         @"data": partial,
-                         @"sequence": @1 });
-        }
-        ProbePublishJSON(partial, 1);
+        NSMutableDictionary *info = ProbeBaseInfo(hostPid);
+        ProbePublishDictionary(info, 1);
 
-        NSString *final = ProbeCompactJSON(hostPid, YES);
-        if (MACH_PORT_VALID(ServicePort)) {
-            ProbeSend(@{ @"stage": @"final",
-                         @"data": final,
-                         @"sequence": @2 });
-            ProbeSend(@{ @"stage": @"done", @"done": @YES });
+        /*
+         * JIT is published in stages: mprotect result first, then the
+         * execution result. Executing the page is the step that can kill
+         * the process, so the mprotect answer survives even then.
+         */
+        size_t pageSize = (size_t)getpagesize();
+        errno = 0;
+        void *memory = mmap(NULL,
+                            pageSize,
+                            PROT_READ | PROT_WRITE,
+                            MAP_PRIVATE | MAP_ANON,
+                            -1,
+                            0);
+        info[@"jitMmap"] = @(memory != MAP_FAILED);
+        info[@"jitMmapErrno"] = @(errno);
+
+        if (memory != MAP_FAILED) {
+            const uint32_t code[] = { 0xD2800540u, 0xD65F03C0u };
+            memcpy(memory, code, sizeof(code));
+
+            errno = 0;
+            int protectResult =
+                mprotect(memory, pageSize, PROT_READ | PROT_EXEC);
+            info[@"jitRX"] = @(protectResult == 0);
+            info[@"jitErrno"] = @(errno);
+            ProbePublishDictionary(info, 2);
+
+            if (protectResult == 0) {
+                int (*function)(void) = (int (*)(void))memory;
+                int execResult = function();
+                info[@"jitExec"] = @(execResult);
+                ProbePublishDictionary(info, 3);
+            }
+
+            munmap(memory, pageSize);
+        } else {
+            ProbePublishDictionary(info, 2);
         }
-        ProbePublishJSON(final, 2);
+
+        errno = 0;
+        void *jitMemory = mmap(NULL,
+                               pageSize,
+                               PROT_READ | PROT_WRITE,
+                               MAP_PRIVATE | MAP_ANON | MAP_JIT,
+                               -1,
+                               0);
+        info[@"jitJIT"] = @(jitMemory != MAP_FAILED);
+        info[@"jitJITErrno"] = @(errno);
+        if (jitMemory != MAP_FAILED) {
+            munmap(jitMemory, pageSize);
+        }
+        ProbePublishDictionary(info, 4);
+
+        info[@"done"] = @YES;
+        ProbePublishDictionary(info, 5);
         ProbeNotify(CFSTR("com.daixz.linux.probe.ext-done"));
     }
 
