@@ -197,9 +197,9 @@ extern kern_return_t task_for_pid(mach_port_t target_task,
         return;
     }
 
-    [context openURL:url completionHandler:^(BOOL success, NSError *error) {
+    [context openURL:url completionHandler:^(BOOL success) {
         if (!success) {
-            NSLog(@"ProbeExtension: openURL failed: %@", error);
+            NSLog(@"ProbeExtension: openURL failed");
         }
     }];
 }
