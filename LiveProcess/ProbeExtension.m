@@ -13,8 +13,7 @@
 #import <sys/wait.h>
 #import <unistd.h>
 
-#import "ProbeMachPort.h"
-#import "ProbeProtocol.h"
+#import "ProbeXPCProtocol.h"
 
 #ifndef MAP_JIT
 #define MAP_JIT 0x800
@@ -28,13 +27,9 @@ extern kern_return_t task_for_pid(mach_port_t target_task,
 @interface ProbeExtension : UIViewController <NSExtensionRequestHandling>
 @end
 
-@interface ProbeExtension () {
-    mach_port_t _hostPort;
-    int _socketFD;
+@implementation ProbeExtension {
+    NSXPCConnection *_connection;
 }
-@end
-
-@implementation ProbeExtension
 
 - (void)loadView
 {
@@ -46,66 +41,127 @@ extern kern_return_t task_for_pid(mach_port_t target_task,
     @autoreleasepool {
         NSExtensionItem *item = context.inputItems.firstObject;
         NSDictionary *input = item.userInfo;
-        id portObject = input[@"port"];
-        id socketObject = input[@"socket"];
+        id endpointObject = input[@"endpoint"];
 
-        ProbeMachPort *port = nil;
-        if ([portObject isKindOfClass:[ProbeMachPort class]]) {
-            port = (ProbeMachPort *)portObject;
-        }
-
-        NSFileHandle *socketHandle = nil;
-        if ([socketObject isKindOfClass:[NSFileHandle class]]) {
-            socketHandle = (NSFileHandle *)socketObject;
-        }
-
-        if (port == nil && socketHandle == nil) {
-            NSLog(@"ProbeExtension: no transport in input (noPort=%@)",
-                  input[@"noPort"]);
+        if (![endpointObject isKindOfClass:[NSXPCListenerEndpoint class]]) {
+            NSLog(@"ProbeExtension: no NSXPCListenerEndpoint in input");
             [context completeRequestReturningItems:nil completionHandler:nil];
             return;
         }
 
-        _hostPort = port != nil ? port.port : MACH_PORT_NULL;
-        _socketFD = socketHandle != nil ? socketHandle.fileDescriptor : -1;
-        mach_port_t hostPort = _hostPort;
         NSNumber *hostPidNumber = input[@"hostPid"];
         pid_t hostPid = hostPidNumber != nil ? hostPidNumber.intValue : 0;
 
-        NSMutableDictionary *results = [NSMutableDictionary dictionary];
+        NSXPCConnection *connection =
+            [[NSXPCConnection alloc] initWithListenerEndpoint:endpointObject];
+        connection.remoteObjectInterface =
+            [NSXPCInterface interfaceWithProtocol:@protocol(ProbeServiceProtocol)];
+        connection.invalidationHandler = ^{
+            NSLog(@"ProbeExtension: XPC connection invalidated");
+        };
+        connection.interruptionHandler = ^{
+            NSLog(@"ProbeExtension: XPC connection interrupted");
+        };
+        [connection resume];
+        _connection = connection;
 
-        results[@"stage"] = @"device";
-        results[@"pid"] = @(getpid());
-        results[@"hostPid"] = @(hostPid);
-        results[@"device"] = [self deviceInfo];
-        [self sendKind:PROBE_MSG_RESULT json:results toPort:hostPort];
+        id<ProbeServiceProtocol> proxy =
+            [connection remoteObjectProxyWithErrorHandler:^(NSError *error) {
+                NSLog(@"ProbeExtension: XPC proxy error: %@", error);
+            }];
+
+        NSMutableDictionary *device = [NSMutableDictionary dictionary];
+        device[@"stage"] = @"device";
+        device[@"pid"] = @(getpid());
+        device[@"hostPid"] = @(hostPid);
+        device[@"device"] = [self deviceInfo];
+        [self sendJSON:device proxy:proxy];
 
         /*
-         * Each risky probe is sent as its own stage, so a crash still leaves
-         * the earlier results in the host's log.
+         * Each risky probe is its own stage, so a crash still leaves the
+         * earlier results in the host's log.
          */
-        [self sendKind:PROBE_MSG_RESULT
-                  json:@{@"stage": @"process",
+        [self sendJSON:@{@"stage": @"process",
                          @"process": [self processInfoWithHostPid:hostPid]}
-                toPort:hostPort];
+                 proxy:proxy];
 
-        [self sendKind:PROBE_MSG_RESULT
-                  json:@{@"stage": @"mach",
-                         @"mach": [self machProbeWithPort:hostPort]}
-                toPort:hostPort];
+        [self sendJSON:@{@"stage": @"xpc",
+                         @"xpc": [self xpcProbeWithProxy:proxy]}
+                 proxy:proxy];
 
         /*
          * JIT is deliberately last. If executing the RX page faults, the
          * extension dies here and the host still has every earlier result.
          */
-        [self sendKind:PROBE_MSG_RESULT
-                  json:@{@"stage": @"jit",
+        [self sendJSON:@{@"stage": @"jit",
                          @"jit": [self jitProbe]}
-                toPort:hostPort];
+                 proxy:proxy];
 
-        [self sendKind:PROBE_MSG_DONE json:@{@"done": @YES} toPort:hostPort];
-        [context completeRequestReturningItems:nil completionHandler:nil];
+        [self sendDoneWithProxy:proxy context:context];
     }
+}
+
+#pragma mark - XPC transport
+
+- (BOOL)sendJSON:(NSDictionary *)dictionary
+           proxy:(id<ProbeServiceProtocol>)proxy
+{
+    NSData *data = [NSJSONSerialization dataWithJSONObject:dictionary
+                                                   options:0
+                                                     error:NULL];
+    if (data == nil || proxy == nil) {
+        return NO;
+    }
+
+    NSString *json = [[NSString alloc] initWithData:data
+                                           encoding:NSUTF8StringEncoding];
+    if (json == nil) {
+        return NO;
+    }
+
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    [proxy logJSON:json withReply:^{
+        dispatch_semaphore_signal(semaphore);
+    }];
+
+    return dispatch_semaphore_wait(
+               semaphore,
+               dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)))
+        == 0;
+}
+
+- (void)sendDoneWithProxy:(id<ProbeServiceProtocol>)proxy
+                  context:(NSExtensionContext *)context
+{
+    NSData *data = [NSJSONSerialization dataWithJSONObject:@{@"done": @YES}
+                                                   options:0
+                                                     error:NULL];
+    NSString *json = data != nil
+        ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]
+        : @"{\"done\":true}";
+
+    __block BOOL completed = NO;
+    void (^finish)(void) = ^{
+        if (completed) {
+            return;
+        }
+        completed = YES;
+        [context completeRequestReturningItems:nil completionHandler:nil];
+    };
+
+    if (proxy != nil) {
+        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+        [proxy logJSON:json withReply:^{
+            dispatch_semaphore_signal(semaphore);
+            finish();
+        }];
+        dispatch_semaphore_wait(
+            semaphore,
+            dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)));
+    }
+
+    finish();
+    [_connection invalidate];
 }
 
 #pragma mark - Device
@@ -261,23 +317,14 @@ static NSString *ProbeSysctlString(const char *name)
     return result;
 }
 
-#pragma mark - Mach round trip
+#pragma mark - XPC round trip
 
-- (NSDictionary *)machProbeWithPort:(mach_port_t)hostPort
+- (NSDictionary *)xpcProbeWithProxy:(id<ProbeServiceProtocol>)proxy
 {
     NSMutableDictionary *result = [NSMutableDictionary dictionary];
 
-    if (hostPort == MACH_PORT_NULL) {
-        result[@"skipped"] = @"no Mach transport";
-        return result;
-    }
-
-    mach_port_t replyPort = MACH_PORT_NULL;
-    kern_return_t kr = mach_port_allocate(mach_task_self(),
-                                          MACH_PORT_RIGHT_RECEIVE,
-                                          &replyPort);
-    if (kr != KERN_SUCCESS) {
-        result[@"allocateError"] = @(kr);
+    if (proxy == nil) {
+        result[@"skipped"] = @"no XPC proxy";
         return result;
     }
 
@@ -286,44 +333,22 @@ static NSString *ProbeSysctlString(const char *name)
     uint64_t started = mach_absolute_time();
 
     for (int index = 0; index < count; index++) {
-        ProbeMessage message;
-        memset(&message, 0, sizeof(message));
-        message.header.msgh_bits =
-            MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
-                           MACH_MSG_TYPE_MAKE_SEND_ONCE);
-        message.header.msgh_remote_port = hostPort;
-        message.header.msgh_local_port = replyPort;
-        message.header.msgh_id = PROBE_MSG_PING;
-        message.header.msgh_size = sizeof(message);
-        message.kind = PROBE_MSG_PING;
+        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+        __block int64_t value = 0;
 
-        mach_msg_return_t mr = mach_msg(&message.header,
-                                        MACH_SEND_MSG,
-                                        sizeof(message),
-                                        0,
-                                        MACH_PORT_NULL,
-                                        MACH_MSG_TIMEOUT_NONE,
-                                        MACH_PORT_NULL);
-        if (mr != MACH_MSG_SUCCESS) {
-            result[@"sendError"] = @(mr);
+        [proxy pingWithReply:^(int64_t replyValue) {
+            value = replyValue;
+            dispatch_semaphore_signal(semaphore);
+        }];
+
+        dispatch_time_t timeout =
+            dispatch_time(DISPATCH_TIME_NOW, (int64_t)(500 * NSEC_PER_MSEC));
+        if (dispatch_semaphore_wait(semaphore, timeout) != 0) {
+            result[@"timeoutAtIndex"] = @(index);
             break;
         }
-
-        ProbeReply reply;
-        memset(&reply, 0, sizeof(reply));
-        mr = mach_msg(&reply.header,
-                      MACH_RCV_MSG | MACH_RCV_TIMEOUT,
-                      0,
-                      sizeof(reply),
-                      replyPort,
-                      500,
-                      MACH_PORT_NULL);
-        if (mr != MACH_MSG_SUCCESS) {
-            result[@"receiveError"] = @(mr);
-            break;
-        }
-        if (reply.result != 42) {
-            result[@"badReply"] = @(reply.result);
+        if (value != 42) {
+            result[@"badReply"] = @(value);
             break;
         }
         completed++;
@@ -340,68 +365,7 @@ static NSString *ProbeSysctlString(const char *name)
     result[@"microsecondsPerRoundTrip"] =
         completed > 0 ? @(nanoseconds / 1000.0 / completed) : @0;
 
-    mach_port_destroy(mach_task_self(), replyPort);
     return result;
-}
-
-#pragma mark - Mach send
-
-- (void)sendKind:(uint32_t)kind
-            json:(NSDictionary *)dictionary
-          toPort:(mach_port_t)port
-{
-    NSData *data = [NSJSONSerialization dataWithJSONObject:dictionary
-                                                   options:0
-                                                     error:NULL];
-    if (data == nil) {
-        return;
-    }
-
-    if (port == MACH_PORT_NULL) {
-        if (_socketFD < 0) {
-            return;
-        }
-
-        NSMutableData *line = [NSMutableData dataWithData:data];
-        const uint8_t newline = '\n';
-        [line appendBytes:&newline length:1];
-
-        const uint8_t *bytes = line.bytes;
-        size_t remaining = line.length;
-        while (remaining > 0) {
-            ssize_t written = write(_socketFD, bytes, remaining);
-            if (written <= 0) {
-                break;
-            }
-            bytes += written;
-            remaining -= (size_t)written;
-        }
-        return;
-    }
-
-    NSUInteger length = MIN(data.length, (NSUInteger)PROBE_PAYLOAD_MAX);
-    ProbeMessage message;
-    memset(&message, 0, sizeof(message));
-    message.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
-    message.header.msgh_remote_port = port;
-    message.header.msgh_local_port = MACH_PORT_NULL;
-    message.header.msgh_id = kind;
-    message.kind = kind;
-    message.length = (uint32_t)length;
-    memcpy(message.payload, data.bytes, length);
-
-    mach_msg_size_t size =
-        (mach_msg_size_t)(offsetof(ProbeMessage, payload) + length);
-    size = (size + 3u) & ~3u;
-    message.header.msgh_size = size;
-
-    mach_msg(&message.header,
-             MACH_SEND_MSG,
-             size,
-             0,
-             MACH_PORT_NULL,
-             MACH_MSG_TIMEOUT_NONE,
-             MACH_PORT_NULL);
 }
 
 @end
