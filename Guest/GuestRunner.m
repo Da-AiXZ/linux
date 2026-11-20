@@ -390,6 +390,10 @@ uint64_t GuestSyscallDispatch(uint64_t *args, uint64_t number)
 
 #pragma mark - Loader
 
+#ifndef VM_FLAGS_OVERWRITE
+#define VM_FLAGS_OVERWRITE 0x4000
+#endif
+
 static BOOL GuestRangeFree(uintptr_t address, size_t size)
 {
     vm_address_t target = (vm_address_t)address;
@@ -399,19 +403,19 @@ static BOOL GuestRangeFree(uintptr_t address, size_t size)
                                        VM_FLAGS_FIXED);
 
     if (result != KERN_SUCCESS && address < 0x100000000ULL) {
-        /* The Mach-O __PAGEZERO reservation owns the low address space.
-         * Release it so a fixed-address guest can live there. */
-        for (uint64_t offset = 0; offset < 0x100000000ULL;
-             offset += 0x40000000ULL) {
-            vm_deallocate(mach_task_self(),
-                          (vm_address_t)offset,
-                          (vm_size_t)0x40000000ULL);
-        }
+        /* iOS reserves the low 4GB with the Mach-O __PAGEZERO entry.
+         * Overwrite that entry so a fixed-address guest can live here. */
         target = (vm_address_t)address;
         result = vm_allocate(mach_task_self(),
                              &target,
                              (vm_size_t)size,
-                             VM_FLAGS_FIXED);
+                             VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE);
+        if (result == KERN_SUCCESS) {
+            fprintf(stdout,
+                    "[guest] low range 0x%lx reclaimed (%llu bytes)\n",
+                    (unsigned long)address,
+                    (unsigned long long)size);
+        }
     }
 
     if (result != KERN_SUCCESS) {
@@ -429,7 +433,7 @@ static uintptr_t GuestChooseBase(uint64_t imageSize, uintptr_t trampoline)
 
     for (size_t index = 0; index < sizeof(offsets) / sizeof(offsets[0]);
          index++) {
-        uintptr_t candidate = (trampoline + offsets[index]) & ~0xFFFULL;
+        uintptr_t candidate = (trampoline + offsets[index]) & ~0x3FFFULL;
         int64_t distance = (int64_t)candidate - (int64_t)trampoline;
         if (distance < 0 || distance > 0x07000000) {
             continue;
@@ -593,7 +597,7 @@ static uintptr_t GuestMapStub(uintptr_t imageStart,
     for (size_t index = 0; index < sizeof(offsets) / sizeof(offsets[0]);
          index++) {
         uintptr_t candidate = (uintptr_t)((int64_t)imageStart + offsets[index]);
-        candidate &= ~0xFFFULL;
+        candidate &= ~0x3FFFULL;
 
         int64_t distance = (int64_t)candidate - (int64_t)imageStart;
         if (distance < -(1LL << 26) || distance > (1LL << 26)) {
@@ -664,7 +668,7 @@ static int GuestLoadAndRun(int argc, char *argv[])
         return 1;
     }
 
-    uint64_t imageSize = (maxAddress - minAddress + 0xFFF) & ~0xFFFULL;
+    uint64_t imageSize = (maxAddress - minAddress + 0x3FFF) & ~0x3FFFULL;
     uintptr_t trampoline = (uintptr_t)&GuestSyscallTrampoline;
 
     uintptr_t base = 0;
@@ -769,8 +773,8 @@ static int GuestLoadAndRun(int argc, char *argv[])
 
         uintptr_t segmentBase =
             (uintptr_t)image + (program->p_vaddr - minAddress);
-        uintptr_t segmentStart = segmentBase & ~0xFFFULL;
-        uintptr_t segmentEnd = (segmentBase + program->p_memsz + 0xFFF) & ~0xFFFULL;
+        uintptr_t segmentStart = segmentBase & ~0x3FFFULL;
+        uintptr_t segmentEnd = (segmentBase + program->p_memsz + 0x3FFF) & ~0x3FFFULL;
         int protection = 0;
         if (program->p_flags & ELF_PF_R) protection |= PROT_READ;
         if (program->p_flags & ELF_PF_W) protection |= PROT_WRITE;
