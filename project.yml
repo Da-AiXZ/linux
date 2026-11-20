@@ -9,8 +9,8 @@ options:
 settings:
   base:
     IPHONEOS_DEPLOYMENT_TARGET: "16.0"
-    MARKETING_VERSION: "1.0"
-    CURRENT_PROJECT_VERSION: "1"
+    MARKETING_VERSION: "0.3.0"
+    CURRENT_PROJECT_VERSION: "3"
     CLANG_ENABLE_OBJC_ARC: YES
     CLANG_ENABLE_MODULES: YES
     CODE_SIGNING_ALLOWED: NO
@@ -60,11 +60,28 @@ targets:
         OTHER_LDFLAGS: "-Wl,-e,_NSExtensionMain"
         TARGETED_DEVICE_FAMILY: "1,2"
 
+  ProbeHelper:
+    type: tool
+    platform: iOS
+    sources:
+      - path: Helper
+        excludes:
+          - "*.entitlements"
+    settings:
+      base:
+        PRODUCT_NAME: probe-helper
+        PRODUCT_BUNDLE_IDENTIFIER: com.daixz.linux.probe.helper
+        MACH_O_TYPE: mh_execute
+        SKIP_INSTALL: YES
+        OTHER_LDFLAGS: "-framework Foundation -framework CoreFoundation"
+        TARGETED_DEVICE_FAMILY: "1,2"
+
 schemes:
   Probe:
     build:
       targets:
         Probe: all
+        ProbeHelper: all
     run:
       config: Debug
     archive:

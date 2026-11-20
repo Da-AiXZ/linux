@@ -44,7 +44,12 @@ jobs:
         run: |
           set -eux
           APP="build/Build/Products/Release-iphoneos/Probe.app"
+          HELPER="build/Build/Products/Release-iphoneos/probe-helper"
           test -d "$APP"
+          test -f "$HELPER"
+          mkdir -p "$APP/Helpers"
+          cp "$HELPER" "$APP/Helpers/probe-helper"
+          chmod 755 "$APP/Helpers/probe-helper"
           rm -rf Payload PayloadUnsigned LinuxProbe.ipa LinuxProbe-unsigned.ipa
           mkdir Payload
           mkdir -p PayloadUnsigned/Payload
@@ -67,12 +72,20 @@ jobs:
               || codesign --force --sign - \
                    --entitlements LiveProcess/LiveProcess.entitlements \
                    "Payload/Probe.app/PlugIns/LiveProcess.appex/LiveProcess" || true
+            ldid -SHelper/ProbeHelper.entitlements \
+              "Payload/Probe.app/Helpers/probe-helper" \
+              || codesign --force --sign - \
+                   --entitlements Helper/ProbeHelper.entitlements \
+                   "Payload/Probe.app/Helpers/probe-helper" || true
           else
             codesign --force --sign - --entitlements App/Probe.entitlements \
               "Payload/Probe.app/Probe" || true
             codesign --force --sign - \
               --entitlements LiveProcess/LiveProcess.entitlements \
               "Payload/Probe.app/PlugIns/LiveProcess.appex/LiveProcess" || true
+            codesign --force --sign - \
+              --entitlements Helper/ProbeHelper.entitlements \
+              "Payload/Probe.app/Helpers/probe-helper" || true
           fi
           codesign --force --sign - \
             "Payload/Probe.app/PlugIns/LiveProcess.appex" || true

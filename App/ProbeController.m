@@ -2,10 +2,21 @@
 
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
+#import <errno.h>
+#import <mach/mach.h>
 #import <signal.h>
+#import <spawn.h>
 #import <stdint.h>
+#import <stdio.h>
 #import <stdlib.h>
 #import <string.h>
+#import <sys/wait.h>
+#import <unistd.h>
+
+extern char **environ;
+extern kern_return_t task_for_pid(mach_port_t target_task,
+                                  int pid,
+                                  mach_port_t *task);
 
 /*
  * Private Foundation class. It is used by the system to launch embedded
@@ -35,8 +46,15 @@ typedef char *(*ProbeIssueExtensionFn)(const char *extensionClass,
 @property (nonatomic, assign) CFMessagePortRef localPort;
 @property (atomic, assign) BOOL running;
 @property (atomic, assign) BOOL completed;
+@property (atomic, assign) BOOL extensionLaunched;
+@property (atomic, assign) BOOL helperFinished;
+@property (atomic, assign) BOOL startCompleted;
+@property (atomic, assign) pid_t helperPid;
 
 - (void)handleJSON:(NSString *)json;
+- (BOOL)startExtensionWithResultsPath:(NSString *)resultsPath
+                          serviceName:(NSString *)serviceName;
+- (void)drainHelperBuffer:(NSMutableData *)buffer;
 
 @end
 
@@ -71,6 +89,240 @@ static CFDataRef ProbeMessagePortCallback(CFMessagePortRef localPort,
         return NO;
     }
 
+    self.running = YES;
+    self.completed = NO;
+    self.extensionLaunched = NO;
+    self.helperFinished = NO;
+    self.startCompleted = NO;
+
+    NSDictionary *info = NSBundle.mainBundle.infoDictionary;
+    [self log:[NSString stringWithFormat:@"build %@ (%@)",
+               info[@"CFBundleShortVersionString"] ?: @"?",
+               info[@"CFBundleVersion"] ?: @"?"]];
+
+    /*
+     * The extension's file transport needs a path the extension can open.
+     * The direct-spawn helper uses the same file, so either channel is
+     * enough to read the results.
+     */
+    NSString *resultsPath =
+        [NSTemporaryDirectory() stringByAppendingPathComponent:
+            @"linux-probe-results.jsonl"];
+    [[NSFileManager defaultManager] removeItemAtPath:resultsPath error:nil];
+    [[NSFileManager defaultManager] createFileAtPath:resultsPath
+                                             contents:[NSData data]
+                                           attributes:nil];
+    self.resultsPath = resultsPath;
+    self.lineBuffer = [NSMutableData data];
+    self.readOffset = 0;
+
+    /*
+     * The service name travels to the extension as a plain string. The
+     * direct-spawn helper receives it as argv[3].
+     */
+    NSString *serviceName = @"com.daixz.linux.probe.results";
+    CFMessagePortContext portContext = {
+        0, (__bridge void *)self, NULL, NULL, NULL
+    };
+    CFMessagePortRef localPort =
+        CFMessagePortCreateLocal(kCFAllocatorDefault,
+                                 CFSTR("com.daixz.linux.probe.results"),
+                                 ProbeMessagePortCallback,
+                                 &portContext,
+                                 NULL);
+    if (localPort != NULL) {
+        CFRunLoopSourceRef source =
+            CFMessagePortCreateRunLoopSource(kCFAllocatorDefault, localPort, 0);
+        if (source != NULL) {
+            CFRunLoopAddSource(CFRunLoopGetMain(),
+                               source,
+                               kCFRunLoopDefaultMode);
+            CFRelease(source);
+        }
+        self.localPort = localPort;
+        [self log:@"message port ready."];
+    } else {
+        [self log:@"warning: CFMessagePort unavailable."];
+        serviceName = @"";
+    }
+
+    /*
+     * Route A: spawn a plain executable from our own bundle. This needs no
+     * PlugInKit registration and no extension item serializer.
+     */
+    [self spawnHelper:resultsPath serviceName:serviceName];
+
+    /*
+     * Route B: the NSExtension path, kept for comparison.
+     */
+    self.extensionLaunched = [self startExtensionWithResultsPath:resultsPath
+                                                     serviceName:serviceName];
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                 (int64_t)(25.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        ProbeController *controller = weakSelf;
+        if (controller == nil || controller.completed) {
+            return;
+        }
+        [controller log:@"probe timed out."];
+        [controller finish];
+    });
+
+    if (self.extensionLaunched) {
+        [self pollResults];
+    }
+
+    self.startCompleted = YES;
+    if (!self.extensionLaunched && self.helperFinished) {
+        [self finish];
+    }
+
+    return YES;
+}
+
+#pragma mark - Direct spawn route
+
+- (void)spawnHelper:(NSString *)resultsPath serviceName:(NSString *)serviceName
+{
+    NSString *path = [NSBundle.mainBundle.bundlePath
+        stringByAppendingPathComponent:@"Helpers/probe-helper"];
+
+    if (![[NSFileManager defaultManager] isExecutableFileAtPath:path]) {
+        [self log:@"helper missing: Helpers/probe-helper"];
+        self.helperFinished = YES;
+        return;
+    }
+
+    int fds[2] = { -1, -1 };
+    if (pipe(fds) != 0) {
+        [self log:[NSString stringWithFormat:@"pipe failed: %s",
+                   strerror(errno)]];
+        self.helperFinished = YES;
+        return;
+    }
+
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_adddup2(&actions, fds[1], STDOUT_FILENO);
+    posix_spawn_file_actions_adddup2(&actions, fds[1], STDERR_FILENO);
+    posix_spawn_file_actions_addclose(&actions, fds[0]);
+    posix_spawn_file_actions_addclose(&actions, fds[1]);
+
+    char hostPid[16];
+    snprintf(hostPid, sizeof(hostPid), "%d", getpid());
+
+    char *argv[] = {
+        (char *)path.fileSystemRepresentation,
+        (char *)resultsPath.fileSystemRepresentation,
+        hostPid,
+        (char *)(serviceName.length > 0 ? serviceName.UTF8String : ""),
+        NULL,
+    };
+
+    pid_t pid = 0;
+    int result = posix_spawn(&pid,
+                             path.fileSystemRepresentation,
+                             &actions,
+                             NULL,
+                             argv,
+                             environ);
+    posix_spawn_file_actions_destroy(&actions);
+    close(fds[1]);
+
+    if (result != 0) {
+        close(fds[0]);
+        [self log:[NSString stringWithFormat:
+                   @"helper spawn failed: %d (%s)",
+                   result,
+                   strerror(result)]];
+        self.helperFinished = YES;
+        return;
+    }
+
+    self.helperPid = pid;
+    [self log:[NSString stringWithFormat:@"helper spawned: pid=%d", pid]];
+
+    mach_port_t task = MACH_PORT_NULL;
+    kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
+    [self log:[NSString stringWithFormat:@"task_for_pid(helper)=%d", kr]];
+    if (task != MACH_PORT_NULL) {
+        mach_port_deallocate(mach_task_self(), task);
+    }
+
+    int readFD = fds[0];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSMutableData *buffer = [NSMutableData data];
+        uint8_t chunk[4096];
+
+        for (;;) {
+            ssize_t count = read(readFD, chunk, sizeof(chunk));
+            if (count > 0) {
+                [buffer appendBytes:chunk length:(NSUInteger)count];
+                [self drainHelperBuffer:buffer];
+                continue;
+            }
+            if (count < 0 && errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+        close(readFD);
+
+        int status = 0;
+        waitpid(pid, &status, 0);
+        if (WIFEXITED(status)) {
+            [self log:[NSString stringWithFormat:@"helper exited: status=%d",
+                       WEXITSTATUS(status)]];
+        } else if (WIFSIGNALED(status)) {
+            [self log:[NSString stringWithFormat:@"helper signalled: signal=%d",
+                       WTERMSIG(status)]];
+        } else {
+            [self log:@"helper exited: unknown status"];
+        }
+
+        self.helperFinished = YES;
+        if (self.startCompleted && !self.extensionLaunched) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self finish];
+            });
+        }
+    });
+}
+
+- (void)drainHelperBuffer:(NSMutableData *)buffer
+{
+    const uint8_t newline = '\n';
+    NSData *newlineData = [NSData dataWithBytes:&newline length:1];
+
+    for (;;) {
+        NSRange range = [buffer rangeOfData:newlineData
+                                    options:0
+                                      range:NSMakeRange(0, buffer.length)];
+        if (range.location == NSNotFound) {
+            return;
+        }
+
+        NSData *line = [buffer subdataWithRange:
+            NSMakeRange(0, range.location)];
+        [buffer replaceBytesInRange:NSMakeRange(0, range.location + 1)
+                          withBytes:NULL
+                             length:0];
+
+        NSString *json = [[NSString alloc] initWithData:line
+                                               encoding:NSUTF8StringEncoding];
+        if (json.length > 0) {
+            [self log:[NSString stringWithFormat:@"[spawn] %@", json]];
+        }
+    }
+}
+
+#pragma mark - Extension route
+
+- (BOOL)startExtensionWithResultsPath:(NSString *)resultsPath
+                          serviceName:(NSString *)serviceName
+{
     NSString *pluginsPath = NSBundle.mainBundle.builtInPlugInsPath;
     if (pluginsPath.length == 0) {
         [self log:@"No PlugIns directory in the app bundle."];
@@ -107,14 +359,6 @@ static CFDataRef ProbeMessagePortCallback(CFMessagePortRef localPort,
      * results file in the host's container. The extension consumes the
      * token and appends JSON lines; the host polls the file.
      */
-    NSString *resultsPath =
-        [NSTemporaryDirectory() stringByAppendingPathComponent:
-            @"linux-probe-results.jsonl"];
-    [[NSFileManager defaultManager] removeItemAtPath:resultsPath error:nil];
-    [[NSFileManager defaultManager] createFileAtPath:resultsPath
-                                             contents:[NSData data]
-                                           attributes:nil];
-
     ProbeIssueExtensionFn issue =
         (ProbeIssueExtensionFn)dlsym(RTLD_DEFAULT,
                                      "sandbox_extension_issue_file");
@@ -134,40 +378,11 @@ static CFDataRef ProbeMessagePortCallback(CFMessagePortRef localPort,
         [self log:@"warning: could not issue a sandbox extension token."];
     }
 
-    /*
-     * Independent live channel. CFMessagePort only carries a service-name
-     * string in the extension item, so it stays property-list safe. If the
-     * bootstrap namespace is not shared, the results file below is used.
-     */
-    CFMessagePortContext portContext = {
-        0, (__bridge void *)self, NULL, NULL, NULL
-    };
-    CFMessagePortRef localPort =
-        CFMessagePortCreateLocal(kCFAllocatorDefault,
-                                 CFSTR("com.daixz.linux.probe.results"),
-                                 ProbeMessagePortCallback,
-                                 &portContext,
-                                 NULL);
-    if (localPort != NULL) {
-        CFRunLoopSourceRef source =
-            CFMessagePortCreateRunLoopSource(kCFAllocatorDefault, localPort, 0);
-        if (source != NULL) {
-            CFRunLoopAddSource(CFRunLoopGetMain(),
-                               source,
-                               kCFRunLoopDefaultMode);
-            CFRelease(source);
-        }
-        self.localPort = localPort;
-        [self log:@"message port ready."];
-    } else {
-        [self log:@"warning: CFMessagePort unavailable, file only."];
-    }
-
     NSExtensionItem *item = [NSExtensionItem new];
     item.userInfo = @{
         @"resultsPath": resultsPath,
         @"resultsToken": token ?: @"",
-        @"serviceName": @"com.daixz.linux.probe.results",
+        @"serviceName": serviceName ?: @"",
         @"hostPid": @(getpid()),
     };
 
@@ -177,20 +392,11 @@ static CFDataRef ProbeMessagePortCallback(CFMessagePortRef localPort,
     if (request == nil) {
         [self log:[NSString stringWithFormat:@"extension launch failed: %@",
                    [self describeError:requestError]]];
-        if (self.localPort != NULL) {
-            CFMessagePortInvalidate(self.localPort);
-            CFRelease(self.localPort);
-            self.localPort = NULL;
-        }
         return NO;
     }
 
     self.extension = extension;
     self.requestID = request;
-    self.resultsPath = resultsPath;
-    self.lineBuffer = [NSMutableData data];
-    self.readOffset = 0;
-    self.running = YES;
 
     pid_t extensionPid = [extension pidForRequestIdentifier:request];
     [self log:[NSString stringWithFormat:
@@ -199,18 +405,6 @@ static CFDataRef ProbeMessagePortCallback(CFMessagePortRef localPort,
                extensionPid,
                getpid()]];
     [self log:[NSString stringWithFormat:@"results: %@", resultsPath]];
-
-    __weak typeof(self) weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                 (int64_t)(20.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        if (weakSelf.running) {
-            [weakSelf log:@"probe timed out."];
-            [weakSelf finish];
-        }
-    });
-
-    [self pollResults];
     return YES;
 }
 
