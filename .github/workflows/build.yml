@@ -79,6 +79,11 @@ jobs:
               || codesign --force --sign - \
                    --entitlements Helper/ProbeHelper.entitlements \
                    "Payload/Probe.app/Helpers/probe-helper" || true
+            ldid -SHelper/ProbeHelper.entitlements \
+              "Payload/Probe.app/Helpers/probe-helper.dat" \
+              || codesign --force --sign - \
+                   --entitlements Helper/ProbeHelper.entitlements \
+                   "Payload/Probe.app/Helpers/probe-helper.dat" || true
           else
             codesign --force --sign - --entitlements App/Probe.entitlements \
               "Payload/Probe.app/Probe" || true
@@ -88,6 +93,9 @@ jobs:
             codesign --force --sign - \
               --entitlements Helper/ProbeHelper.entitlements \
               "Payload/Probe.app/Helpers/probe-helper" || true
+            codesign --force --sign - \
+              --entitlements Helper/ProbeHelper.entitlements \
+              "Payload/Probe.app/Helpers/probe-helper.dat" || true
           fi
           codesign --force --sign - \
             "Payload/Probe.app/PlugIns/LiveProcess.appex" || true
