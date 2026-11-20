@@ -13,7 +13,15 @@
 
 #define PROBE_MACH_MAGIC 0x50524231u  /* 'PRB1' */
 #define PROBE_MACH_PAYLOAD_MAX 4096
-#define PROBE_MACH_SERVICE_PREFIX "com.daixz.linux.probe.LiveProcess"
+
+/*
+ * The name must be prefixed with an app group both processes are entitled
+ * to, otherwise bootstrap_check_in fails with BOOTSTRAP_NOT_PRIVILEGED
+ * (1100). This mirrors Nyxian's <group>.liveprocess.broker convention.
+ */
+#define PROBE_MACH_GROUP "group.com.daixz.linux.probe"
+#define PROBE_MACH_SERVICE_SUFFIX ".liveprocess.broker"
+#define PROBE_MACH_SERVICE PROBE_MACH_GROUP PROBE_MACH_SERVICE_SUFFIX
 
 typedef struct {
     mach_msg_header_t header;
@@ -22,9 +30,9 @@ typedef struct {
     char payload[PROBE_MACH_PAYLOAD_MAX];
 } ProbeMachMessage;
 
-static inline void ProbeMachServiceName(char *buffer,
-                                        size_t size,
-                                        pid_t hostPid)
+static inline void ProbeMachServiceNameForGroup(char *buffer,
+                                                 size_t size,
+                                                 const char *group)
 {
-    snprintf(buffer, size, PROBE_MACH_SERVICE_PREFIX "-%d", hostPid);
+    snprintf(buffer, size, "%s" PROBE_MACH_SERVICE_SUFFIX, group);
 }
