@@ -77,7 +77,7 @@
                                                      error:&error];
     if (extension == nil) {
         [self log:[NSString stringWithFormat:@"extensionWithIdentifier failed: %@",
-                   error.localizedDescription ?: @"unknown error"]];
+                   [self describeError:error]]];
         return NO;
     }
 
@@ -134,7 +134,7 @@
 
                 [self log:[NSString stringWithFormat:
                            @"Mach-port launch failed: %@",
-                           requestError.localizedDescription ?: @"unknown error"]];
+                           [self describeError:requestError]]];
             }
         }
     }
@@ -184,7 +184,7 @@
 
         [self log:[NSString stringWithFormat:
                    @"socketpair launch failed: %@",
-                   socketError.localizedDescription ?: @"unknown error"]];
+                   [self describeError:socketError]]];
         close(fds[0]);
     } else {
         [self log:[NSString stringWithFormat:@"socketpair failed: %s",
@@ -215,7 +215,7 @@
     } else {
         [self log:[NSString stringWithFormat:
                    @"plain launch also failed: %@",
-                   plainError.localizedDescription ?: @"unknown error"]];
+                   [self describeError:plainError]]];
     }
 
     return NO;
@@ -381,6 +381,18 @@
 
         [self finish];
     }
+}
+
+- (NSString *)describeError:(NSError *)error
+{
+    if (error == nil) {
+        return @"unknown error";
+    }
+    return [NSString stringWithFormat:@"%@ [%@:%ld] %@",
+            error.localizedDescription ?: @"error",
+            error.domain,
+            (long)error.code,
+            error.userInfo ?: @{}];
 }
 
 - (void)log:(NSString *)line

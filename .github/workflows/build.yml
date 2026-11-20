@@ -45,9 +45,14 @@ jobs:
           set -eux
           APP="build/Build/Products/Release-iphoneos/Probe.app"
           test -d "$APP"
-          rm -rf Payload LinuxProbe.ipa
-          mkdir Payload
+          rm -rf Payload PayloadUnsigned LinuxProbe.ipa LinuxProbe-unsigned.ipa
+          mkdir Payload PayloadUnsigned
           ditto "$APP" "Payload/Probe.app"
+          ditto "$APP" "PayloadUnsigned/Probe.app"
+
+          # Unsigned variant: let TrollStore perform the complete signature
+          # pass if the pre-signed appex is rejected by PlugInKit.
+          (cd PayloadUnsigned && /usr/bin/zip -r -y ../LinuxProbe-unsigned.ipa Payload)
 
           # Best-effort signing with the probe entitlements. TrollStore
           # re-signs on install; keeping the entitlements embedded makes the
@@ -75,9 +80,9 @@ jobs:
 
           /usr/bin/zip -r -y LinuxProbe.ipa Payload
 
-      - name: Upload IPA
+      - name: Upload IPAs
         uses: actions/upload-artifact@v4
         with:
-          name: LinuxProbe-ipa
-          path: LinuxProbe.ipa
+          name: LinuxProbe-ipas
+          path: LinuxProbe*.ipa
           if-no-files-found: error

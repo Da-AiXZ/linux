@@ -27,7 +27,7 @@
 1. `xcodegen generate`
 2. `xcodebuild` 无签名构建
 3. `ldid` 写入探测 entitlements，打包 `LinuxProbe.ipa`
-4. 上传 artifact `LinuxProbe-ipa`
+4. 上传 artifact `LinuxProbe-ipas`（含签名版和未签名版）
 
 也可以在 Actions 页面手动 `workflow_dispatch`。
 
@@ -36,8 +36,9 @@
 iPadOS 16.6.1 推荐 **TrollStore 2**（TrollInstallerX）：
 
 1. 在 iPad 上安装 TrollStore 2。
-2. 从 Actions 最近一次运行下载 `LinuxProbe-ipa`。
-3. 用 TrollStore 打开 `LinuxProbe.ipa` 安装。
+2. 从 Actions 最近一次运行下载 `LinuxProbe-ipas`。
+3. 先装 `LinuxProbe.ipa`。如果扩展启动仍失败，卸载后再装 `LinuxProbe-unsigned.ipa`，让 TrollStore 完整重签一次。
+4. 用 TrollStore 打开 IPA 安装。
 
 备选：AltStore / Sideloadly。免费开发者证书通常只带 `get-task-allow`，`increased-memory-limit` 可能不生效，但探测仍可运行。
 
