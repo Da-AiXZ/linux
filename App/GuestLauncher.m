@@ -2,7 +2,6 @@
 
 #import <mach/arm/thread_status.h>
 #import <mach/mach.h>
-#import <mach/mach_vm.h>
 #import <mach/thread_act.h>
 #import <mach/thread_status.h>
 #import <mach/vm_map.h>
@@ -241,13 +240,13 @@ extern char **environ;
 
             if (state.__pc >= 16) {
                 uint8_t code[32];
-                mach_vm_size_t codeSize = 0;
+                vm_size_t codeSize = 0;
                 kern_return_t codeResult =
-                    mach_vm_read_overwrite(task,
-                                           (mach_vm_address_t)(state.__pc - 16),
-                                           sizeof(code),
-                                           (mach_vm_address_t)code,
-                                           &codeSize);
+                    vm_read_overwrite(task,
+                                      (vm_address_t)(state.__pc - 16),
+                                      (vm_size_t)sizeof(code),
+                                      (vm_address_t)code,
+                                      &codeSize);
                 if (codeResult == KERN_SUCCESS && codeSize == sizeof(code)) {
                     const uint32_t *words = (const uint32_t *)code;
                     [self log:[NSString stringWithFormat:
