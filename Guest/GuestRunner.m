@@ -2979,31 +2979,28 @@ static int GuestProtectRange(uintptr_t address, size_t length, int prot)
     if (end < address) {
         return -1;
     }
-    uintptr_t headPage = GuestAlignDown(address);
-    uintptr_t tailPage = GuestAlignDown(end - 1);
+    /*
+     * firstFull/lastFull are the host-page boundaries contained in the guest
+     * range.  The previous code started the exact range at
+     * "headPage + PAGE", which silently skipped the first page whenever the
+     * guest address was already 16KB aligned: whole-file library maps left
+     * their first page RW (not executable) and the first call into that page
+     * took an instruction-abort permission fault.
+     */
+    uintptr_t firstFull = GuestAlignUp(address);
+    uintptr_t lastFull = GuestAlignDown(end);
     int status = 0;
 
-    if (headPage == tailPage) {
-        if (address == headPage && end == headPage + GUEST_HOST_PAGE_SIZE) {
-            status = mprotect((void *)headPage,
-                              (size_t)GUEST_HOST_PAGE_SIZE,
-                              prot);
-        } else {
-            status = GuestProtectPartialPage(headPage, prot);
-        }
-    } else {
-        if (address != headPage) {
-            status = GuestProtectPartialPage(headPage, prot);
-        }
-        uintptr_t middleStart = headPage + GUEST_HOST_PAGE_SIZE;
-        if (status == 0 && tailPage > middleStart) {
-            status = mprotect((void *)middleStart,
-                              (size_t)(tailPage - middleStart),
-                              prot);
-        }
-        if (status == 0 && end != tailPage + GUEST_HOST_PAGE_SIZE) {
-            status = GuestProtectPartialPage(tailPage, prot);
-        }
+    if (address < firstFull) {
+        status = GuestProtectPartialPage(GuestAlignDown(address), prot);
+    }
+    if (status == 0 && firstFull < lastFull) {
+        status = mprotect((void *)firstFull,
+                          (size_t)(lastFull - firstFull),
+                          prot);
+    }
+    if (status == 0 && end > lastFull && lastFull > address) {
+        status = GuestProtectPartialPage(lastFull, prot);
     }
 
     if (status == 0 && (prot & PROT_EXEC) != 0) {
