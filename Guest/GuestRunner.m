@@ -8,11 +8,13 @@
 #import <mach/vm_map.h>
 #import <mach-o/dyld.h>
 #import <pthread.h>
+#import <signal.h>
 #import <stdint.h>
 #import <stdio.h>
 #import <stdlib.h>
 #import <string.h>
 #import <sys/mman.h>
+#import <sys/ucontext.h>
 #import <sys/stat.h>
 #import <sys/time.h>
 #import <sys/utsname.h>
@@ -30,13 +32,10 @@
  */
 
 extern int ptrace(int request, pid_t pid, caddr_t addr, int data);
-extern boolean_t exc_server(mach_msg_header_t *request,
-                            mach_msg_header_t *reply);
 extern void sys_icache_invalidate(void *start, size_t length);
 extern int csops(pid_t pid, unsigned int operation, void *buffer, size_t size);
 
 #define GUEST_PT_TRACE_ME 0
-#define GUEST_PT_SIGEXC 12
 
 #define GUEST_CS_OPS_STATUS 0
 #define GUEST_CS_DEBUGGED 0x10000000
@@ -93,40 +92,87 @@ static uintptr_t GuestHeapBase = 0;
 static uintptr_t GuestHeapEnd = 0;
 static uintptr_t GuestBrkCurrent = 0;
 static uint64_t GuestStackTop = 0;
+static uintptr_t GuestImageBase = 0;
+static uint64_t GuestImageSize = 0;
+static const char *GuestElfPath = NULL;
 
-#pragma mark - JIT
+#pragma mark - JIT and fault reporting
 
-kern_return_t catch_exception_raise(mach_port_t exception_port,
-                                    mach_port_t thread,
-                                    mach_port_t task,
-                                    exception_type_t exception,
-                                    exception_data_t code,
-                                    mach_msg_type_number_t code_count)
+static void GuestWriteAll(int descriptor, const char *text, size_t length)
 {
-    GuestThreadState64 state;
-    mach_msg_type_number_t count = GUEST_ARM_THREAD_STATE64_COUNT;
-    kern_return_t result = thread_get_state(thread,
-                                            GUEST_ARM_THREAD_STATE64,
-                                            (thread_state_t)&state,
-                                            &count);
-    fprintf(stdout,
-            "[guest] exception type=%d code=0x%llx pc=0x%llx lr=0x%llx "
-            "sp=0x%llx x0=0x%llx x8=0x%llx state=%d\n",
-            (int)exception,
-            code_count > 0 ? (unsigned long long)code[0] : 0ULL,
-            result == KERN_SUCCESS ? (unsigned long long)state.pc : 0ULL,
-            result == KERN_SUCCESS ? (unsigned long long)state.lr : 0ULL,
-            result == KERN_SUCCESS ? (unsigned long long)state.sp : 0ULL,
-            result == KERN_SUCCESS ? (unsigned long long)state.x[0] : 0ULL,
-            result == KERN_SUCCESS ? (unsigned long long)state.x[8] : 0ULL,
-            result);
-    fflush(stdout);
-
-    if (exception == EXC_BAD_ACCESS || exception == EXC_BAD_INSTRUCTION) {
-        /* A guest fault is fatal; stop the run and leave the record. */
-        _exit(70);
+    while (length > 0) {
+        ssize_t written = write(descriptor, text, length);
+        if (written <= 0) {
+            return;
+        }
+        text += written;
+        length -= (size_t)written;
     }
-    return KERN_FAILURE;
+}
+
+static void GuestSignalHandler(int signalNumber,
+                               siginfo_t *information,
+                               void *context)
+{
+    ucontext_t *state = (ucontext_t *)context;
+    uint64_t pc = 0;
+    uint64_t lr = 0;
+    uint64_t sp = 0;
+    uint64_t far = 0;
+    uint32_t esr = 0;
+    if (state != NULL) {
+        pc = (uint64_t)state->uc_mcontext->__ss.__pc;
+        lr = (uint64_t)state->uc_mcontext->__ss.__lr;
+        sp = (uint64_t)state->uc_mcontext->__ss.__sp;
+        far = (uint64_t)state->uc_mcontext->__es.__far;
+        esr = (uint32_t)state->uc_mcontext->__es.__esr;
+    }
+
+    char text[384];
+    uint64_t address = information != NULL
+        ? (uint64_t)(uintptr_t)information->si_addr
+        : 0;
+    int length = snprintf(text,
+                          sizeof(text),
+                          "[guest] signal %d addr=0x%llx pc=0x%llx lr=0x%llx "
+                          "sp=0x%llx far=0x%llx esr=0x%x base=0x%lx\n",
+                          signalNumber,
+                          (unsigned long long)address,
+                          (unsigned long long)pc,
+                          (unsigned long long)lr,
+                          (unsigned long long)sp,
+                          (unsigned long long)far,
+                          (unsigned)esr,
+                          (unsigned long)GuestImageBase);
+    if (length > 0) {
+        GuestWriteAll(STDOUT_FILENO, text, (size_t)length);
+    }
+    if (GuestImageBase != 0 && pc >= GuestImageBase &&
+        pc < GuestImageBase + GuestImageSize) {
+        length = snprintf(text,
+                          sizeof(text),
+                          "[guest] fault offset=0x%llx\n",
+                          (unsigned long long)(pc - GuestImageBase));
+        if (length > 0) {
+            GuestWriteAll(STDOUT_FILENO, text, (size_t)length);
+        }
+    }
+    _exit(70);
+}
+
+static void GuestInstallFaultHandlers(void)
+{
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_sigaction = GuestSignalHandler;
+    action.sa_flags = SA_SIGINFO;
+    sigemptyset(&action.sa_mask);
+
+    const int signals[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE };
+    for (size_t index = 0; index < sizeof(signals) / sizeof(signals[0]);
+         index++) {
+        sigaction(signals[index], &action, NULL);
+    }
 }
 
 static void GuestLogCodeSignState(const char *tag)
@@ -170,17 +216,6 @@ static uint32_t GuestJITSelfTest(void)
     return value;
 }
 
-static void *GuestExceptionThread(void *argument)
-{
-    mach_port_t port = (mach_port_t)(uintptr_t)argument;
-    fprintf(stdout, "[guest] exception server start port=0x%x\n", port);
-    fflush(stdout);
-    kern_return_t result = mach_msg_server(exc_server, 2048, port, 0);
-    fprintf(stdout, "[guest] exception server exit=%d\n", result);
-    fflush(stdout);
-    return NULL;
-}
-
 static BOOL GuestEnableJIT(void)
 {
     if (ptrace(GUEST_PT_TRACE_ME, 0, NULL, 0) < 0) {
@@ -189,55 +224,14 @@ static BOOL GuestEnableJIT(void)
         return NO;
     }
 
-    errno = 0;
-    int sigexcResult = ptrace(GUEST_PT_SIGEXC, 0, NULL, 0);
-    fprintf(stdout, "[guest] ptrace(PT_SIGEXC)=%d errno=%d\n",
-            sigexcResult,
-            sigexcResult < 0 ? errno : 0);
-
-    mach_port_t port = MACH_PORT_NULL;
-    kern_return_t allocateResult = mach_port_allocate(mach_task_self(),
-                                                      MACH_PORT_RIGHT_RECEIVE,
-                                                      &port);
-    if (allocateResult != KERN_SUCCESS) {
-        fprintf(stderr, "[guest] exception port allocate failed: %d\n",
-                allocateResult);
-        return NO;
-    }
-
-    kern_return_t insertResult = mach_port_insert_right(mach_task_self(),
-                                                        port,
-                                                        port,
-                                                        MACH_MSG_TYPE_MAKE_SEND);
-    exception_mask_t mask = EXC_MASK_SOFTWARE |
-                            EXC_MASK_BAD_ACCESS |
-                            EXC_MASK_BAD_INSTRUCTION;
-    kern_return_t taskResult = task_set_exception_ports(mach_task_self(),
-                                                        mask,
-                                                        port,
-                                                        EXCEPTION_DEFAULT,
-                                                        THREAD_STATE_NONE);
-    kern_return_t threadResult = thread_set_exception_ports(
-        pthread_mach_thread_np(pthread_self()),
-        mask,
-        port,
-        EXCEPTION_DEFAULT,
-        THREAD_STATE_NONE);
-    fprintf(stdout,
-            "[guest] exception ports: alloc=%d insert=%d task=%d thread=%d\n",
-            allocateResult,
-            insertResult,
-            taskResult,
-            threadResult);
-
-    pthread_t thread;
-    if (pthread_create(&thread,
-                       NULL,
-                       GuestExceptionThread,
-                       (void *)(uintptr_t)port) != 0) {
-        return NO;
-    }
-
+    /*
+     * PT_TRACE_ME alone grants CS_DEBUGGED, which is all JIT needs. We
+     * deliberately do not use PT_SIGEXC: on iOS 16 it swallows guest
+     * faults into a Mach exception port that never delivers, killing the
+     * process with status 1 and no diagnostics. Plain POSIX signal
+     * handlers do fire and report pc/far.
+     */
+    GuestInstallFaultHandlers();
     return YES;
 }
 
@@ -440,6 +434,24 @@ uint64_t GuestSyscallDispatch(uint64_t *args,
             return GuestErrno();
         }
         return (uint64_t)strlen(output) + 1;
+    }
+    case 78: { /* readlinkat */
+        const char *path = (const char *)args[1];
+        char *output = (char *)args[2];
+        size_t size = (size_t)args[3];
+        if (path == NULL || output == NULL) {
+            return (uint64_t)(-EFAULT);
+        }
+        if (strcmp(path, "/proc/self/exe") != 0 || GuestElfPath == NULL) {
+            return (uint64_t)(-ENOENT);
+        }
+        /* glibc's _dl_get_origin() asks for the running executable. */
+        size_t length = strlen(GuestElfPath);
+        if (length > size) {
+            length = size;
+        }
+        memcpy(output, GuestElfPath, length);
+        return (uint64_t)length;
     }
     case 214: { /* brk */
         if (args[0] == 0) {
@@ -721,6 +733,7 @@ static uintptr_t GuestMapStub(uintptr_t imageStart,
 static int GuestLoadAndRun(int argc, char *argv[])
 {
     const char *path = argv[1];
+    GuestElfPath = path;
     NSString *pathString = [NSString stringWithUTF8String:path];
     NSData *data = pathString != nil
         ? [NSData dataWithContentsOfFile:pathString]
@@ -773,6 +786,8 @@ static int GuestLoadAndRun(int argc, char *argv[])
     }
 
     uintptr_t imageStart = base + (uintptr_t)minAddress;
+    GuestImageBase = imageStart;
+    GuestImageSize = imageSize;
     void *image = mmap((void *)imageStart,
                        (size_t)imageSize,
                        PROT_READ | PROT_WRITE,
