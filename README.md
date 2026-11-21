@@ -7,7 +7,7 @@
 不是虚拟机，不是模拟器，不是解释器：guest 是 arm64 Linux ELF，指令由 M1 直接执行；
 只把 `svc #0` 改写成分支，跳进自建的 syscall 分发器。
 
-## 当前状态（0.35.3）
+## 当前状态（0.35.4）
 
 | 阶段 | 状态 |
 |---|---|
@@ -15,9 +15,9 @@
 | M1 原生 ELF | ✅ 最小 aarch64 ELF 直接执行，`status=0` |
 | M2 真实 busybox | ✅ glibc static-PIE `busybox` / `pie-hello` 原生执行，`status=0` |
 | M2.5 文件系统 + shell | ✅ 0.34.1 真机：`Run Shell` 六条命令全部正确；外部命令走 checkpoint/restore fork + execve |
-| M3.1 动态链接器 | 🚧 0.35.0 已构建：`PT_INTERP` + musl `ld-musl-aarch64.so.1` + `AT_BASE`/`AT_ENTRY`；文件 `mmap` 改为 anon+pread；库在 mmap 时现场打 `svc`/TLS 补丁。0.35.1 菜单 UI；0.35.2 修 Alpine 路径；0.35.3 修 `msr tpidr_el0` 的 x30 自循环。**待真机验证** |
+| M3.1 动态链接器 | 🚧 0.35.3 真机：Alpine 动态 busybox 打印 `uname` 且 `status=0`；`apk` 加载 `libcrypto/libssl` 时 `mmap` 返回 `-ENOMEM`，0.35.4 修 MAP_FIXED 越界与 4KB/16KB 共享页权限。**待真机验证** |
 
-最新版本 **0.35.3 (68)**。项目上下文、决策、真机日志和路线记录在
+最新版本 **0.35.4 (69)**。项目上下文、决策、真机日志和路线记录在
 [Da-AiXZ/linux-workspace](https://github.com/Da-AiXZ/linux-workspace)（私有）。
 
 ## 工作原理
@@ -55,8 +55,11 @@ Helpers/guest-runner <elf> [guest argv...]
    我们在每次文件 mmap 时解析 phdr，找出可执行段，现场把 `svc` / `mrs` / `msr` 改掉。
 3. **跳板岛要够近**。所有 guest 映射都放在跳板岛 ±112MB 内；跳板岛扩大到 1MB，
    库映射时临时 `mprotect RW`，补完再封回 RX。
-4. **4KB 子页兜底**。`mprotect`/`munmap` 遇到 4KB 对齐请求时按 16KB 向下/向上取整，
-   并打印 `rounded to 0x…`。这是 Alpine 静态链接段能跑起来的前提。
+4. **4KB guest 页 / 16KB host 页**。ld.so 的 `MAP_FIXED` 段可能只覆盖某个 16KB host 页的
+   一部分；此时只对完整覆盖的 host 页应用精确权限，边缘页取"旧权限 | 新权限"，绝不能用
+   取整后的范围整体 `mprotect`（会越界返回 `ENOMEM`，也会把相邻 `.text` 的 `PROT_EXEC` 打掉）。
+5. **`MAP_FIXED` 不能重新映射整页**。段与段共享 16KB 页时，新映射会清掉邻居的字节和代码补丁；
+   只有 host 页确实未映射时才新建，其余只改权限。
 
 ## 实测约束（决定架构的关键）
 
@@ -71,7 +74,8 @@ Helpers/guest-runner <elf> [guest argv...]
    动态可执行文件的 fork 尚未支持（会返回 `-ENOSYS`）。
 4. **主程序布局**：`__PAGEZERO` 必须是 4GB、`__TEXT` 在 `0x100000000`；缩小 pagezero 会让
    `posix_spawn` 报 88（Malformed Mach-o）。
-5. **16KB 页**：固定映射、`mprotect`、跳板岛地址都必须 16KB 对齐。
+5. **16KB host 页**：固定映射地址、跳板岛必须 16KB 对齐。guest 按 4KB 页思考，
+   两个 guest 映射可能共享同一个 host 页，所以改权限时不能动邻居（见上节第 4/5 条）。
 6. **SP 16 字节对齐**：trampoline 第一条 `stp` 会触发 SP 对齐异常。
 7. **TPIDR_EL0 不可依赖**：XNU 会在中断返回时把它重置成自己的值，必须用影子变量
    `GuestTlsPointer` + 改写所有 `mrs/msr tpidr_el0` 来模拟。

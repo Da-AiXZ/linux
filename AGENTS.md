@@ -11,11 +11,11 @@
 guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建 syscall 层。
 不是虚拟机、不是模拟器、不是解释器。
 
-## 当前状态（2026-11-22，0.35.3 / build 68）
+## 当前状态（2026-11-22，0.35.4 / build 69）
 
 - **M0–M2.5 全部真机通过**。0.34.1：`Run Shell` 六条命令（`ls /`、`cat /etc/motd`、
   `uname`、`ls -l /`、`id`、`pwd`）全对，`status=0`；`Run Fork Test` 父子分别输出。
-- **M3.1 已实现并构建，等待真机日志**：
+- **M3.1 动态链接已基本打通，等待 0.35.4 真机日志**：
   - 解析 `PT_INTERP`，加载 musl `ld-musl-aarch64.so.1` 到独立基址
   - auxv 写 `AT_BASE`=动态链接器（ld.so）基址、`AT_ENTRY`=主程序入口
   - 文件 `mmap` 改成 anon + `pread` 模拟（4KB offset、未签名 `.so` 的 `PROT_EXEC`）
@@ -29,10 +29,18 @@ guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建
   - 0.35.3：`msr tpidr_el0` 也必须用不建链接的 per-site 岛。musl 的
     `__set_thread_area` 是 leaf，`bl writeStub` 会先把 x30 改成 site+4，
     函数末尾 `ret` 回到 site+4 自循环。岛只借 x16（保存/恢复），不碰 x30。
-- 最新产物：`/workspace/LinuxProbe-0.35.3.ipa`
-  sha256 `1e99e2146681d3647191e4965a40fcb0966ee2d6381a6a8c868a23abf552f624`
-- **下一步**：用户回传两个新菜单项的日志；通过则进 M3.2（Alpine rootfs + 本地 apk），
-  不通过按日志修 `PT_INTERP` / `mmap` / ld.so。
+  - **0.35.3 真机：动态 Alpine busybox 成功**（`Linux linuxprobe 6.6.0 #1 aarch64 Linux`，
+    `status=0`）。`apk --version` 失败：加载 `libcrypto.so.3` / `libssl.so.3` 时
+    `MAP_FIXED` 的 RW 段返回 `-ENOMEM`（`0xfffffffffffffff4`），随后符号重定位报
+    `symbol not found`。
+  - 0.35.4：`MAP_FIXED` 的文件段不能把长度对齐到 16KB 后再整体 `mprotect`
+    （会 mprotect 到未映射页 → `ENOMEM`，且会把相邻 `.text` 的 `PROT_EXEC` 打掉）。
+    改成 `GuestEnsureWritable`（只对未映射 host 页新建映射）+ `GuestProtectRange`
+    （完整覆盖的页用精确权限，边缘 4KB/16KB 共享页取并集）。
+- 最新产物：`/workspace/LinuxProbe-0.35.4.ipa`
+  sha256 `9e26188ec4c7947bdcc282d9ce8a002be06aa9ff67e021039cb6c96d28301a94`
+- **下一步**：用户回传 0.35.4 的两个菜单项日志；通过则进 M3.2（Alpine rootfs + 本地 apk），
+  不通过按日志继续修 `mmap` / ld.so 重定位。
 
 ## 两个仓库
 
@@ -100,13 +108,14 @@ CURRENT_PROJECT_VERSION: "N"
 ## Guest 运行时不变量（`Guest/GuestRunner.m`）
 
 1. guest 必须是 **ET_DYN / PIE**；iOS 不允许映射 4GB 以下。
-2. 固定映射与 `mprotect` 一律 16KB 对齐（M1 iPad 页大小）；guest 请求 4KB 对齐时
-   在 `GuestHandleMprotect` / `GuestHandleMunmap` 里向下/向上取整并打印 `rounded to 0x…`。
+2. guest 是 4KB 页，host 是 16KB 页。固定映射地址必须 16KB 对齐；`mprotect` 的 guest
+   范围可能只覆盖 host 页的一部分，**不能**把范围取整后整体 `mprotect`：
+   完整覆盖的 host 页用精确权限，边缘共享页取"当前权限 | 新权限"（`GuestProtectRange`）。
 3. guest 初始 `sp` 必须 16 字节对齐。
 4. 改写代码页后调用 `sys_icache_invalidate`。
-5. **`svc` / `mrs` 必须用"不建链接"的 per-site 跳板**（`b island`）：
-   `bl` 会把 `x30` 改成 `site+4`，glibc 的 leaf wrapper / `__ctype_init` 会坏。
-   `msr tpidr_el0` 用 `bl writeStub[rt]` 没问题（stub 会保存/恢复 x30）。
+5. **`svc` / `mrs` / `msr tpidr_el0` 都必须用"不建链接"的 per-site 跳板**（`b island`）：
+   `bl` 会把 `x30` 改成 `site+4`；glibc 的 leaf wrapper、musl 的 `__set_thread_area`
+   都会因此 `ret` 回 `site+4` 自循环。
 6. 入口栈上的 argv/envp/auxv 必须完整：
    `AT_PHDR/AT_PHENT/AT_PHNUM/AT_PAGESZ(4096)/AT_BASE/AT_ENTRY/AT_RANDOM/AT_HWCAP/AT_EXECFN`。
    静态：`AT_BASE=0`、`AT_ENTRY`=主程序入口；动态：`AT_BASE`=动态链接器基址。
@@ -134,11 +143,15 @@ CURRENT_PROJECT_VERSION: "N"
 15. **运行期库也要打补丁**：musl ld.so 会先整文件 mmap、再按 `PT_LOAD` `MAP_FIXED`；
     每次文件 mmap 都解析 ELF phdr，对 `PT_LOAD|X` 区间扫描并改写
     `svc`/`mrs`/`msr`。补丁期间跳板岛临时 `mprotect RW`，补完封回 RX。
-16. **所有 guest mmap/库映射都要在跳板岛 ±112MB 内**（`i` 指令 ±128MB）。
+16. **`MAP_FIXED` 段不能 remap 整个 16KB host 页**：guest 段只覆盖这个 host 页的一部分时，
+    邻居段的字节（包括已打的代码补丁）和权限都必须保留。用 `GuestEnsureWritable`：
+    已映射的页只加 `PROT_WRITE`，只有真正未映射的 host 页才新建映射；
+    长度用 guest 原始 `length`，不能用对齐后的 `mapLength`（0.35.4 修）。
+17. **所有 guest mmap/库映射都要在跳板岛 ±112MB 内**（`i` 指令 ±128MB）。
     跳板岛 1MB；`GuestAllocateMmapAddress` 负责选址。
-17. `Tools/busybox.static` / `Tools/pie-hello` 是二进制。**绝不能让文本模式工具重写它们**
+18. `Tools/busybox.static` / `Tools/pie-hello` 是二进制。**绝不能让文本模式工具重写它们**
     （0.26.2 被 UTF-8 替换字符污染，2,302,928 → 3,829,530 B）。改完必须校验大小和 ELF 头。
-18. rootfs：guest `/` → `<容器>/Documents/rootfs`，由 App 通过 `LINUXPROBE_ROOT` 传入。
+19. rootfs：guest `/` → `<容器>/Documents/rootfs`，由 App 通过 `LINUXPROBE_ROOT` 传入。
     `GuestBootstrapRootfs` 负责建目录、写 `/etc/*`、装 static busybox 与 Alpine 运行时。
 
 ## 调试
@@ -158,7 +171,8 @@ aarch64-linux-gnu-objdump -d Tools/busybox.static | less
 | `[guest] loaded … patched=N … interp=0x…` | 主镜像 + 动态链接器补丁总数 |
 | `[guest] mmap addr=… len=… prot=… fd=… off=… -> 0x…` | guest mmap 前 12 次调用 |
 | `[guest] mmap elf off=… patched=… mrs=… msr=…` | 运行时库现场补丁数 |
-| `[guest] mmap fixed … rounded to …` | 4KB 请求被 16KB 取整 |
+| `[guest] mmap anon fixed … in host page …` | 固定匿名映射（4KB 粒度） |
+| `[guest] mprotect 0x… host pages from 0x…` | 非 16KB 对齐的 mprotect，边缘页取并集 |
 | `[guest] entry=… at_base=… at_entry=…` | 动态链接器入口与 auxv |
 | `[guest] unsupported syscall N` | ld.so/apk 需要的下一个 syscall |
 | `[guest] signal N … pc=… far=… esr=…` | 进程内故障现场 |
@@ -168,11 +182,12 @@ aarch64-linux-gnu-objdump -d Tools/busybox.static | less
 
 ## 当前优先级
 
-1. **等 0.35.3 真机日志**：`Alpine BusyBox (dynamic)` 与 `Run APK --version`。
+1. **等 0.35.4 真机日志**：`Alpine BusyBox (dynamic)` 与 `Run APK --version`。
    - 成功标准：Alpine busybox 打印 `Linux … aarch64 GNU/Linux`；apk 打印
      `apk-tools 2.14.x`；两者 `status=0`。
-   - 若卡住/崩溃：看 `interp` / `loaded` / `mmap elf` / `unsupported syscall` /
-     `signal` 这几行；`pc - base` 定位到 ld.so 或 libc。
+   - 若卡住/崩溃：看 `interp` / `loaded` / `mmap elf` / `mprotect` /
+     `unsupported syscall` / `signal` 这几行；`pc - base` 定位到 ld.so 或库。
+   - `apk` 若继续报 `Out of memory`，重点看 `mmap` 返回值与 `mmap fixed overlaps runtime`。
 2. M3.1 通过后：M3.2 Alpine rootfs + 本地 `apk add --allow-untrusted`。
 3. 之后：M3.3 网络 + `apk update`（socket/poll/DNS/TLS）。
 4. M4：性能基准、syscall 按站点特化、fork 快照优化、交互终端、常用工具验证。
