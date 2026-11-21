@@ -203,16 +203,40 @@ extern char **environ;
                                                      (thread_state_t)&state,
                                                      &stateCount);
         if (stateResult == KERN_SUCCESS) {
+            arm_exception_state64_t exceptionState;
+            mach_msg_type_number_t exceptionCount = ARM_EXCEPTION_STATE64_COUNT;
+            kern_return_t exceptionResult =
+                thread_get_state(threads[index],
+                                 ARM_EXCEPTION_STATE64,
+                                 (thread_state_t)&exceptionState,
+                                 &exceptionCount);
             [self log:[NSString stringWithFormat:
                 @"guest thread %u pc=0x%llx lr=0x%llx sp=0x%llx fp=0x%llx "
-                @"x0=0x%llx x8=0x%llx",
+                @"x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx x4=0x%llx "
+                @"x5=0x%llx x6=0x%llx x7=0x%llx x8=0x%llx x9=0x%llx "
+                @"far=0x%llx esr=0x%x state=%d",
                 (unsigned)index,
                 (unsigned long long)state.__pc,
                 (unsigned long long)state.__lr,
                 (unsigned long long)state.__sp,
                 (unsigned long long)state.__fp,
                 (unsigned long long)state.__x[0],
-                (unsigned long long)state.__x[8]]];
+                (unsigned long long)state.__x[1],
+                (unsigned long long)state.__x[2],
+                (unsigned long long)state.__x[3],
+                (unsigned long long)state.__x[4],
+                (unsigned long long)state.__x[5],
+                (unsigned long long)state.__x[6],
+                (unsigned long long)state.__x[7],
+                (unsigned long long)state.__x[8],
+                (unsigned long long)state.__x[9],
+                exceptionResult == KERN_SUCCESS
+                    ? (unsigned long long)exceptionState.__far
+                    : 0ULL,
+                exceptionResult == KERN_SUCCESS
+                    ? (unsigned)exceptionState.__esr
+                    : 0U,
+                exceptionResult]];
         } else {
             [self log:[NSString stringWithFormat:@"guest thread %u state=%d",
                        (unsigned)index, stateResult]];

@@ -216,6 +216,28 @@ static uint32_t GuestJITSelfTest(void)
     return value;
 }
 
+static void GuestProbeTpidr(void)
+{
+    uint64_t original = 0;
+    uint64_t written = 0;
+    uint64_t afterSyscall = 0;
+    const uint64_t sentinel = 0x123456789ABCDEF0ULL;
+
+    __asm__ volatile("mrs %0, tpidr_el0" : "=r"(original));
+    __asm__ volatile("msr tpidr_el0, %0" :: "r"(sentinel));
+    __asm__ volatile("mrs %0, tpidr_el0" : "=r"(written));
+    getpid();
+    __asm__ volatile("mrs %0, tpidr_el0" : "=r"(afterSyscall));
+    __asm__ volatile("msr tpidr_el0, %0" :: "r"(original));
+
+    fprintf(stdout,
+            "[guest] tpidr probe: original=0x%llx write=0x%llx after_svc=0x%llx\n",
+            (unsigned long long)original,
+            (unsigned long long)written,
+            (unsigned long long)afterSyscall);
+    fflush(stdout);
+}
+
 static BOOL GuestEnableJIT(void)
 {
     if (ptrace(GUEST_PT_TRACE_ME, 0, NULL, 0) < 0) {
@@ -299,17 +321,20 @@ uint64_t GuestSyscallDispatch(uint64_t *args,
                               uint64_t returnAddress)
 {
     static unsigned int traceCount = 0;
+    uint64_t guestTpidr = 0;
+    __asm__ volatile("mrs %0, tpidr_el0" : "=r"(guestTpidr));
     if (traceCount < 40) {
         traceCount++;
         fprintf(stdout,
                 "[guest] svc %llu site=0x%llx x0=0x%llx x1=0x%llx "
-                "x2=0x%llx x3=0x%llx\n",
+                "x2=0x%llx x3=0x%llx tpidr=0x%llx\n",
                 (unsigned long long)number,
                 (unsigned long long)(returnAddress - 4),
                 (unsigned long long)args[0],
                 (unsigned long long)args[1],
                 (unsigned long long)args[2],
-                (unsigned long long)args[3]);
+                (unsigned long long)args[3],
+                (unsigned long long)guestTpidr);
     }
 
     if (number > 500) {
@@ -1008,6 +1033,8 @@ int main(int argc, char *argv[])
             fprintf(stderr, "[guest] self-test failed, aborting\n");
             return 5;
         }
+
+        GuestProbeTpidr();
 
         int result = GuestLoadAndRun(argc, argv);
         fprintf(stdout, "[guest] host main rc=%d\n", result);
