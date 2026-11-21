@@ -2585,6 +2585,45 @@ static uintptr_t GuestEmitTlsReadIsland(uint32_t rt, uintptr_t site)
     return (uintptr_t)island;
 }
 
+/*
+ * msr tpidr_el0 is a leaf instruction: a "bl" would set x30 = site+4 and
+ * musl's __set_thread_area ends with "ret", looping forever.  The island
+ * must therefore branch (not link), preserve x30, and use x16 as scratch
+ * (saved/restored around the shadow store).
+ *
+ *   site:   b island
+ *   island: str x16, [sp, #-16]!
+ *           adrp x16, shadow
+ *           str x<rt>, [x16, #off]
+ *           ldr x16, [sp], #16
+ *           b   site+4
+ */
+static uintptr_t GuestEmitTlsWriteIsland(uint32_t rt, uintptr_t site)
+{
+    if (GuestTlsIslandCursor == NULL ||
+        GuestTlsIslandCursor + 32 > GuestTlsIslandEnd) {
+        return 0;
+    }
+
+    uint8_t *island = GuestTlsIslandCursor;
+    uint32_t *code = (uint32_t *)island;
+    uintptr_t shadow = (uintptr_t)&GuestTlsPointer;
+    uint32_t shadowOffset = (uint32_t)(shadow & 0xFFF);
+
+    code[0] = 0xF81F0FF0U; /* str x16, [sp, #-16]! */
+    code[1] = GuestEncodeAdrp(16, (uintptr_t)island, shadow);
+    code[2] = 0xF9000000U | ((shadowOffset / 8) << 10) | (16U << 5) | rt;
+    code[3] = 0xF84107F0U; /* ldr x16, [sp], #16 */
+    {
+        int64_t delta = (int64_t)((site + 4) - (uintptr_t)(island + 16));
+        code[4] = 0x14000000U | ((uint32_t)(delta >> 2) & 0x03FFFFFFU);
+    }
+
+    GuestTlsIslandCursor += 32;
+    GuestIslandSiteCount++;
+    return (uintptr_t)island;
+}
+
 static uint32_t GuestEncodeAdrp(uint32_t rd, uintptr_t from, uintptr_t to)
 {
     int64_t pages = ((int64_t)(to & ~0xFFFULL) -
@@ -3065,7 +3104,18 @@ static int GuestPatchCodeRange(uintptr_t start,
                 status = -1;
                 break;
             }
-            destination = GuestTlsWriteStubs[rt];
+            /*
+             * Non-linking island: the shared write stub is entered with bl,
+             * which already clobbers x30; musl's __set_thread_area is a leaf
+             * ending in ret and would loop on site+4.
+             */
+            destination = GuestEmitTlsWriteIsland(rt, start + offset);
+            if (destination == 0) {
+                GuestLog("[guest] tls write island space exhausted\n");
+                status = -1;
+                break;
+            }
+            linked = NO;
             (*tlsWrites)++;
         } else {
             continue;
