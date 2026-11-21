@@ -11,7 +11,7 @@
 guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建 syscall 层。
 不是虚拟机、不是模拟器、不是解释器。
 
-## 当前状态（2026-11-22，0.38.2 / build 77）
+## 当前状态（2026-11-22，0.38.3 / build 78）
 
 - **M0–M2.5 全部真机通过**。0.34.1：`Run Shell` 六条命令（`ls /`、`cat /etc/motd`、
   `uname`、`ls -l /`、`id`、`pwd`）全对，`status=0`；`Run Fork Test` 父子分别输出。
@@ -111,8 +111,16 @@ guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建
   - 0.38.2：CI 同时带 `etc/ssl/cert.pem`；App 给 guest 环境加
     `SSL_CERT_FILE` / `SSL_CERT_DIR` 指向 rootfs 的 CA bundle；
     bootstrap 打印 `ca bundle=… exists=…`。
-- 最新产物：`/workspace/LinuxProbe-0.38.2.ipa`
-  sha256 `8558199e9d96676a09d4bfffffd6d44fed27a9f5f282bab2c062fca87f297ef1`
+- **0.38.2 真机：TLS 通过**，apk 开始下载 index；但出现成千上万条
+    `mmap records full, leaking`，随后 `no free guest address near stub` 并 SIGSEGV。
+    根因：`GuestHandleMunmap` 只调宿主 `munmap`，**不释放地址记录**；分配器撞到
+    interp/stack 时按 16MB 跳跃，最终放弃。apk 在 TLS/索引阶段会连续申请大量
+    16KB 匿名块，112MB 窗口被耗尽。
+  - 0.38.3：`GuestForgetMmap` 在 munmap 时删除/裁剪记录并回退游标；
+    `GuestFindMmapGap` 按冲突区间终点跳跃（不再 16MB 盲跳），支持回绕复用低地址；
+    记录上限 512→4096；候选地址仍用 `GuestRangeFree` 做宿主侧校验。
+- 最新产物：`/workspace/LinuxProbe-0.38.3.ipa`
+  sha256 `1066e1de29614a05f8ebafc3defccf03c10fb31e7133ba84a7b0572b3521b55e`
 - **下一步**：真机验证 `Run APK Update (network)` → `Install Bash (network)` →
   `Run Bash`；通过后 M3.3 完成，进入 M4（fork 快照修复、性能、交互终端）。
 
