@@ -245,6 +245,11 @@ static uint64_t GuestHandleMmap(uint64_t hint,
                                 int descriptor,
                                 uint64_t offset);
 static uint64_t GuestHandleMunmap(uintptr_t address, size_t length);
+static uint64_t GuestHandleMremap(uintptr_t oldAddress,
+                                  size_t oldLength,
+                                  size_t newLength,
+                                  uint64_t flags,
+                                  uintptr_t newAddress);
 static uint64_t GuestHandleMprotect(uintptr_t address,
                                     size_t length,
                                     int prot);
@@ -2997,6 +3002,13 @@ uint64_t GuestSyscallDispatch(uint64_t *args,
     case 215: { /* munmap */
         return GuestHandleMunmap((uintptr_t)args[0], (size_t)args[1]);
     }
+    case 216: { /* mremap */
+        return GuestHandleMremap((uintptr_t)args[0],
+                                 (size_t)args[1],
+                                 (size_t)args[2],
+                                 args[3],
+                                 (uintptr_t)args[4]);
+    }
     case 226: { /* mprotect */
         return GuestHandleMprotect((uintptr_t)args[0],
                                    (size_t)args[1],
@@ -4849,6 +4861,60 @@ static uint64_t GuestHandleMunmap(uintptr_t address, size_t length)
         }
     }
     return (uint64_t)(-error);
+}
+
+/*
+ * musl's mallocng grows mmap-backed allocations with
+ * mremap(MREMAP_MAYMOVE) -- apk's package index arrays hit this while
+ * parsing APKINDEX.  Darwin has no mremap, so emulate it by copying into a
+ * fresh anonymous mapping.  Only anonymous data is remapped here, so the
+ * new mapping does not need to live within branch range of the island.
+ */
+static uint64_t GuestHandleMremap(uintptr_t oldAddress,
+                                  size_t oldLength,
+                                  size_t newLength,
+                                  uint64_t flags,
+                                  uintptr_t newAddress)
+{
+    (void)newAddress;
+    if (oldAddress == 0 || oldLength == 0 || newLength == 0) {
+        return (uint64_t)(-EINVAL);
+    }
+    if ((oldAddress & 0xFFF) != 0) {
+        return (uint64_t)(-EINVAL);
+    }
+    if ((flags & 0x2) != 0) {
+        /* MREMAP_FIXED: musl does not use it; refuse instead of corrupting. */
+        return (uint64_t)(-EINVAL);
+    }
+    size_t oldMapLength = GuestAlignUp(oldLength);
+    size_t newMapLength = GuestAlignUp(newLength);
+    if (newMapLength < newLength) {
+        return (uint64_t)(-EINVAL);
+    }
+    if (newLength <= oldLength && (flags & 0x1) == 0) {
+        return (uint64_t)oldAddress;
+    }
+
+    void *map = mmap(NULL,
+                     newMapLength,
+                     PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANON,
+                     -1,
+                     0);
+    if (map == MAP_FAILED) {
+        return GuestErrno();
+    }
+    size_t copyLength = oldLength < newLength ? oldLength : newLength;
+    memcpy(map, (void *)oldAddress, copyLength);
+    if (munmap((void *)oldAddress, oldMapLength) != 0) {
+        int error = errno;
+        munmap(map, newMapLength);
+        return (uint64_t)(-error);
+    }
+    GuestForgetMmap(oldAddress, oldMapLength);
+    GuestRememberMmap((uintptr_t)map, newMapLength);
+    return (uint64_t)(uintptr_t)map;
 }
 
 static uint64_t GuestHandleMprotect(uintptr_t address,

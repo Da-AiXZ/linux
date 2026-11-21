@@ -27,6 +27,7 @@ extern char **environ;
 - (BOOL)readGuest64:(mach_port_t)task
             address:(unsigned long long)address
               value:(unsigned long long *)value;
+- (void)logCacheStateAtRoot:(NSString *)rootPath;
 
 @end
 
@@ -60,6 +61,49 @@ extern char **environ;
     void (^handler)(NSString *) = self.logHandler;
     if (handler != nil) {
         handler(line);
+    }
+}
+
+/*
+ * apk keeps its downloaded indexes under <rootfs>/var/cache/apk.  The
+ * 0.38.5 device log showed a successful download followed by an "IO ERROR"
+ * when the cached copy was read back, so dump enough of each file to tell a
+ * truncated download (size/magic) from a valid one.
+ */
+- (void)logCacheStateAtRoot:(NSString *)rootPath
+{
+    NSFileManager *manager = [NSFileManager defaultManager];
+    NSArray<NSString *> *directories = @[ @"var/cache/apk", @"etc/apk/cache" ];
+    for (NSString *relative in directories) {
+        NSString *directory =
+            [rootPath stringByAppendingPathComponent:relative];
+        NSArray<NSString *> *entries =
+            [manager contentsOfDirectoryAtPath:directory error:NULL];
+        for (NSString *entry in [entries sortedArrayUsingSelector:
+                                 @selector(compare:)]) {
+            NSString *file = [directory stringByAppendingPathComponent:entry];
+            NSDictionary *attributes =
+                [manager attributesOfItemAtPath:file error:NULL];
+            unsigned long long size =
+                [attributes[NSFileSize] unsignedLongLongValue];
+            NSData *data = [NSData dataWithContentsOfFile:file];
+            NSMutableString *head = [NSMutableString string];
+            NSMutableString *tail = [NSMutableString string];
+            if (data.length >= 8) {
+                const uint8_t *bytes = data.bytes;
+                for (NSUInteger index = 0; index < 4; index++) {
+                    [head appendFormat:@"%02x", bytes[index]];
+                }
+                for (NSUInteger index = data.length - 4;
+                     index < data.length;
+                     index++) {
+                    [tail appendFormat:@"%02x", bytes[index]];
+                }
+            }
+            [self log:[NSString stringWithFormat:
+                @"cache %@/%@ size=%llu head=%@ tail=%@",
+                relative, entry, size, head, tail]];
+        }
     }
 }
 
@@ -315,6 +359,7 @@ extern char **environ;
         }
 
         if (WIFEXITED(status)) {
+            [self logCacheStateAtRoot:rootPath];
             [self log:[NSString stringWithFormat:@"guest exited: status=%d",
                        WEXITSTATUS(status)]];
         } else if (WIFSIGNALED(status)) {

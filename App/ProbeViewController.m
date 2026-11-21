@@ -297,15 +297,17 @@
 - (void)runApkUpdate
 {
     [self startGuestNamed:@"Helpers/alpine-apk"
-                arguments:@[ @"apk", @"--allow-untrusted", @"update" ]
-                    label:@"Starting apk --allow-untrusted update..."];
+                arguments:@[ @"apk", @"--no-cache", @"--allow-untrusted",
+                             @"update" ]
+                    label:@"Starting apk --no-cache update..."];
 }
 
 - (void)runApkAddBash
 {
     [self startGuestNamed:@"Helpers/alpine-apk"
-                arguments:@[ @"apk", @"--allow-untrusted", @"add", @"bash" ]
-                    label:@"Starting apk --allow-untrusted add bash..."];
+                arguments:@[ @"apk", @"--no-cache", @"--allow-untrusted",
+                             @"add", @"bash" ]
+                    label:@"Starting apk --no-cache add bash..."];
 }
 
 - (void)runBash
