@@ -605,10 +605,35 @@ static void GuestEnsureDirectory(const char *path)
             continue;
         }
         *cursor = 0;
-        mkdir(buffer, 0755);
+        if (mkdir(buffer, 0755) != 0 && errno != EEXIST) {
+            GuestLog("[guest] mkdir %s failed errno=%d\n", buffer, errno);
+        }
         *cursor = '/';
     }
-    mkdir(buffer, 0755);
+    if (mkdir(buffer, 0755) != 0 && errno != EEXIST) {
+        GuestLog("[guest] mkdir %s failed errno=%d\n", buffer, errno);
+    }
+}
+
+/*
+ * Some guest programs (apk) assume /etc/apk and /lib/apk/db already exist.
+ * If an O_CREAT open fails with ENOENT, create the parent directories under
+ * the synthetic root and retry once.
+ */
+static void GuestCreateParentDirectories(const char *hostPath)
+{
+    char buffer[GUEST_ROOT_MAX];
+    size_t length = strlen(hostPath);
+    if (length == 0 || length >= sizeof(buffer)) {
+        return;
+    }
+    memcpy(buffer, hostPath, length + 1);
+    char *slash = strrchr(buffer, '/');
+    if (slash == NULL || slash == buffer) {
+        return;
+    }
+    *slash = 0;
+    GuestEnsureDirectory(buffer);
 }
 
 static void GuestWriteTextFile(const char *path, const char *text)
@@ -846,6 +871,12 @@ static void GuestBootstrapRootfs(void)
 
     snprintf(path, sizeof(path), "%s/lib/apk/db/installed", GuestRootPath);
     GuestCreateEmptyFileIfMissing(path);
+
+    snprintf(path, sizeof(path), "%s/lib/apk/db", GuestRootPath);
+    struct stat apkDatabaseStatus;
+    GuestLog("[guest] apk db dir=%s exists=%d\n",
+             path,
+             stat(path, &apkDatabaseStatus) == 0 ? 1 : 0);
 
     char executable[PATH_MAX];
     uint32_t executableSize = sizeof(executable);
@@ -1429,6 +1460,12 @@ uint64_t GuestSyscallDispatch(uint64_t *args,
         }
         int descriptor = open(hostPath, hostFlags, (mode_t)args[3]);
         int error = errno;
+        if (descriptor < 0 && error == ENOENT && (args[2] & 0x40) != 0) {
+            /* O_CREAT with a missing parent directory (apk's lib/apk/db). */
+            GuestCreateParentDirectories(hostPath);
+            descriptor = open(hostPath, hostFlags, (mode_t)args[3]);
+            error = errno;
+        }
         if (descriptor < 0) {
             static unsigned int openFailureLog = 0;
             if (openFailureLog < 3) {

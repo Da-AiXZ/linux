@@ -268,7 +268,7 @@
      * install the local package here.
      */
     [self startGuestNamed:@"Helpers/alpine-apk"
-                arguments:@[ @"apk", @"add", @"--allow-untrusted",
+                arguments:@[ @"apk", @"--initdb", @"add", @"--allow-untrusted",
                              @"/tmp/hello.apk" ]
                     label:@"Starting apk add --allow-untrusted /tmp/hello.apk..."];
 }
