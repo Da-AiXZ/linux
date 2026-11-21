@@ -11,7 +11,7 @@
 guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建 syscall 层。
 不是虚拟机、不是模拟器、不是解释器。
 
-## 当前状态（2026-11-22，0.38.6 / build 81）
+## 当前状态（2026-11-22，0.38.7 / build 82）
 
 - **M0–M2.5 全部真机通过**。0.34.1：`Run Shell` 六条命令（`ls /`、`cat /etc/motd`、
   `uname`、`ls -l /`、`id`、`pwd`）全对，`status=0`；`Run Fork Test` 父子分别输出。
@@ -138,10 +138,25 @@ guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建
   `unsupported syscall 216`（mremap）。0.38.6：`apk update` / `add bash`
   改用 `--no-cache` 绕开缓存索引文件；实现 mremap；App 在 guest 退出后
   dump `<rootfs>/var/cache/apk` 的文件名/大小/首尾字节，继续定位缓存问题。
-- 最新产物：`/workspace/LinuxProbe-0.38.6.ipa`
-  sha256 `ebdc99d2ca13b26401b0dbdd6be3ea93064418c6bcb5b8943424b3b1816fabf7`
-- **下一步**：真机验证 `Run APK Update (network)` → `Install Bash (network)` →
-  `Run Bash`；通过后 M3.3 完成，进入 M4（fork 快照修复、性能、交互终端）。
+- **0.38.6 真机**：`--no-cache` 仍然失败。App 缓存 dump 证明文件是完整的
+  （main 474417 B、community 1831492 B，与 CDN 上的 APKINDEX.tar.gz 完全一致，
+  头 `1f8b0800` 是 gzip）；`apk update` 里 main 报 `fetching … IO ERROR`，
+  community 在解析约 1083 个包后报 `database file format error`。日志不再有
+  `unsupported syscall 216`，说明 mremap 生效；也没有 mmap 耗尽。
+  0.38.7：修 aarch64 的 open flag 常量（musl 的 `O_LARGEFILE`=0x20000 被误当成
+  `O_NOFOLLOW`，且 `O_DIRECTORY` 应为 0x4000、`O_NOFOLLOW` 应为 0x8000）；
+  guest 退出时打印 `svc totals` / `svc errors`（含每个 syscall 的最后错误）。
+- **桌面复现实验（0.38.7 期间）**：把 GuestRunner 编译成 macOS arm64 与
+  iOS Simulator 版本，并用真实 Alpine minirootfs + apk 跑 `--no-cache update`。
+  两边都在 `libcrypto` 的 RW `MAP_FIXED` 上返回 `-EACCES`：`mprotect` 从 RX
+  加到 RWX 被系统拒绝（即使 `PT_TRACE_ME` + JIT entitlements + hardened runtime）。
+  结论：本运行时依赖真机 CS_DEBUGGED 才有的 RWX 共享页，桌面 CI 无法复现，
+  只能真机迭代；该实验也顺带暴露并修掉了上面的 open flag bug。
+- 最新产物：`/workspace/LinuxProbe-0.38.7.ipa`
+  sha256 `0f21a3e5b97e5c7e481324d0d2d32ecd22a7bcc4dff128f1206f7690bc8b7db7`
+- **下一步**：真机再跑 `Run APK Update (network)`，这次重点看新日志里的
+  `[guest] svc errors:` 行（哪个 syscall 出错、最后错误值），以及
+  `svc totals` 里 `222/215/216/233` 的调用量。
 
 ## 两个仓库
 

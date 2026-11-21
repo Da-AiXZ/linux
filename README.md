@@ -7,7 +7,7 @@
 不是虚拟机，不是模拟器，不是解释器：guest 是 arm64 Linux ELF，指令由 M1 直接执行；
 只把 `svc #0` 改写成分支，跳进自建的 syscall 分发器。
 
-## 当前状态（0.38.6）
+## 当前状态（0.38.7）
 
 | 阶段 | 状态 |
 |---|---|
@@ -17,9 +17,9 @@
 | M2.5 文件系统 + shell | ✅ 0.34.1 真机：`Run Shell` 六条命令全部正确；外部命令走 checkpoint/restore fork + execve |
 | M3.1 动态链接器 | ✅ 0.35.5 真机：动态 Alpine busybox（`status=0`）与 `apk --version`（`apk-tools 2.14.4, compiled for aarch64.`，`status=0`）全部通过 |
 | M3.2 本地 apk | ✅ 0.37.1 真机：`apk add --initdb --allow-untrusted /tmp/hello.apk` → `(1/1) Installing hello (1.0-r0)`、`status=0`；`Run Installed Hello` 输出 `hello from linux elf` |
-| M3.3 网络 | 🚧 0.38.0 实现 socket 全家族、`pselect6/ppoll`、Linux↔Darwin errno 翻译；0.38.1 修复 rootfs `/etc` 被整目录覆盖；0.38.2 带 `cert.pem`；0.38.3 修 mmap 记录回收；0.38.4 把匿名映射移出 112MB 跳板窗口；0.38.5 修正 `SSL_CERT_FILE`/`SSL_CERT_DIR` 为 guest 路径（真机 TLS 通过）；0.38.6 用 `--no-cache` 绕开缓存索引读取失败，并实现 mremap。**待验证完整 `apk update` / `apk add bash`** |
+| M3.3 网络 | 🚧 0.38.0 实现 socket 全家族、`pselect6/ppoll`、Linux↔Darwin errno 翻译；0.38.1 修 rootfs `/etc`；0.38.2 带 `cert.pem`；0.38.3 回收 mmap；0.38.4 匿名映射移出跳板窗口；0.38.5 真机 TLS 通过；0.38.6 加 `--no-cache`/mremap/缓存 dump；0.38.7 修 aarch64 open flag 常量并打印 syscall 统计。**当前卡点**：APKINDEX 完整解析中途失败（约 1083 个包），待 `svc errors` 定位 |
 
-最新版本 **0.38.6 (81)**。项目上下文、决策、真机日志和路线记录在
+最新版本 **0.38.7 (82)**。项目上下文、决策、真机日志和路线记录在
 [Da-AiXZ/linux-workspace](https://github.com/Da-AiXZ/linux-workspace)（私有）。
 
 ## 工作原理
