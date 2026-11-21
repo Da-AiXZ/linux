@@ -1282,8 +1282,15 @@ static int GuestToHostOpenFlags(uint64_t flags)
         result &= ~O_DSYNC;
         result |= O_SYNC;
     }
-    if (flags & 0x10000) result |= O_DIRECTORY;
-    if (flags & 0x20000) result |= O_NOFOLLOW;
+    /*
+     * aarch64 Linux values (musl arch/aarch64/bits/fcntl.h):
+     *   0x4000 O_DIRECTORY, 0x8000 O_NOFOLLOW, 0x20000 O_LARGEFILE.
+     * musl's openat() always ORs O_LARGEFILE into the flags, so treating
+     * 0x20000 as O_NOFOLLOW made every open reject symlinks with ELOOP.
+     */
+    if (flags & 0x4000) result |= O_DIRECTORY;
+    if (flags & 0x8000) result |= O_NOFOLLOW;
+    /* 0x20000 O_LARGEFILE: meaningless on Darwin. */
     if (flags & 0x80000) result |= O_CLOEXEC;
     return result;
 }
@@ -1308,9 +1315,11 @@ static uint64_t GuestFromHostOpenFlags(int flags)
     if (flags & O_NONBLOCK) result |= 0x800;
     if (flags & O_DSYNC) result |= 0x1000;
     if (flags & O_SYNC) result |= 0x100000;
-    if (flags & O_DIRECTORY) result |= 0x10000;
-    if (flags & O_NOFOLLOW) result |= 0x20000;
+    if (flags & O_DIRECTORY) result |= 0x4000;
+    if (flags & O_NOFOLLOW) result |= 0x8000;
     if (flags & O_CLOEXEC) result |= 0x80000;
+    /* Linux reports O_LARGEFILE on F_GETFL; musl expects it. */
+    result |= 0x20000;
     return result;
 }
 

@@ -24,6 +24,22 @@ jobs:
             -Wno-deprecated-declarations \
             -framework Foundation -framework CoreFoundation \
             -o "$RUNNER_TEMP/guest-runner" Guest/GuestRunner.m
+          # The runtime intentionally unions permissions for 4 KB guest pages
+          # sharing a 16 KB host page, which can produce RWX.  iOS allows it
+          # through CS_DEBUGGED; on the macOS test host we need the JIT
+          # entitlements to do the same.
+          cat > "$RUNNER_TEMP/jit.entitlements" <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>com.apple.security.cs.allow-jit</key><true/>
+            <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
+            <key>com.apple.security.cs.disable-library-validation</key><true/>
+          </dict></plist>
+          EOF
+          codesign --force --sign - --entitlements "$RUNNER_TEMP/jit.entitlements" \
+            "$RUNNER_TEMP/guest-runner"
+          codesign --display --entitlements - "$RUNNER_TEMP/guest-runner" 2>&1 || true
           file "$RUNNER_TEMP/guest-runner"
 
       - name: Prepare Alpine rootfs
