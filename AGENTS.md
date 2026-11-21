@@ -11,7 +11,7 @@
 guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建 syscall 层。
 不是虚拟机、不是模拟器、不是解释器。
 
-## 当前状态（2026-11-22，0.38.4 / build 79）
+## 当前状态（2026-11-22，0.38.5 / build 80）
 
 - **M0–M2.5 全部真机通过**。0.34.1：`Run Shell` 六条命令（`ls /`、`cat /etc/motd`、
   `uname`、`ls -l /`、`id`、`pwd`）全对，`status=0`；`Run Fork Test` 父子分别输出。
@@ -124,8 +124,16 @@ guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建
     还要放 64MB guest 堆 + 8MB 栈 + interp，留给数据的只有约 38MB，apk 索引需要更多。
   - 0.38.4：**匿名 mmap 不再限制在跳板窗口内**，直接交给宿主 `mmap(NULL)` 选址
     （匿名数据不含改写代码，不需要 `b` 可达）；只有文件映射/ELF 库仍用窗口内分配。
-- 最新产物：`/workspace/LinuxProbe-0.38.4.ipa`
-  sha256 `88d370e7f6df447ac319c88e79857f7be8032372258f407fce65f82ddd562f7a`
+- **0.38.4 真机**：`apk update` 刷屏消失、也不再耗尽地址，但 TLS 仍
+  `certificate verify failed`；`apk add bash` 因 main 索引缓存不可读（`IO ERROR`）
+  且 community 下载失败而无法安装。根因：`SSL_CERT_FILE` / `SSL_CERT_DIR`
+  传的是**宿主路径** `<容器>/Documents/rootfs/etc/ssl/...`，guest 打开时
+  `GuestTranslatePath` 会再拼一次 rootfs，OpenSSL 实际拿到空信任库。
+  **0.38.2 记录的“TLS 通过”据此修正**（0.38.2/0.38.4 的 Probe 里都是宿主路径）。
+  - 0.38.5：环境改为 guest 路径 `/etc/ssl/certs/ca-certificates.crt` 与
+    `/etc/ssl/certs`；bootstrap 增加 `cert.pem`、CA 大小、guest 时间诊断。
+- 最新产物：`/workspace/LinuxProbe-0.38.5.ipa`
+  sha256 `3b639608cd3c636870654fc86767157e08e89623ed74e3e149c66fedc3477144`
 - **下一步**：真机验证 `Run APK Update (network)` → `Install Bash (network)` →
   `Run Bash`；通过后 M3.3 完成，进入 M4（fork 快照修复、性能、交互终端）。
 
