@@ -53,7 +53,7 @@ jobs:
           set -o pipefail
           ROOT="$RUNNER_TEMP/rootfs"
           SIMCTL_CHILD_LINUXPROBE_ROOT="$ROOT" \
-            xcrun simctl spawn --console "$UDID" \
+            xcrun simctl spawn "$UDID" \
               "$RUNNER_TEMP/guest-runner-sim" \
               "$ROOT/sbin/apk" apk --no-cache --allow-untrusted update \
             2>&1 | tee "$RUNNER_TEMP/apk-update.log"
@@ -63,7 +63,7 @@ jobs:
           set -o pipefail
           ROOT="$RUNNER_TEMP/rootfs"
           SIMCTL_CHILD_LINUXPROBE_ROOT="$ROOT" \
-            xcrun simctl spawn --console "$UDID" \
+            xcrun simctl spawn "$UDID" \
               "$RUNNER_TEMP/guest-runner-sim" \
               "$ROOT/sbin/apk" apk --no-cache --allow-untrusted add bash \
             2>&1 | tee "$RUNNER_TEMP/apk-add.log"
@@ -74,7 +74,7 @@ jobs:
           ROOT="$RUNNER_TEMP/rootfs"
           test -x "$ROOT/bin/bash"
           SIMCTL_CHILD_LINUXPROBE_ROOT="$ROOT" \
-            xcrun simctl spawn --console "$UDID" \
+            xcrun simctl spawn "$UDID" \
               "$RUNNER_TEMP/guest-runner-sim" \
               "$ROOT/bin/bash" bash -c "echo bash ok; uname -a; id" \
             2>&1 | tee "$RUNNER_TEMP/bash.log"
