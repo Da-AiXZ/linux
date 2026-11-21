@@ -11,11 +11,11 @@
 guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建 syscall 层。
 不是虚拟机、不是模拟器、不是解释器。
 
-## 当前状态（2026-11-22，0.35.5 / build 70）
+## 当前状态（2026-11-22，0.36.0 / build 71）
 
 - **M0–M2.5 全部真机通过**。0.34.1：`Run Shell` 六条命令（`ls /`、`cat /etc/motd`、
   `uname`、`ls -l /`、`id`、`pwd`）全对，`status=0`；`Run Fork Test` 父子分别输出。
-- **M3.1 动态链接已基本打通，等待 0.35.5 真机日志**：
+- **M3.1 已完成（0.35.5 真机）**：
   - 解析 `PT_INTERP`，加载 musl `ld-musl-aarch64.so.1` 到独立基址
   - auxv 写 `AT_BASE`=动态链接器（ld.so）基址、`AT_ENTRY`=主程序入口
   - 文件 `mmap` 改成 anon + `pread` 模拟（4KB offset、未签名 `.so` 的 `PROT_EXEC`）
@@ -43,10 +43,23 @@ guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建
   - 0.35.5：`GuestProtectRange` 的精确区间起点写成了 `headPage + 0x4000`，
     当 guest 地址已 16KB 对齐时**第一页永远不会被 mprotect**，整文件映射的第一页
     停在 `PROT_READ|PROT_WRITE`（不可执行）。改成 `firstFull = GuestAlignUp(address)`。
-- 最新产物：`/workspace/LinuxProbe-0.35.5.ipa`
-  sha256 `73ffb5be57f54cbfdfbe33945cd141b28eefedff561fef1cf15706bb425697ac`
-- **下一步**：用户回传 0.35.5 的两个菜单项日志；通过则进 M3.2（Alpine rootfs + 本地 apk），
-  不通过按日志继续修 `mmap` / ld.so 重定位。
+  - **0.35.5 真机：M3.1 完成**。动态 Alpine busybox `status=0`；
+    `apk --version` 打印 `apk-tools 2.14.4, compiled for aarch64.`，`status=0`。
+    只剩 `unsupported syscall 166`（umask）。
+- **M3.2 已实现并构建，等待真机日志（0.36.0）**：
+  - guest 身份改为 root（`getuid/geteuid/getgid/getegid` 返回 0），否则 apk 拒绝安装；
+    `fchownat/fchown` 直接返回成功（宿主用户无法 chown，但单用户运行时不需要）
+  - 新增 syscall：`statfs(43)`、`fstatfs(44)`、`flock(32)`、`fchmod(52)`、
+    `fchmodat(53)`、`umask(166)`；`statfs` 结构体按 Linux arm64 布局手工填充
+  - rootfs 初始化：`/etc/apk/arch`、`/etc/apk/repositories`、`/etc/apk/world`、
+    `/lib/apk/db/installed`（只在缺失时创建）；把 `Helpers/alpine-apk` 复制到 `/sbin/apk`
+  - CI 用 `tools/make_hello_apk.py` 生成 625B 的 `hello.apk`（control tar 必须去掉
+    tar 结束块，且普通文件要带 `APK-TOOLS.checksum.SHA1` PAX 记录，否则 apk 报错）
+  - App 新增 `Run APK Add Hello`：静态 busybox shell → fork/exec `/sbin/apk` → 安装并运行
+    `/usr/bin/hello`
+- 最新产物：`/workspace/LinuxProbe-0.36.0.ipa`
+  sha256 `99b9ad9446f473c3c66148d446a8555d9c2014de23f5a1b6ef480b1793f380a5`
+- **下一步**：用户回传 `Run APK Add Hello` 日志；通过则进 M3.3（网络 + `apk update`）。
 
 ## 两个仓库
 
@@ -188,13 +201,13 @@ aarch64-linux-gnu-objdump -d Tools/busybox.static | less
 
 ## 当前优先级
 
-1. **等 0.35.5 真机日志**：`Alpine BusyBox (dynamic)` 与 `Run APK --version`。
-   - 成功标准：Alpine busybox 打印 `Linux … aarch64 GNU/Linux`；apk 打印
-     `apk-tools 2.14.x`；两者 `status=0`。
+1. **等 0.36.0 真机日志**：`Run APK Add Hello`。
+   - 成功标准：输出 `(1/1) Installing hello (1.0-r0)`、`OK:`，然后
+     `hello from linux elf`，`status=0`。
    - 若卡住/崩溃：看 `interp` / `loaded` / `mmap elf` / `mprotect` /
      `unsupported syscall` / `signal` 这几行；`pc - base` 定位到 ld.so 或库。
    - `apk` 若继续报 `Out of memory`，重点看 `mmap` 返回值与 `mmap fixed overlaps runtime`。
-2. M3.1 通过后：M3.2 Alpine rootfs + 本地 `apk add --allow-untrusted`。
+2. M3.2 通过后：M3.3 网络 + `apk update`。
 3. 之后：M3.3 网络 + `apk update`（socket/poll/DNS/TLS）。
 4. M4：性能基准、syscall 按站点特化、fork 快照优化、交互终端、常用工具验证。
 

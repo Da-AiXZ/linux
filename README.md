@@ -7,7 +7,7 @@
 不是虚拟机，不是模拟器，不是解释器：guest 是 arm64 Linux ELF，指令由 M1 直接执行；
 只把 `svc #0` 改写成分支，跳进自建的 syscall 分发器。
 
-## 当前状态（0.35.5）
+## 当前状态（0.36.0）
 
 | 阶段 | 状态 |
 |---|---|
@@ -15,9 +15,10 @@
 | M1 原生 ELF | ✅ 最小 aarch64 ELF 直接执行，`status=0` |
 | M2 真实 busybox | ✅ glibc static-PIE `busybox` / `pie-hello` 原生执行，`status=0` |
 | M2.5 文件系统 + shell | ✅ 0.34.1 真机：`Run Shell` 六条命令全部正确；外部命令走 checkpoint/restore fork + execve |
-| M3.1 动态链接器 | 🚧 0.35.3 真机：Alpine 动态 busybox 打印 `uname` 且 `status=0`；0.35.4 真机：库的 RW 段 `MAP_FIXED` 全部成功，卡在 `libz+0x2830` 取指 permission fault（`esr=0x8200000f`）；0.35.4 修 `MAP_FIXED` 越界与 4KB/16KB 共享页权限；0.35.5 修 `GuestProtectRange` 在地址已 16KB 对齐时漏掉第一页（`libz` 首屏仍 RW，取指 permission fault）。**待真机验证** |
+| M3.1 动态链接器 | ✅ 0.35.5 真机：动态 Alpine busybox（`status=0`）与 `apk --version`（`apk-tools 2.14.4, compiled for aarch64.`，`status=0`）全部通过 |
+| M3.2 本地 apk | 🚧 0.36.0：guest 身份改为 root，补 `statfs/fstatfs`、`flock`、`fchmod(at)`、`fchownat`、`umask`；rootfs 初始化 `/etc/apk/arch`、`/lib/apk/db`；随包带 `hello.apk`；新增 `Run APK Add Hello`。**待真机验证** |
 
-最新版本 **0.35.5 (70)**。项目上下文、决策、真机日志和路线记录在
+最新版本 **0.36.0 (71)**。项目上下文、决策、真机日志和路线记录在
 [Da-AiXZ/linux-workspace](https://github.com/Da-AiXZ/linux-workspace)（私有）。
 
 ## 工作原理
@@ -105,6 +106,7 @@ Helpers/guest-runner <elf> [guest argv...]
    - **Run BusyBox ls -l /**、**Run BusyBox**、**Run PIE Hello**
    - **Alpine BusyBox (dynamic)**：动态链接 Alpine busybox（M3.1 测试）
    - **Run APK --version**：动态链接 `apk`（M3.1 验收）
+   - **Run APK Add Hello**：`apk add --allow-untrusted /tmp/hello.apk` 并运行 `/usr/bin/hello`（M3.2 验收）
 3. 日志直接显示在 App 里。
 
 关键日志：
@@ -144,8 +146,8 @@ tools/make_fork_elf.py          生成 fork 测试 ELF
 - **M1（完成）**：原生执行最小 ELF。
 - **M2（完成）**：真实 static-PIE busybox。
 - **M2.5（完成）**：rootfs + shell + 外部命令 fork/exec。
-- **M3.1（进行中）**：`PT_INTERP` + musl ld.so，验收 `apk --version`。
-- **M3.2**：Alpine rootfs + 本地 `apk add`。
+- **M3.1（已完成）**：`PT_INTERP` + musl ld.so，`apk --version` 已通过。
+- **M3.2（进行中）**：Alpine rootfs + 本地 `apk add`，验收 `Run APK Add Hello`。
 - **M3.3**：网络 + `apk update`（socket/poll/TLS）。
 - **M4**：性能基准、syscall 特化、fork 快照优化、交互终端、常用工具验证。
 
