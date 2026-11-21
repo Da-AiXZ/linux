@@ -11,7 +11,7 @@
 guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建 syscall 层。
 不是虚拟机、不是模拟器、不是解释器。
 
-## 当前状态（2026-11-22，0.38.5 / build 80）
+## 当前状态（2026-11-22，0.38.6 / build 81）
 
 - **M0–M2.5 全部真机通过**。0.34.1：`Run Shell` 六条命令（`ls /`、`cat /etc/motd`、
   `uname`、`ls -l /`、`id`、`pwd`）全对，`status=0`；`Run Fork Test` 父子分别输出。
@@ -132,8 +132,14 @@ guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建
   **0.38.2 记录的“TLS 通过”据此修正**（0.38.2/0.38.4 的 Probe 里都是宿主路径）。
   - 0.38.5：环境改为 guest 路径 `/etc/ssl/certs/ca-certificates.crt` 与
     `/etc/ssl/certs`；bootstrap 增加 `cert.pem`、CA 大小、guest 时间诊断。
-- 最新产物：`/workspace/LinuxProbe-0.38.5.ipa`
-  sha256 `3b639608cd3c636870654fc86767157e08e89623ed74e3e149c66fedc3477144`
+- **0.38.5 真机**：TLS 证书校验通过（两个仓库的描述都能解析出来），但随后
+  读缓存索引失败：`WARNING: opening from cache …: IO ERROR`，两个仓库各计一次
+  unavailable；`apk add bash` 因此无索引可用。日志还出现 8 次
+  `unsupported syscall 216`（mremap）。0.38.6：`apk update` / `add bash`
+  改用 `--no-cache` 绕开缓存索引文件；实现 mremap；App 在 guest 退出后
+  dump `<rootfs>/var/cache/apk` 的文件名/大小/首尾字节，继续定位缓存问题。
+- 最新产物：`/workspace/LinuxProbe-0.38.6.ipa`
+  sha256 `ebdc99d2ca13b26401b0dbdd6be3ea93064418c6bcb5b8943424b3b1816fabf7`
 - **下一步**：真机验证 `Run APK Update (network)` → `Install Bash (network)` →
   `Run Bash`；通过后 M3.3 完成，进入 M4（fork 快照修复、性能、交互终端）。
 
