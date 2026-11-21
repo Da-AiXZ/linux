@@ -46,7 +46,7 @@ guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建
   - **0.35.5 真机：M3.1 完成**。动态 Alpine busybox `status=0`；
     `apk --version` 打印 `apk-tools 2.14.4, compiled for aarch64.`，`status=0`。
     只剩 `unsupported syscall 166`（umask）。
-- **M3.2 已实现并构建，等待真机日志（0.36.0）**：
+- **M3.2 已完成（0.37.1 真机）**：
   - guest 身份改为 root（`getuid/geteuid/getgid/getegid` 返回 0），否则 apk 拒绝安装；
     `fchownat/fchown` 直接返回成功（宿主用户无法 chown，但单用户运行时不需要）
   - 新增 syscall：`statfs(43)`、`fstatfs(44)`、`flock(32)`、`fchmod(52)`、
@@ -74,10 +74,15 @@ guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建
   - **0.37.0 真机**：直跑 `apk add` 已进入 apk 主逻辑，失败在
     `openat /lib/apk/db/lock` → `ENOENT`（`Unable to lock database`，`status=99`）。
   - 0.37.1：`apk add` 加 `--initdb`；`openat(O_CREAT)` 遇 `ENOENT` 时创建父目录并重试；
-    bootstrap 增加 `apk db dir=... exists=...` 诊断。**待真机**。
+    bootstrap 增加 `apk db dir=... exists=...` 诊断。
+  - **0.37.1 真机：M3.2 完成**。`apk add` 输出
+    `(1/1) Installing hello (1.0-r0)` + `OK: 0 MiB in 1 packages`，`status=0`；
+    `Run Installed Hello` 输出 `hello from linux elf`，`status=0`。
+    剩余杂音：`unsupported syscall 40/39`（apk 尝试 mount/umount2，忽略失败）、
+    `/etc/apk/protected_paths.d`、`/etc/apk/cache` 探测失败（可选路径）。
 - 最新产物：`/workspace/LinuxProbe-0.37.1.ipa`
   sha256 `5ea6b97d62acd58f3504bcfd2de183706caf56d1b468406972059b420dfa0a90`
-- **下一步**：用户回传 `Run APK Add Hello` 日志；通过则进 M3.3（网络 + `apk update`）。
+- **下一步**：M3.3 网络 + `apk update`（socket 透传、poll、DNS、TLS）；之后再修 fork 快照（M4）。
 
 ## 两个仓库
 
@@ -219,15 +224,13 @@ aarch64-linux-gnu-objdump -d Tools/busybox.static | less
 
 ## 当前优先级
 
-1. **等 0.36.0 真机日志**：`Run APK Add Hello`。
-   - 成功标准：输出 `(1/1) Installing hello (1.0-r0)`、`OK:`，然后
-     `hello from linux elf`，`status=0`。
-   - 若卡住/崩溃：看 `interp` / `loaded` / `mmap elf` / `mprotect` /
-     `unsupported syscall` / `signal` 这几行；`pc - base` 定位到 ld.so 或库。
-   - `apk` 若继续报 `Out of memory`，重点看 `mmap` 返回值与 `mmap fixed overlaps runtime`。
-2. M3.2 通过后：M3.3 网络 + `apk update`。
-3. 之后：M3.3 网络 + `apk update`（socket/poll/DNS/TLS）。
-4. M4：性能基准、syscall 按站点特化、fork 快照优化、交互终端、常用工具验证。
+1. **M3.3 网络 + `apk update`**：socket 透传（AF_INET / sockaddr 转换、SOL_SOCKET
+   选项常量）、`poll/ppoll/select`、`sendto/recvfrom/sendmsg/recvmsg`、DNS、TLS；
+   验收 `apk update`、`apk add bash`。
+   - 注意 Linux 与 Darwin 的 socket 常量不同（`SOL_SOCKET` Linux=1 / Darwin=0xffff，
+     `sockaddr` 有/无 `sa_len`）。
+   - `apk` 目前会调 `mount/umount2`（40/39），失败可忽略。
+2. M4：性能基准、syscall 按站点特化、fork 快照修复（动态镜像 fork + 恢复子进程选址）、交互终端、常用工具验证。
 
 ## 不要做
 
