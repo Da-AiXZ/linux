@@ -7,7 +7,7 @@
 不是虚拟机，不是模拟器，不是解释器：guest 是 arm64 Linux ELF，指令由 M1 直接执行；
 只把 `svc #0` 改写成分支，跳进自建的 syscall 分发器。
 
-## 当前状态（0.36.0）
+## 当前状态（0.36.1）
 
 | 阶段 | 状态 |
 |---|---|
@@ -16,9 +16,9 @@
 | M2 真实 busybox | ✅ glibc static-PIE `busybox` / `pie-hello` 原生执行，`status=0` |
 | M2.5 文件系统 + shell | ✅ 0.34.1 真机：`Run Shell` 六条命令全部正确；外部命令走 checkpoint/restore fork + execve |
 | M3.1 动态链接器 | ✅ 0.35.5 真机：动态 Alpine busybox（`status=0`）与 `apk --version`（`apk-tools 2.14.4, compiled for aarch64.`，`status=0`）全部通过 |
-| M3.2 本地 apk | 🚧 0.36.0：guest 身份改为 root，补 `statfs/fstatfs`、`flock`、`fchmod(at)`、`fchownat`、`umask`；rootfs 初始化 `/etc/apk/arch`、`/lib/apk/db`；随包带 `hello.apk`；新增 `Run APK Add Hello`。**待真机验证** |
+| M3.2 本地 apk | 🚧 0.36.0 真机：动态 Alpine busybox 作为父进程时 fork 返回 `-ENOSYS`（动态镜像快照未支持），`apk add` 没跑起来；0.36.1 改用静态 busybox 作为 shell，子进程 exec 动态 `/sbin/apk`，并扩大 execve 的 image base 候选扫描（修 `no free address range near trampoline`）。**待真机验证** |
 
-最新版本 **0.36.0 (71)**。项目上下文、决策、真机日志和路线记录在
+最新版本 **0.36.1 (72)**。项目上下文、决策、真机日志和路线记录在
 [Da-AiXZ/linux-workspace](https://github.com/Da-AiXZ/linux-workspace)（私有）。
 
 ## 工作原理

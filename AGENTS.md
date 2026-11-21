@@ -11,7 +11,7 @@
 guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建 syscall 层。
 不是虚拟机、不是模拟器、不是解释器。
 
-## 当前状态（2026-11-22，0.36.0 / build 71）
+## 当前状态（2026-11-22，0.36.1 / build 72）
 
 - **M0–M2.5 全部真机通过**。0.34.1：`Run Shell` 六条命令（`ls /`、`cat /etc/motd`、
   `uname`、`ls -l /`、`id`、`pwd`）全对，`status=0`；`Run Fork Test` 父子分别输出。
@@ -57,8 +57,16 @@ guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建
     tar 结束块，且普通文件要带 `APK-TOOLS.checksum.SHA1` PAX 记录，否则 apk 报错）
   - App 新增 `Run APK Add Hello`：静态 busybox shell → fork/exec `/sbin/apk` → 安装并运行
     `/usr/bin/hello`
-- 最新产物：`/workspace/LinuxProbe-0.36.0.ipa`
-  sha256 `99b9ad9446f473c3c66148d446a8555d9c2014de23f5a1b6ef480b1793f380a5`
+  - **0.36.0 真机**：`Run APK Add Hello` 失败——父进程是动态 Alpine busybox，
+    `sh` fork 时 `GuestForkWithSnapshot` 因 `GuestInterpBase != 0` 返回 `-ENOSYS`
+    （`sh: can't fork`，`status=2`）。同一次 `Run Shell` 里 `cat` 还撞到
+    `no free address range near trampoline`（execve 的固定候选地址全被占用）。
+  - 0.36.1：`Run APK Add Hello` 改用**静态 busybox** 作 shell（静态父进程可以
+    checkpoint/restore fork），子进程 exec 动态 `/sbin/apk`；`GuestChooseBase`
+    改为在 ±64MB 内按 16MB 步进扫描双向候选，避免恢复子进程里地址全被占。
+    **待真机**。
+- 最新产物：`/workspace/LinuxProbe-0.36.1.ipa`
+  sha256 `d13e57ff67168e788b2d6e92199a6c9819ec3985ae0dfda163c34105a06a6f1e`
 - **下一步**：用户回传 `Run APK Add Hello` 日志；通过则进 M3.3（网络 + `apk update`）。
 
 ## 两个仓库
