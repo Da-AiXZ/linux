@@ -95,6 +95,7 @@ static uint64_t GuestStackTop = 0;
 static uintptr_t GuestImageBase = 0;
 static uint64_t GuestImageSize = 0;
 static const char *GuestElfPath = NULL;
+static uint64_t GuestTlsPointer = 0;
 
 #pragma mark - JIT and fault reporting
 
@@ -321,20 +322,18 @@ uint64_t GuestSyscallDispatch(uint64_t *args,
                               uint64_t returnAddress)
 {
     static unsigned int traceCount = 0;
-    uint64_t guestTpidr = 0;
-    __asm__ volatile("mrs %0, tpidr_el0" : "=r"(guestTpidr));
     if (traceCount < 40) {
         traceCount++;
         fprintf(stdout,
                 "[guest] svc %llu site=0x%llx x0=0x%llx x1=0x%llx "
-                "x2=0x%llx x3=0x%llx tpidr=0x%llx\n",
+                "x2=0x%llx x3=0x%llx tls=0x%llx\n",
                 (unsigned long long)number,
                 (unsigned long long)(returnAddress - 4),
                 (unsigned long long)args[0],
                 (unsigned long long)args[1],
                 (unsigned long long)args[2],
                 (unsigned long long)args[3],
-                (unsigned long long)guestTpidr);
+                (unsigned long long)GuestTlsPointer);
     }
 
     if (number > 500) {
@@ -708,6 +707,46 @@ static uint64_t GuestBuildStack(uint64_t stackTop,
     return cursor;
 }
 
+#define GUEST_TLS_STUB_COUNT 29
+
+static uintptr_t GuestTlsReadStubs[GUEST_TLS_STUB_COUNT];
+static uintptr_t GuestTlsWriteStubs[GUEST_TLS_STUB_COUNT];
+
+static uint32_t GuestEncodeAdrp(uint32_t rd, uintptr_t from, uintptr_t to)
+{
+    int64_t pages = ((int64_t)(to & ~0xFFFULL) -
+                     (int64_t)(from & ~0xFFFULL)) >> 12;
+    uint32_t immlo = (uint32_t)(pages & 0x3);
+    uint32_t immhi = (uint32_t)((pages >> 2) & 0x7FFFF);
+    return 0x90000000U | (immlo << 29) | (immhi << 5) | rd;
+}
+
+/*
+ * TPIDR_EL0 cannot be trusted here: XNU resets it to its own value (0x4)
+ * on some kernel returns, so a guest TLS pointer written by glibc is gone
+ * before the next TLS access.  Emulate it in a shadow variable instead:
+ *
+ *   mrs xN, tpidr_el0 -> bl readStub[N]  (xN = GuestTlsPointer)
+ *   msr tpidr_el0, xN -> bl writeStub[N] (GuestTlsPointer = xN)
+ *
+ * Stubs only touch x30 (saved on the stack) and xN.
+ */
+static void GuestEmitTlsStub(uint8_t *stub, BOOL isWrite, uint32_t rt)
+{
+    uintptr_t shadow = (uintptr_t)&GuestTlsPointer;
+    uint32_t pageOffset = (uint32_t)(shadow & 0xFFF);
+    uint32_t *code = (uint32_t *)stub;
+
+    code[0] = 0xA9BF7BFEU; /* stp x30, xzr, [sp, #-16]! */
+    code[1] = GuestEncodeAdrp(30, (uintptr_t)stub, shadow);
+    code[2] = (isWrite ? 0xF9000000U : 0xF9400000U) |
+              ((pageOffset / 8) << 10) |
+              (30U << 5) |
+              rt;
+    code[3] = 0xA8C17BFEU; /* ldp x30, xzr, [sp], #16 */
+    code[4] = 0xD65F03C0U; /* ret */
+}
+
 static uintptr_t GuestMapStub(uintptr_t imageStart,
                               uint64_t imageSize,
                               uintptr_t target)
@@ -747,7 +786,17 @@ static uintptr_t GuestMapStub(uintptr_t imageStart,
         code[0] = 0x58000050; /* ldr x16, #8 */
         code[1] = 0xD61F0200; /* br x16 */
         *(uint64_t *)(page + 8) = (uint64_t)target;
-        sys_icache_invalidate(page, 16);
+
+        for (uint32_t rt = 0; rt < GUEST_TLS_STUB_COUNT; rt++) {
+            uint8_t *readStub = page + 0x400 + rt * 32;
+            uint8_t *writeStub = page + 0x800 + rt * 32;
+            GuestEmitTlsStub(readStub, NO, rt);
+            GuestEmitTlsStub(writeStub, YES, rt);
+            GuestTlsReadStubs[rt] = (uintptr_t)readStub;
+            GuestTlsWriteStubs[rt] = (uintptr_t)writeStub;
+        }
+
+        sys_icache_invalidate(page, 0x1000);
         mprotect(page, 0x4000, PROT_READ | PROT_EXEC);
         return candidate;
     }
@@ -845,6 +894,8 @@ static int GuestLoadAndRun(int argc, char *argv[])
     }
 
     uint32_t patched = 0;
+    uint32_t tlsReads = 0;
+    uint32_t tlsWrites = 0;
     uintptr_t island = GuestMapStub(imageStart,
                                     imageSize,
                                     (uintptr_t)&GuestSyscallTrampoline);
@@ -864,35 +915,65 @@ static int GuestLoadAndRun(int argc, char *argv[])
         uint8_t *start = (uint8_t *)image + (program->p_vaddr - minAddress);
         for (uint64_t offset = 0; offset + 4 <= program->p_filesz; offset += 4) {
             uint32_t instruction = *(uint32_t *)(start + offset);
-            if (instruction != 0xD4000001) {
+            uintptr_t destination = 0;
+
+            if (instruction == 0xD4000001) {
+                destination = island;
+            } else if ((instruction & 0xFFFFFFE0U) == 0xD53BD040U) {
+                uint32_t rt = instruction & 0x1F;
+                if (rt >= GUEST_TLS_STUB_COUNT) {
+                    fprintf(stderr,
+                            "[guest] mrs tpidr_el0, x%u is unsupported\n",
+                            rt);
+                    return 1;
+                }
+                destination = GuestTlsReadStubs[rt];
+                tlsReads++;
+            } else if ((instruction & 0xFFFFFFE0U) == 0xD51BD040U) {
+                uint32_t rt = instruction & 0x1F;
+                if (rt >= GUEST_TLS_STUB_COUNT) {
+                    fprintf(stderr,
+                            "[guest] msr tpidr_el0, x%u is unsupported\n",
+                            rt);
+                    return 1;
+                }
+                destination = GuestTlsWriteStubs[rt];
+                tlsWrites++;
+            } else {
                 continue;
             }
 
-            int64_t delta = (int64_t)(island - (uintptr_t)(start + offset));
+            int64_t delta = (int64_t)(destination - (uintptr_t)(start + offset));
             if (delta < -(1LL << 27) || delta >= (1LL << 27)) {
-                fprintf(stderr, "[guest] svc site out of bl range\n");
+                fprintf(stderr, "[guest] patch site out of bl range\n");
                 return 1;
             }
             uint32_t immediate = ((uint32_t)(delta >> 2)) & 0x03FFFFFF;
             *(uint32_t *)(start + offset) = 0x94000000 | immediate;
-            if (patched < 8) {
-                fprintf(stdout,
-                        "[guest] patch site=0x%lx island=0x%lx "
-                        "delta=0x%llx word=0x%08x\n",
-                        (unsigned long)(start + offset),
-                        (unsigned long)island,
-                        (unsigned long long)delta,
-                        *(uint32_t *)(start + offset));
+            if (instruction == 0xD4000001) {
+                if (patched < 8) {
+                    fprintf(stdout,
+                            "[guest] patch site=0x%lx island=0x%lx "
+                            "delta=0x%llx word=0x%08x\n",
+                            (unsigned long)(start + offset),
+                            (unsigned long)island,
+                            (unsigned long long)delta,
+                            *(uint32_t *)(start + offset));
+                }
+                patched++;
             }
-            patched++;
         }
     }
     sys_icache_invalidate((void *)imageStart, (size_t)imageSize);
-    fprintf(stdout, "[guest] loaded %s base=0x%lx size=0x%llx patched=%u\n",
+    fprintf(stdout,
+            "[guest] loaded %s base=0x%lx size=0x%llx patched=%u "
+            "tls_mrs=%u tls_msr=%u\n",
             path,
             (unsigned long)base,
             (unsigned long long)imageSize,
-            patched);
+            patched,
+            tlsReads,
+            tlsWrites);
 
     for (uint16_t index = 0; index < header->e_phnum; index++) {
         const GuestElfProgramHeader *program = &programs[index];
