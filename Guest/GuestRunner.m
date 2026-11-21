@@ -225,8 +225,19 @@ uint64_t GuestSyscallDispatch(uint64_t *args,
 __attribute__((naked, noinline, used))
 static void GuestSyscallTrampoline(void)
 {
+    /*
+     * Linux preserves every register except x0 across a syscall, and
+     * glibc relies on that (e.g. __sbrk issues two brk svcs and only
+     * sets x8 once). Save and restore x1-x17 around the C dispatch.
+     */
     __asm__ volatile(
         "stp x29, x30, [sp, #-16]!\n"
+        "stp x16, x17, [sp, #-16]!\n"
+        "stp x14, x15, [sp, #-16]!\n"
+        "stp x12, x13, [sp, #-16]!\n"
+        "stp x10, x11, [sp, #-16]!\n"
+        "stp x8, x9, [sp, #-16]!\n"
+        "stp x6, x7, [sp, #-16]!\n"
         "stp x4, x5, [sp, #-16]!\n"
         "stp x2, x3, [sp, #-16]!\n"
         "stp x0, x1, [sp, #-16]!\n"
@@ -237,6 +248,12 @@ static void GuestSyscallTrampoline(void)
         "ldp x9, x1, [sp], #16\n"
         "ldp x2, x3, [sp], #16\n"
         "ldp x4, x5, [sp], #16\n"
+        "ldp x6, x7, [sp], #16\n"
+        "ldp x8, x9, [sp], #16\n"
+        "ldp x10, x11, [sp], #16\n"
+        "ldp x12, x13, [sp], #16\n"
+        "ldp x14, x15, [sp], #16\n"
+        "ldp x16, x17, [sp], #16\n"
         "ldp x29, x30, [sp], #16\n"
         "ret\n");
 }
