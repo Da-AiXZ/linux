@@ -15,7 +15,7 @@
 | M2 真实 busybox | 🚧 static-PIE busybox 已能加载（`patched=297`），正在解决 glibc 启动阶段的问题 |
 | M3 Alpine / Debian rootfs | ⏳ |
 
-最新版本 **0.16.9 (30)**。项目上下文、决策和路线记录在
+最新版本 **0.17.0 (31)**。项目上下文、决策和路线记录在
 [Da-AiXZ/linux-workspace](https://github.com/Da-AiXZ/linux-workspace)（私有）。
 
 ## 工作原理
@@ -83,10 +83,14 @@ Helpers/guest-runner <elf> [guest argv...]
 [guest] entry=… aligned=1 words=… argv0=…      入口
 [guest] heap=0x…                               64MB guest 堆
 [guest] svc N site=0x… x0=…                    syscall 调用点
-[guest] signal N addr=… pc=… far=…            故障现场（SIGSEGV/BUS/ILL/FPE）
-[guest] fault offset=0x…                       pc - base，拿去 objdump
+[guest] stopped: signal=11 / thread N pc=…     父进程抓到的停止现场（0.17.0 起）
+[guest] signalled: signal=9                    取证后父进程杀掉 guest
 [guest] watchdog1/2: pc=… sp=…                 卡住时的现场
 ```
+
+注意：`PT_TRACE_ME` 让 `guest-runner` 处于被调试状态，致命信号会**停住整个任务**，
+所以进程内的 `sigaction`/watchdog 不会触发；现场由 App 侧
+`waitpid(WUNTRACED)` + `task_for_pid` + `thread_get_state` 读取。
 
 ## 目录
 

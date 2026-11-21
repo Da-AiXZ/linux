@@ -48,6 +48,9 @@ CURRENT_PROJECT_VERSION: "N"
 8. syscall 返回必须保留 `x1–x17`、`TPIDR_EL0`、`NZCV`（glibc 依赖）。
 9. JIT 只靠 `ptrace(PT_TRACE_ME)`；**不要**加 `PT_SIGEXC` + 自建 Mach 异常端口——实测收不到故障。
    故障诊断用 `sigaction`，输出 `addr/pc/lr/sp/far/esr` 与 `pc - base`。
+10. `PT_TRACE_ME` 下进程处于被调试状态（`P_LTRACED`）：**致命信号会停住整个任务**，
+    进程内的 `sigaction` 和 watchdog 都不会执行。现场必须由父进程
+    `waitpid(WUNTRACED)` + `task_for_pid` + `thread_get_state` 读取（0.17.0 起，App 侧 `GuestLauncher`）。
 
 ## 调试
 
@@ -62,9 +65,9 @@ App 日志的关键行含义见工作区 `AGENTS.md` 第 6 节。
 
 ## 当前优先级
 
-1. 0.16.9 真机验证：`Run Linux Test` 应出现 `[guest] signal 11 addr=0x0 …` + `status=70`；
-   然后 `Run PIE Hello` / `Run BusyBox`，用 `[guest] fault offset` 定位 glibc 死点。
-2. 若信号链路也不通，改用"父进程 spawn + 子进程故障"模型排查。
+1. 0.17.0 真机验证：应出现 `guest stopped: signal=11` + `guest thread N pc=…` + `guest signalled: signal=9`；
+   用 `pc - base` 定位 glibc 死点。
+2. 若 App 的 `waitpid(WUNTRACED)` 收不到停止事件，改在 App 里 `ptrace(PT_ATTACHEXC)` + Mach 异常（跨进程调试器）。
 3. 若 glibc static-PIE 启动仍不通，改用 musl static-PIE（Alpine 工具链）。
 4. 之后补文件类 syscall + rootfs 路径映射（见工作区 `docs/ROADMAP.md` M2.2）。
 
