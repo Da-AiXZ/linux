@@ -835,20 +835,65 @@ void GuestTlsWriteLog(uint64_t value, uint64_t returnAddress)
  *
  * Stubs only touch x30 (saved on the stack) and xN.
  */
-static void GuestEmitTlsReadStub(uint8_t *stub, uint32_t rt)
+void GuestTlsReadLog(uint64_t value, uint64_t returnAddress)
+{
+    static uint64_t lastValue = 0;
+    static unsigned int count = 0;
+    if (count < 24 || value != lastValue) {
+        count++;
+        lastValue = value;
+        fprintf(stdout,
+                "[guest] tls read value=0x%llx site=0x%llx shadow=0x%llx\n",
+                (unsigned long long)value,
+                (unsigned long long)(returnAddress - 4),
+                (unsigned long long)GuestTlsPointer);
+        fflush(stdout);
+    }
+}
+
+static void GuestEmitTlsReadStub(uint8_t *stub, uint32_t rt, BOOL log)
 {
     uintptr_t shadow = (uintptr_t)&GuestTlsPointer;
-    uint32_t pageOffset = (uint32_t)(shadow & 0xFFF);
+    uint32_t shadowOffset = (uint32_t)(shadow & 0xFFF);
     uint32_t *code = (uint32_t *)stub;
 
-    code[0] = 0xF81F0FFEU; /* str x30, [sp, #-16]! */
-    code[1] = GuestEncodeAdrp(30, (uintptr_t)stub, shadow);
-    code[2] = 0xF9400000U |
-              ((pageOffset / 8) << 10) |
-              (30U << 5) |
-              rt;
-    code[3] = 0xF84107FEU; /* ldr x30, [sp], #16 */
-    code[4] = 0xD65F03C0U; /* ret */
+    if (!log) {
+        code[0] = 0xF81F0FFEU; /* str x30, [sp, #-16]! */
+        code[1] = GuestEncodeAdrp(30, (uintptr_t)stub, shadow);
+        code[2] = 0xF9400000U | ((shadowOffset / 8) << 10) | (30U << 5) | rt;
+        code[3] = 0xF84107FEU; /* ldr x30, [sp], #16 */
+        code[4] = 0xD65F03C0U; /* ret */
+        return;
+    }
+
+    size_t index = 0;
+    code[index++] = 0xF81F0FFEU; /* str x30, [sp, #-16]! */
+    for (uint32_t pair = 28; pair >= 2; pair -= 2) {
+        code[index++] = GuestEncodeStpPre(pair, pair + 1);
+    }
+    code[index++] = GuestEncodeStpPre(0, 1);
+    code[index++] = 0xD53B4209U; /* mrs x9, nzcv */
+    code[index++] = 0xF81F0FE9U; /* str x9, [sp, #-16]! */
+
+    code[index++] = 0xAA1E03E1U; /* mov x1, x30 */
+    code[index++] = GuestEncodeAdrp(0, (uintptr_t)stub, shadow);
+    code[index++] = 0xF9400000U | ((shadowOffset / 8) << 10) | (0U << 5) | 0;
+    code[index++] = GuestEncodeAdrp(16, (uintptr_t)stub,
+                                    (uintptr_t)&GuestTlsReadLog);
+    code[index++] = 0x91000210U |
+                    (((uintptr_t)&GuestTlsReadLog & 0xFFF) << 10);
+    code[index++] = 0xD63F0200U; /* blr x16 */
+
+    code[index++] = 0xF84107E9U; /* ldr x9, [sp], #16 */
+    code[index++] = 0xD51B4209U; /* msr nzcv, x9 */
+    code[index++] = GuestEncodeLdpPost(0, 1);
+    for (uint32_t pair = 2; pair <= 28; pair += 2) {
+        code[index++] = GuestEncodeLdpPost(pair, pair + 1);
+    }
+    code[index++] = 0xF84107FEU; /* ldr x30, [sp], #16 */
+    code[index++] = GuestEncodeAdrp(rt, (uintptr_t)stub, shadow);
+    code[index++] = 0xF9400000U | ((shadowOffset / 8) << 10) | (rt << 5) | rt;
+    code[index++] = 0xD65F03C0U; /* ret */
 }
 
 static void GuestEmitTlsWriteStub(uint8_t *stub, uint32_t rt)
@@ -860,6 +905,7 @@ static void GuestEmitTlsWriteStub(uint8_t *stub, uint32_t rt)
     for (uint32_t pair = 28; pair >= 2; pair -= 2) {
         code[index++] = GuestEncodeStpPre(pair, pair + 1);
     }
+    code[index++] = GuestEncodeStpPre(0, 1);
     code[index++] = 0xD53B4209U; /* mrs x9, nzcv */
     code[index++] = 0xF81F0FE9U; /* str x9, [sp, #-16]! */
 
@@ -873,6 +919,7 @@ static void GuestEmitTlsWriteStub(uint8_t *stub, uint32_t rt)
 
     code[index++] = 0xF84107E9U; /* ldr x9, [sp], #16 */
     code[index++] = 0xD51B4209U; /* msr nzcv, x9 */
+    code[index++] = GuestEncodeLdpPost(0, 1);
     for (uint32_t pair = 2; pair <= 28; pair += 2) {
         code[index++] = GuestEncodeLdpPost(pair, pair + 1);
     }
@@ -921,9 +968,9 @@ static uintptr_t GuestMapStub(uintptr_t imageStart,
         *(uint64_t *)(page + 8) = (uint64_t)target;
 
         for (uint32_t rt = 0; rt < GUEST_TLS_STUB_COUNT; rt++) {
-            uint8_t *readStub = page + 0x400 + rt * 32;
-            uint8_t *writeStub = page + 0x800 + rt * 0xB0;
-            GuestEmitTlsReadStub(readStub, rt);
+            uint8_t *readStub = page + 0x400 + rt * 0xB0;
+            uint8_t *writeStub = page + 0x1900 + rt * 0xB0;
+            GuestEmitTlsReadStub(readStub, rt, rt == 0 ? YES : NO);
             GuestEmitTlsWriteStub(writeStub, rt);
             GuestTlsReadStubs[rt] = (uintptr_t)readStub;
             GuestTlsWriteStubs[rt] = (uintptr_t)writeStub;
