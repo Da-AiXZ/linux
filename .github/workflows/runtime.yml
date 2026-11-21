@@ -37,7 +37,8 @@ jobs:
             <key>com.apple.security.cs.disable-library-validation</key><true/>
           </dict></plist>
           EOF
-          codesign --force --sign - --entitlements "$RUNNER_TEMP/jit.entitlements" \
+          codesign --force --sign - --options runtime \
+            --entitlements "$RUNNER_TEMP/jit.entitlements" \
             "$RUNNER_TEMP/guest-runner"
           codesign --display --entitlements - "$RUNNER_TEMP/guest-runner" 2>&1 || true
           file "$RUNNER_TEMP/guest-runner"
