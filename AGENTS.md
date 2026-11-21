@@ -11,7 +11,7 @@
 guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建 syscall 层。
 不是虚拟机、不是模拟器、不是解释器。
 
-## 当前状态（2026-11-22，0.38.1 / build 76）
+## 当前状态（2026-11-22，0.38.2 / build 77）
 
 - **M0–M2.5 全部真机通过**。0.34.1：`Run Shell` 六条命令（`ls /`、`cat /etc/motd`、
   `uname`、`ls -l /`、`id`、`pwd`）全对，`status=0`；`Run Fork Test` 父子分别输出。
@@ -104,8 +104,15 @@ guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建
     把 rootfs 的 `/etc` 替换掉，刚写的 `arch`/`resolv.conf`/`passwd` 全被删。
   - 0.38.1：复制 Alpine 运行时**跳过目录条目**，只复制叶子文件；父目录用
     `createDirectoryAtPath:withIntermediateDirectories:YES` 补建。
-- 最新产物：`/workspace/LinuxProbe-0.38.1.ipa`
-  sha256 `f376300f19c09440ffd4a337bae1f828b9dfdb2a2b47882b6506daa2227eadb3`
+  - **0.38.1 真机：网络链路全通** —— DNS（AAAA/A 共 8 次 `connect ok`）、TCP、
+    OpenSSL 握手都到达服务器；只失败在证书校验
+    `certificate verify failed`。根因：OpenSSL 默认信任文件是 `<openssldir>/cert.pem`，
+    Alpine 里它是 `certs/ca-certificates.crt` 的软链，之前只随包带了后者。
+  - 0.38.2：CI 同时带 `etc/ssl/cert.pem`；App 给 guest 环境加
+    `SSL_CERT_FILE` / `SSL_CERT_DIR` 指向 rootfs 的 CA bundle；
+    bootstrap 打印 `ca bundle=… exists=…`。
+- 最新产物：`/workspace/LinuxProbe-0.38.2.ipa`
+  sha256 `8558199e9d96676a09d4bfffffd6d44fed27a9f5f282bab2c062fca87f297ef1`
 - **下一步**：真机验证 `Run APK Update (network)` → `Install Bash (network)` →
   `Run Bash`；通过后 M3.3 完成，进入 M4（fork 快照修复、性能、交互终端）。
 
