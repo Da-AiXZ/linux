@@ -737,13 +737,13 @@ static void GuestEmitTlsStub(uint8_t *stub, BOOL isWrite, uint32_t rt)
     uint32_t pageOffset = (uint32_t)(shadow & 0xFFF);
     uint32_t *code = (uint32_t *)stub;
 
-    code[0] = 0xA9BF7BFEU; /* stp x30, xzr, [sp, #-16]! */
+    code[0] = 0xF81F0FFEU; /* str x30, [sp, #-16]! */
     code[1] = GuestEncodeAdrp(30, (uintptr_t)stub, shadow);
     code[2] = (isWrite ? 0xF9000000U : 0xF9400000U) |
               ((pageOffset / 8) << 10) |
               (30U << 5) |
               rt;
-    code[3] = 0xA8C17BFEU; /* ldp x30, xzr, [sp], #16 */
+    code[3] = 0xF84107FEU; /* ldr x30, [sp], #16 */
     code[4] = 0xD65F03C0U; /* ret */
 }
 
@@ -798,6 +798,19 @@ static uintptr_t GuestMapStub(uintptr_t imageStart,
 
         sys_icache_invalidate(page, 0x1000);
         mprotect(page, 0x4000, PROT_READ | PROT_EXEC);
+
+        const uint32_t *writeStub =
+            (const uint32_t *)GuestTlsWriteStubs[19];
+        fprintf(stdout,
+                "[guest] tls stubs: read0=0x%lx write19=0x%lx "
+                "code=%08x %08x %08x %08x %08x\n",
+                (unsigned long)GuestTlsReadStubs[0],
+                (unsigned long)GuestTlsWriteStubs[19],
+                writeStub[0],
+                writeStub[1],
+                writeStub[2],
+                writeStub[3],
+                writeStub[4]);
         return candidate;
     }
 

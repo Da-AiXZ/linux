@@ -2,6 +2,7 @@
 
 #import <mach/arm/thread_status.h>
 #import <mach/mach.h>
+#import <mach/mach_vm.h>
 #import <mach/thread_act.h>
 #import <mach/thread_status.h>
 #import <mach/vm_map.h>
@@ -237,6 +238,26 @@ extern char **environ;
                     ? (unsigned)exceptionState.__esr
                     : 0U,
                 exceptionResult]];
+
+            if (state.__pc >= 16) {
+                uint8_t code[32];
+                mach_vm_size_t codeSize = 0;
+                kern_return_t codeResult =
+                    mach_vm_read_overwrite(task,
+                                           (mach_vm_address_t)(state.__pc - 16),
+                                           sizeof(code),
+                                           (mach_vm_address_t)code,
+                                           &codeSize);
+                if (codeResult == KERN_SUCCESS && codeSize == sizeof(code)) {
+                    const uint32_t *words = (const uint32_t *)code;
+                    [self log:[NSString stringWithFormat:
+                        @"guest thread %u code: %08x %08x %08x %08x "
+                        @"%08x %08x %08x %08x (fault word is 5th)",
+                        (unsigned)index,
+                        words[0], words[1], words[2], words[3],
+                        words[4], words[5], words[6], words[7]]];
+                }
+            }
         } else {
             [self log:[NSString stringWithFormat:@"guest thread %u state=%d",
                        (unsigned)index, stateResult]];
