@@ -70,9 +70,9 @@ App 日志的关键行含义见工作区 `AGENTS.md` 第 6 节。
 
 ## 当前优先级
 
-1. 0.20.1 真机验证：`tls stubs: … code=…` 应打印出 `f81f0ffe …` 等字；
-   若仍 `guest stopped: signal=4`，看 `guest thread 0 code:` 的第 5 个 word 到底是什么指令。
-2. 通过 TLS 后再看新的故障 `pc - base`，继续定位 glibc 启动。
+1. 0.21.0 真机验证：TLS 已通（`tls=` 稳定在堆地址）；看前 8 条 `mmap` 行里给 glibc 的分配是否成功。
+2. 若 malloc 仍崩（PIE `0xcf04`、busybox `0x7ff24` 附近），用**文字日志**的精确 `pc/far/寄存器` 定位
+   （截图 OCR 会弄错十六进制）。
 3. 若启动推进到文件/进程 syscall，补 `openat/newfstatat/getdents64` 等 + rootfs 映射。
 4. 若 glibc 仍收敛不了，换 musl static-PIE 对照。
 
