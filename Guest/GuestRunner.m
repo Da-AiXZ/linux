@@ -96,6 +96,10 @@ static uintptr_t GuestImageBase = 0;
 static uint64_t GuestImageSize = 0;
 static const char *GuestElfPath = NULL;
 static uint64_t GuestTlsPointer = 0;
+static uintptr_t GuestTlsInitImage = 0;
+static uint64_t GuestTlsInitSize = 0;
+static uintptr_t GuestIrelSlot = 0;
+static uint64_t GuestIrelAddend = 0;
 
 #pragma mark - JIT and fault reporting
 
@@ -791,11 +795,33 @@ static uint32_t GuestEncodeLdpPost(uint32_t rt, uint32_t rt2)
 
 void GuestTlsWriteLog(uint64_t value, uint64_t returnAddress)
 {
+    uint64_t imageWord = 0;
+    uint64_t tlsWord = 0;
+    uint64_t irelValue = 0;
+    if (GuestTlsInitImage != 0 && GuestTlsInitSize >= 8) {
+        imageWord = *(volatile uint64_t *)GuestTlsInitImage;
+    }
+    if (value >= GuestImageBase &&
+        value + 0x20 <= GuestImageBase + GuestImageSize) {
+        tlsWord = *(volatile uint64_t *)(value + 0x10);
+    } else if (GuestHeapBase != 0 && value >= GuestHeapBase &&
+               value + 0x20 <= GuestHeapEnd) {
+        tlsWord = *(volatile uint64_t *)(value + 0x10);
+    }
+    if (GuestIrelSlot != 0) {
+        irelValue = *(volatile uint64_t *)GuestIrelSlot;
+    }
+
     GuestTlsPointer = value;
     fprintf(stdout,
-            "[guest] tls write value=0x%llx site=0x%llx\n",
+            "[guest] tls write value=0x%llx site=0x%llx dst=0x%llx "
+            "src=0x%llx irel=0x%llx addend=0x%llx\n",
             (unsigned long long)value,
-            (unsigned long long)(returnAddress - 4));
+            (unsigned long long)(returnAddress - 4),
+            (unsigned long long)tlsWord,
+            (unsigned long long)imageWord,
+            (unsigned long long)irelValue,
+            (unsigned long long)GuestIrelAddend);
     fflush(stdout);
 }
 
@@ -1024,6 +1050,84 @@ static int GuestLoadAndRun(int argc, char *argv[])
     uint32_t patched = 0;
     uint32_t tlsReads = 0;
     uint32_t tlsWrites = 0;
+
+    /* Locate PT_TLS and the first IRELATIVE (IFUNC) GOT slot. */
+    for (uint16_t index = 0; index < header->e_phnum; index++) {
+        const GuestElfProgramHeader *program = &programs[index];
+        uint8_t *segment = (uint8_t *)image + (program->p_vaddr - minAddress);
+
+        if (program->p_type == 7) { /* PT_TLS */
+            GuestTlsInitImage = (uintptr_t)segment;
+            GuestTlsInitSize = program->p_filesz;
+        } else if (program->p_type == 2 && program->p_filesz >= 16) {
+            const uint64_t *entries = (const uint64_t *)segment;
+            uint64_t rela = 0;
+            uint64_t relasz = 0;
+            uint64_t relaent = 24;
+            uint64_t jmprel = 0;
+            uint64_t pltrelsz = 0;
+            for (uint64_t cursor = 0;
+                 cursor + 16 <= program->p_filesz;
+                 cursor += 16) {
+                uint64_t tag = entries[cursor / 8];
+                uint64_t value = entries[cursor / 8 + 1];
+                if (tag == 0) {
+                    break;
+                }
+                if (tag == 7) {
+                    rela = value;
+                } else if (tag == 8) {
+                    relasz = value;
+                } else if (tag == 9) {
+                    relaent = value;
+                } else if (tag == 23) {
+                    jmprel = value;
+                } else if (tag == 2) {
+                    pltrelsz = value;
+                }
+            }
+
+            uint64_t tables[2][2] = { { rela, relasz }, { jmprel, pltrelsz } };
+            for (int table = 0; table < 2 && GuestIrelSlot == 0; table++) {
+                uint64_t address = tables[table][0];
+                uint64_t size = tables[table][1];
+                if (address == 0 || size < 24 || relaent < 24) {
+                    continue;
+                }
+                if (address < minAddress ||
+                    address - minAddress + size > imageSize) {
+                    continue;
+                }
+                const uint64_t *relocs =
+                    (const uint64_t *)(imageStart + (uintptr_t)(address - minAddress));
+                uint64_t count = size / relaent;
+                for (uint64_t entry = 0; entry < count; entry++) {
+                    uint64_t offset = relocs[entry * 3];
+                    uint64_t info = relocs[entry * 3 + 1];
+                    uint64_t addend = relocs[entry * 3 + 2];
+                    if ((info & 0xFFFFFFFFULL) != 1032) {
+                        continue;
+                    }
+                    if (offset < minAddress ||
+                        offset - minAddress + 8 > imageSize) {
+                        continue;
+                    }
+                    GuestIrelSlot =
+                        imageStart + (uintptr_t)(offset - minAddress);
+                    GuestIrelAddend = addend;
+                    break;
+                }
+            }
+        }
+    }
+    fprintf(stdout,
+            "[guest] tls image=0x%lx size=0x%llx irel_slot=0x%lx "
+            "irel_addend=0x%llx\n",
+            (unsigned long)GuestTlsInitImage,
+            (unsigned long long)GuestTlsInitSize,
+            (unsigned long)GuestIrelSlot,
+            (unsigned long long)GuestIrelAddend);
+
     uintptr_t island = GuestMapStub(imageStart,
                                     imageSize,
                                     (uintptr_t)&GuestSyscallTrampoline);
