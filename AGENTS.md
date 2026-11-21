@@ -51,6 +51,9 @@ CURRENT_PROJECT_VERSION: "N"
 10. `PT_TRACE_ME` 下进程处于被调试状态（`P_LTRACED`）：**致命信号会停住整个任务**，
     进程内的 `sigaction` 和 watchdog 都不会执行。现场必须由父进程
     `waitpid(WUNTRACED)` + `task_for_pid` + `thread_get_state` 读取（0.17.0 起，App 侧 `GuestLauncher`）。
+11. **TPIDR_EL0 不可依赖**：XNU 会在中断/调度返回时把它重置成 0x4。装载时必须把 guest 里
+    每条 `mrs xN, tpidr_el0` / `msr tpidr_el0, xN` 改写为 `bl` 到按寄存器号索引的 stub，
+    读写影子变量 `GuestTlsPointer`；否则 glibc 第一次 TLS 访问就会崩。
 
 ## 调试
 
@@ -65,11 +68,11 @@ App 日志的关键行含义见工作区 `AGENTS.md` 第 6 节。
 
 ## 当前优先级
 
-1. 0.18.0 真机验证：看 `[guest] tpidr probe` 与 `svc … tpidr=…`，确认 TPIDR_EL0 写入是否生效、
-   是否能活过一次 syscall；停止现场的 `x4`（PIE）/`x0`（busybox）与 `far` 给出故障时的 TP 值。
-2. 若 TPIDR_EL0 不可用（写入不生效或被内核重置），改写 guest 的 `msr/mrs tpidr_el0`（影子变量模拟）。
-3. 若 TP 正常但值无效，回头查 `__libc_setup_tls` 的分配路径（brk/mmap 语义）。
-4. 之后补文件类 syscall + rootfs 路径映射（见工作区 `docs/ROADMAP.md` M2.2）。
+1. 0.19.0 真机验证：`loaded` 行应出现 `tls_mrs=275`（pie-hello）/`tls_mrs=897`（busybox）、`tls_msr=1`；
+   svc 行的 `tls=` 在 `TLS_INIT_TP` 之后应是堆地址。
+2. 若仍有 `guest stopped: signal=11`，用新的 `pc - base` 继续定位（大概率已不是 TLS）。
+3. 若启动推进到文件/进程 syscall，补 `openat/newfstatat/getdents64` 等 + rootfs 映射。
+4. 若 glibc 仍收敛不了，换 musl static-PIE 对照。
 
 ## 不要做
 
