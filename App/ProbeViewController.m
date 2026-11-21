@@ -355,12 +355,13 @@
     /*
      * Alpine's busybox has its own inflate implementation, so this test
      * exercises the guest read path and heap on the same 8MB of index data
-     * without any of apk's or zlib's buffering.
+     * without any of apk's or zlib's buffering.  The community index is the
+     * one the parser always fails on, so it is the interesting one.
      */
     [self startGuestNamed:@"Helpers/alpine-busybox"
                 arguments:@[ @"busybox", @"gzip", @"-t",
-                             @"/var/cache/apk/APKINDEX.ee34dc71.tar.gz" ]
-                    label:@"Starting busybox gzip -t (main index)..."];
+                             @"/var/cache/apk/APKINDEX.7db31bb6.tar.gz" ]
+                    label:@"Starting busybox gzip -t (community index)..."];
 }
 
 - (void)runApkAddBash

@@ -1974,6 +1974,276 @@ static void GuestAccountSocket(int fd, ssize_t bytes, BOOL writing)
 
 static unsigned int GuestReadTraceCount = 0;
 
+/*
+ * The index parser keeps failing with a zlib data error even though the
+ * bytes on disk (and on the wire) are correct, and the failure point moves
+ * between runs.  That means live guest memory is being modified.  These two
+ * probes catch exactly that:
+ *
+ *  - a canary in the 16KB host-page slack of every large anonymous mapping
+ *    (the guest must never touch past the length it asked for), and
+ *  - an FNV hash of every large read buffer, re-checked before the next
+ *    fill of the same buffer, so a write into apk's 128KB istream buffer
+ *    shows up with the offset of the first changed word.
+ */
+#define GUEST_CANARY_SLOTS 64
+typedef struct {
+    uintptr_t address;
+    size_t requested;
+    size_t mapLength;
+    int valid;
+} GuestCanary;
+
+static GuestCanary GuestCanaries[GUEST_CANARY_SLOTS];
+static uint64_t GuestCanaryMagic = 0x4C50524F42454E43ULL; /* "LPROBENC" */
+
+static void GuestCanaryReport(const char *what, uintptr_t address, size_t requested)
+{
+    GuestLog("[guest] %s addr=0x%lx requested=0x%lx\n",
+             what,
+             (unsigned long)address,
+             (unsigned long)requested);
+}
+
+/*
+ * mallocng only ever touches whole 4KB pages of the length it requested
+ * (it keeps a 16-byte group header and a size byte at the ends), so the
+ * first byte past align4k(requested) is safe to use as a canary even
+ * though a host page is 16KB.
+ */
+static uintptr_t GuestCanarySlot(uintptr_t address, size_t requested)
+{
+    size_t used = (requested + 4095) & ~(size_t)4095;
+    return (address + used + 7) & ~(uintptr_t)7;
+}
+
+static void GuestCanaryPlace(uintptr_t address, size_t requested, size_t mapLength)
+{
+    if (requested < 65536) {
+        return;
+    }
+    uintptr_t slot = GuestCanarySlot(address, requested);
+    if (slot + 8 > address + mapLength) {
+        return;
+    }
+    for (int index = 0; index < GUEST_CANARY_SLOTS; index++) {
+        if (GuestCanaries[index].valid &&
+            GuestCanaries[index].address == address) {
+            return;
+        }
+    }
+    for (int index = 0; index < GUEST_CANARY_SLOTS; index++) {
+        if (GuestCanaries[index].valid) {
+            continue;
+        }
+        *(uint64_t *)slot = GuestCanaryMagic;
+        GuestCanaries[index].address = address;
+        GuestCanaries[index].requested = requested;
+        GuestCanaries[index].mapLength = mapLength;
+        GuestCanaries[index].valid = 1;
+        return;
+    }
+}
+
+static void GuestCanaryCheck(uintptr_t address)
+{
+    for (int index = 0; index < GUEST_CANARY_SLOTS; index++) {
+        if (!GuestCanaries[index].valid ||
+            GuestCanaries[index].address != address) {
+            continue;
+        }
+        uintptr_t slot = GuestCanarySlot(address, GuestCanaries[index].requested);
+        if (*(uint64_t *)slot != GuestCanaryMagic) {
+            GuestCanaryReport("mmap slack overwritten at",
+                              address,
+                              GuestCanaries[index].requested);
+        }
+        GuestCanaries[index].valid = 0;
+        return;
+    }
+}
+
+static void GuestCanaryCheckAll(void)
+{
+    for (int index = 0; index < GUEST_CANARY_SLOTS; index++) {
+        if (!GuestCanaries[index].valid) {
+            continue;
+        }
+        uintptr_t address = GuestCanaries[index].address;
+        uintptr_t slot = GuestCanarySlot(address, GuestCanaries[index].requested);
+        if (*(uint64_t *)slot != GuestCanaryMagic) {
+            GuestCanaryReport("mmap slack overwritten at",
+                              address,
+                              GuestCanaries[index].requested);
+        }
+        GuestCanaries[index].valid = 0;
+    }
+}
+
+#define GUEST_READ_GUARD_SLOTS 8
+#define GUEST_READ_GUARD_PAGES 32 /* 128KB / 4KB */
+typedef struct {
+    int fd;
+    uintptr_t address;
+    size_t length;
+    int pageCount;
+    uint64_t pageHash[GUEST_READ_GUARD_PAGES];
+    int valid;
+} GuestReadGuard;
+
+static GuestReadGuard GuestReadGuards[GUEST_READ_GUARD_SLOTS];
+
+static uint64_t GuestFastHash(const void *data, size_t length)
+{
+    const uint8_t *bytes = (const uint8_t *)data;
+    uint64_t hash = 1469598103934665603ULL;
+    size_t words = length / 8;
+    for (size_t index = 0; index < words; index++) {
+        uint64_t word = 0;
+        memcpy(&word, bytes + index * 8, 8);
+        hash ^= word;
+        hash *= 1099511628211ULL;
+    }
+    for (size_t index = words * 8; index < length; index++) {
+        hash ^= bytes[index];
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+static int GuestReadGuardPages(size_t length)
+{
+    size_t pages = (length + 4095) / 4096;
+    return pages > GUEST_READ_GUARD_PAGES ? GUEST_READ_GUARD_PAGES : (int)pages;
+}
+
+/*
+ * Log every 4KB page whose contents changed while the buffer was idle.  The
+ * page index maps directly onto the offset inside the istream buffer, which
+ * is enough to tell whether apk's own stale write or a stray runtime write
+ * hit it.
+ */
+static void GuestReadGuardReport(int fd, uintptr_t address, size_t length,
+                                 const uint64_t *expected)
+{
+    int pages = GuestReadGuardPages(length);
+    int changed = 0;
+    GuestLog("[guest] read buffer check fd=%d addr=0x%lx len=0x%lx changed=",
+             fd,
+             (unsigned long)address,
+             (unsigned long)length);
+    for (int index = 0; index < pages; index++) {
+        size_t offset = (size_t)index * 4096;
+        size_t size = length - offset;
+        if (size > 4096) {
+            size = 4096;
+        }
+        uint64_t current =
+            GuestFastHash((const void *)(address + offset), size);
+        if (current == expected[index]) {
+            continue;
+        }
+        GuestLog(" %d+0x%lx", index, (unsigned long)offset);
+        changed++;
+    }
+    GuestLog(changed == 0 ? " none\n" : "\n");
+}
+
+static void GuestReadGuardPreRead(int fd, uintptr_t address, size_t length)
+{
+    (void)length;
+    for (int index = 0; index < GUEST_READ_GUARD_SLOTS; index++) {
+        GuestReadGuard *guard = &GuestReadGuards[index];
+        if (!guard->valid || guard->fd != fd || guard->address != address) {
+            continue;
+        }
+        GuestReadGuardReport(fd,
+                             guard->address,
+                             guard->length,
+                             guard->pageHash);
+        guard->valid = 0;
+    }
+}
+
+static void GuestReadGuardPostRead(int fd, uintptr_t address, size_t length)
+{
+    if (length < 65536) {
+        return;
+    }
+    GuestReadGuard *slot = NULL;
+    for (int index = 0; index < GUEST_READ_GUARD_SLOTS; index++) {
+        GuestReadGuard *guard = &GuestReadGuards[index];
+        if (!guard->valid || guard->fd != fd) {
+            continue;
+        }
+        if (guard->address == address) {
+            slot = guard;
+            continue;
+        }
+        /* Switching to a different buffer: check the old one now. */
+        GuestReadGuardReport(fd,
+                             guard->address,
+                             guard->length,
+                             guard->pageHash);
+        guard->valid = 0;
+    }
+    if (slot == NULL) {
+        for (int index = 0; index < GUEST_READ_GUARD_SLOTS; index++) {
+            if (!GuestReadGuards[index].valid) {
+                slot = &GuestReadGuards[index];
+                break;
+            }
+        }
+    }
+    if (slot == NULL) {
+        return;
+    }
+    slot->fd = fd;
+    slot->address = address;
+    slot->length = length;
+    slot->pageCount = GuestReadGuardPages(length);
+    slot->valid = 1;
+    for (int index = 0; index < slot->pageCount; index++) {
+        size_t offset = (size_t)index * 4096;
+        size_t size = length - offset;
+        if (size > 4096) {
+            size = 4096;
+        }
+        slot->pageHash[index] =
+            GuestFastHash((const void *)(address + offset), size);
+    }
+}
+
+static void GuestReadGuardVerifyAll(void)
+{
+    for (int index = 0; index < GUEST_READ_GUARD_SLOTS; index++) {
+        GuestReadGuard *guard = &GuestReadGuards[index];
+        if (!guard->valid) {
+            continue;
+        }
+        GuestReadGuardReport(guard->fd,
+                             guard->address,
+                             guard->length,
+                             guard->pageHash);
+        guard->valid = 0;
+    }
+}
+
+static void GuestReadGuardDrop(int fd)
+{
+    for (int index = 0; index < GUEST_READ_GUARD_SLOTS; index++) {
+        GuestReadGuard *guard = &GuestReadGuards[index];
+        if (!guard->valid || guard->fd != fd) {
+            continue;
+        }
+        GuestReadGuardReport(guard->fd,
+                             guard->address,
+                             guard->length,
+                             guard->pageHash);
+        guard->valid = 0;
+    }
+}
+
 static void GuestTraceRead(int fd, uint64_t request, ssize_t result, int error)
 {
     BOOL socket = GuestSocketEntry(fd, NO) != NULL;
@@ -2008,6 +2278,8 @@ static void GuestTraceRead(int fd, uint64_t request, ssize_t result, int error)
 
 static void GuestLogSyscallStats(void)
 {
+    GuestCanaryCheckAll();
+    GuestReadGuardVerifyAll();
     for (int index = 0; index < GuestSocketTableCount; index++) {
         GuestLog("[guest] sock fd=%d read=%llu write=%llu\n",
                  GuestSocketTable[index].fd,
@@ -2081,6 +2353,9 @@ static uint64_t GuestSyscallDispatchInner(uint64_t *args,
         return (uint64_t)result;
     }
     case 63: { /* read */
+        GuestReadGuardPreRead((int)args[0],
+                              (uintptr_t)args[1],
+                              (size_t)args[2]);
         ssize_t result = read((int)args[0],
                               (void *)args[1],
                               (size_t)args[2]);
@@ -2092,6 +2367,9 @@ static uint64_t GuestSyscallDispatchInner(uint64_t *args,
         }
         GuestAccountSocket((int)args[0], result, NO);
         GuestTraceRead((int)args[0], args[2], result, 0);
+        GuestReadGuardPostRead((int)args[0],
+                               (uintptr_t)args[1],
+                               (size_t)result);
         return (uint64_t)result;
     }
     case 65: { /* readv (struct iovec is identical on Darwin) */
@@ -2115,6 +2393,7 @@ static uint64_t GuestSyscallDispatchInner(uint64_t *args,
     }
     case 57: /* close */
         GuestDirCacheDrop((int)args[0]);
+        GuestReadGuardDrop((int)args[0]);
         GuestDropSocket((int)args[0]);
         return close((int)args[0]) == 0 ? 0 : GuestErrno();
     case 93: /* exit */
@@ -5039,6 +5318,7 @@ static uint64_t GuestHandleMmap(uint64_t hint,
             return (uint64_t)(-error);
         }
         GuestRememberMmap(target, mapLength);
+        GuestCanaryPlace(target, requested, mapLength);
         result = (uint64_t)target;
     } else {
         if (descriptor < 0) {
@@ -5092,8 +5372,19 @@ static uint64_t GuestHandleMunmap(uintptr_t address, size_t length)
     if (length == 0) {
         return (uint64_t)(-EINVAL);
     }
+    GuestCanaryCheck(address);
+    /*
+     * Darwin rounds munmap lengths up to 16KB, so the effective range ends
+     * on a host page boundary.  Forgetting exactly that range matters:
+     * mallocng asks for multiples of 4KB while we hand out whole 16KB
+     * pages, and forgetting only the requested length left a residual
+     * record behind on 3 of every 4 frees until the 4096-entry table
+     * overflowed ("mmap records full, leaking").
+     */
+    uintptr_t forgottenStart = GuestAlignDown(address);
+    uintptr_t forgottenEnd = GuestAlignUp(address + length);
     if (munmap((void *)address, length) == 0) {
-        GuestForgetMmap(address, length);
+        GuestForgetMmap(forgottenStart, forgottenEnd - forgottenStart);
         return 0;
     }
     int error = errno;
@@ -5157,6 +5448,7 @@ static uint64_t GuestHandleMremap(uintptr_t oldAddress,
     }
     size_t copyLength = oldLength < newLength ? oldLength : newLength;
     memcpy(map, (void *)oldAddress, copyLength);
+    GuestCanaryCheck(oldAddress);
     if (munmap((void *)oldAddress, oldMapLength) != 0) {
         int error = errno;
         munmap(map, newMapLength);
@@ -5164,6 +5456,7 @@ static uint64_t GuestHandleMremap(uintptr_t oldAddress,
     }
     GuestForgetMmap(oldAddress, oldMapLength);
     GuestRememberMmap((uintptr_t)map, newMapLength);
+    GuestCanaryPlace((uintptr_t)map, newLength, newMapLength);
     return (uint64_t)(uintptr_t)map;
 }
 
