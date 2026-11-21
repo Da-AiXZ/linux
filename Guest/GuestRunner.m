@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 
+#import <TargetConditionals.h>
 #import <dirent.h>
 #import <dlfcn.h>
 #import <errno.h>
@@ -465,6 +466,10 @@ static void GuestInstallFaultHandlers(void)
 
 static void GuestLogCodeSignState(const char *tag)
 {
+#if TARGET_OS_OSX
+    (void)tag;
+    GuestLog("[guest] csops skipped on macOS\n");
+#else
     uint32_t flags = 0;
     int result = csops(getpid(), GUEST_CS_OPS_STATUS, &flags, sizeof(flags));
     GuestLog( "[guest] %s: csops=%d flags=0x%08x debugged=%d\n",
@@ -472,6 +477,7 @@ static void GuestLogCodeSignState(const char *tag)
             result,
             flags,
             (flags & GUEST_CS_DEBUGGED) ? 1 : 0);
+#endif
 }
 
 static uint32_t GuestJITSelfTest(void)
@@ -527,6 +533,16 @@ static void GuestProbeTpidr(void)
 
 static BOOL GuestEnableJIT(void)
 {
+#if TARGET_OS_OSX
+    /*
+     * macOS arm64 has 16 KB pages like the iPad but does not require
+     * CS_DEBUGGED for anonymous executable pages in an unsigned tool.
+     * Calling PT_TRACE_ME here would only make the CI shell our tracer and
+     * freeze the process if a guest fault is raised.
+     */
+    GuestInstallFaultHandlers();
+    return YES;
+#else
     if (ptrace(GUEST_PT_TRACE_ME, 0, NULL, 0) < 0) {
         GuestLog( "[guest] ptrace(PT_TRACE_ME) failed: %s\n",
                 strerror(errno));
@@ -542,6 +558,7 @@ static BOOL GuestEnableJIT(void)
      */
     GuestInstallFaultHandlers();
     return YES;
+#endif
 }
 
 #pragma mark - Syscall trampoline
@@ -1860,9 +1877,35 @@ static uint64_t GuestHandlePoll(uint64_t descriptorPointer,
 
 #pragma mark - Syscalls
 
-uint64_t GuestSyscallDispatch(uint64_t *args,
-                              uint64_t number,
-                              uint64_t returnAddress)
+static uint32_t GuestSyscallCounts[512];
+static uint32_t GuestSyscallErrorCounts[512];
+static int64_t GuestSyscallLastErrors[512];
+
+static void GuestLogSyscallStats(void)
+{
+    GuestLog( "[guest] svc totals:");
+    for (int number = 0; number < 512; number++) {
+        if (GuestSyscallCounts[number] == 0) {
+            continue;
+        }
+        GuestLog( " %d×%u", number, GuestSyscallCounts[number]);
+    }
+    GuestLog( "\n[guest] svc errors:");
+    for (int number = 0; number < 512; number++) {
+        if (GuestSyscallErrorCounts[number] == 0) {
+            continue;
+        }
+        GuestLog( " %d×%u(last=%lld)",
+                  number,
+                  GuestSyscallErrorCounts[number],
+                  (long long)GuestSyscallLastErrors[number]);
+    }
+    GuestLog( "\n");
+}
+
+static uint64_t GuestSyscallDispatchInner(uint64_t *args,
+                                          uint64_t number,
+                                          uint64_t returnAddress)
 {
     static unsigned int traceCount = 0;
     if (traceCount < 40) {
@@ -1929,6 +1972,7 @@ uint64_t GuestSyscallDispatch(uint64_t *args,
                 "[guest] exit syscall %llu code=%lld\n",
                 (unsigned long long)number,
                 (long long)args[0]);
+        GuestLogSyscallStats();
         _exit((int)args[0]);
     case 172: /* getpid */
         return (uint64_t)getpid();
@@ -3032,6 +3076,22 @@ uint64_t GuestSyscallDispatch(uint64_t *args,
                 (unsigned long long)number);
         return (uint64_t)(-ENOSYS);
     }
+}
+
+uint64_t GuestSyscallDispatch(uint64_t *args,
+                              uint64_t number,
+                              uint64_t returnAddress)
+{
+    uint64_t result =
+        GuestSyscallDispatchInner(args, number, returnAddress);
+    if (number < 512) {
+        GuestSyscallCounts[number]++;
+        if ((int64_t)result < 0 && (int64_t)result >= -4095) {
+            GuestSyscallErrorCounts[number]++;
+            GuestSyscallLastErrors[number] = (int64_t)result;
+        }
+    }
+    return result;
 }
 
 #pragma mark - Loader
@@ -6118,6 +6178,7 @@ static int GuestLoadAndRunInternal(const char *guestPath,
         /* Single-threaded watchdog: see GuestAlarmHandler. */
         alarm(30);
 
+#if !TARGET_OS_OSX
         /*
          * All code patching is finished, so CS_DEBUGGED is no longer needed.
          * iOS does not let a process detach itself (PT_DETACH returns EPERM),
@@ -6129,6 +6190,7 @@ static int GuestLoadAndRunInternal(const char *guestPath,
          */
         GuestLog( "[guest] ready for detach\n");
         raise(SIGSTOP);
+#endif
     }
 
     GuestLog( "[guest] jump\n");

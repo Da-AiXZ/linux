@@ -1,0 +1,71 @@
+name: runtime
+
+# Reproduce the guest runtime on a desktop arm64 host.  macOS M1 runners use
+# the same 16 KB pages as the iPad, so this catches syscall/mmap/parse bugs
+# without spending a device cycle for every iteration.
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+
+jobs:
+  macos-apk:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build macOS guest runner
+        run: |
+          set -eux
+          clang -target arm64-apple-macos14.0 -fobjc-arc -O1 \
+            -Wno-deprecated-declarations \
+            -framework Foundation -framework CoreFoundation \
+            -o "$RUNNER_TEMP/guest-runner" Guest/GuestRunner.m
+          file "$RUNNER_TEMP/guest-runner"
+
+      - name: Prepare Alpine rootfs
+        run: |
+          set -eux
+          curl -fsSL -o "$RUNNER_TEMP/alpine.tar.gz" \
+            https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/aarch64/alpine-minirootfs-3.20.3-aarch64.tar.gz
+          ROOT="$RUNNER_TEMP/rootfs"
+          mkdir -p "$ROOT"
+          tar -xzf "$RUNNER_TEMP/alpine.tar.gz" -C "$ROOT"
+          ls -l "$ROOT/sbin/apk" "$ROOT/bin/busybox" \
+                "$ROOT/lib/ld-musl-aarch64.so.1"
+
+      - name: Run apk update
+        run: |
+          set -o pipefail
+          ROOT="$RUNNER_TEMP/rootfs"
+          LINUXPROBE_ROOT="$ROOT" "$RUNNER_TEMP/guest-runner" \
+            "$ROOT/sbin/apk" apk --no-cache --allow-untrusted update \
+            2>&1 | tee "$RUNNER_TEMP/apk-update.log"
+
+      - name: Run apk add bash
+        run: |
+          set -o pipefail
+          ROOT="$RUNNER_TEMP/rootfs"
+          LINUXPROBE_ROOT="$ROOT" "$RUNNER_TEMP/guest-runner" \
+            "$ROOT/sbin/apk" apk --no-cache --allow-untrusted add bash \
+            2>&1 | tee "$RUNNER_TEMP/apk-add.log"
+
+      - name: Run installed bash
+        run: |
+          set -o pipefail
+          ROOT="$RUNNER_TEMP/rootfs"
+          test -x "$ROOT/bin/bash"
+          LINUXPROBE_ROOT="$ROOT" "$RUNNER_TEMP/guest-runner" \
+            "$ROOT/bin/bash" bash -c "echo bash ok; uname -a; id" \
+            2>&1 | tee "$RUNNER_TEMP/bash.log"
+
+      - name: Logs
+        if: always()
+        run: |
+          for log in apk-update apk-add bash; do
+            echo "===== $log ====="
+            tail -100 "$RUNNER_TEMP/$log.log" 2>/dev/null || true
+          done
