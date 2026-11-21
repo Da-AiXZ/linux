@@ -7,7 +7,7 @@
 不是虚拟机，不是模拟器，不是解释器：guest 是 arm64 Linux ELF，指令由 M1 直接执行；
 只把 `svc #0` 改写成分支，跳进自建的 syscall 分发器。
 
-## 当前状态（0.37.1）
+## 当前状态（0.38.0）
 
 | 阶段 | 状态 |
 |---|---|
@@ -16,9 +16,10 @@
 | M2 真实 busybox | ✅ glibc static-PIE `busybox` / `pie-hello` 原生执行，`status=0` |
 | M2.5 文件系统 + shell | ✅ 0.34.1 真机：`Run Shell` 六条命令全部正确；外部命令走 checkpoint/restore fork + execve |
 | M3.1 动态链接器 | ✅ 0.35.5 真机：动态 Alpine busybox（`status=0`）与 `apk --version`（`apk-tools 2.14.4, compiled for aarch64.`，`status=0`）全部通过 |
-| M3.2 本地 apk | 🚧 0.36.x 真机发现 fork 快照有两个深层问题：动态镜像 fork 返回 `-ENOSYS`；恢复子进程里 execve 选不到 image base（`no free address range near trampoline`），`ls -l` 还偶发跳到堆地址。0.37.0 改为不经 shell直跑 `apk add`。0.37.1 真机发现 `/lib/apk/db/lock` 打不开（`ENOENT`）：`apk add` 加 `--initdb`，并在 `openat(O_CREAT)` 遇到 `ENOENT` 时先创建父目录再重试。**待真机验证** |
+| M3.2 本地 apk | ✅ 0.37.1 真机：`apk add --initdb --allow-untrusted /tmp/hello.apk` → `(1/1) Installing hello (1.0-r0)`、`status=0`；`Run Installed Hello` 输出 `hello from linux elf` |
+| M3.3 网络 | 🚧 0.38.0 已实现 socket 全家族透传、`pselect6/ppoll`、Linux↔Darwin errno 翻译、Alpine 仓库与签名密钥/CA；**待真机验证** `Run APK Update (network)` |
 
-最新版本 **0.37.1 (74)**。项目上下文、决策、真机日志和路线记录在
+最新版本 **0.38.0 (75)**。项目上下文、决策、真机日志和路线记录在
 [Da-AiXZ/linux-workspace](https://github.com/Da-AiXZ/linux-workspace)（私有）。
 
 ## 工作原理
@@ -108,6 +109,9 @@ Helpers/guest-runner <elf> [guest argv...]
    - **Run APK --version**：动态链接 `apk`（M3.1 验收）
    - **Run APK Add Hello**：直接运行 `apk add --allow-untrusted /tmp/hello.apk`（M3.2 验收）
    - **Run Installed Hello**：直接运行安装后的 `/usr/bin/hello`（验证安装结果）
+   - **Run APK Update (network)**：`apk --allow-untrusted update`（M3.3 验收）
+   - **Install Bash (network)**：`apk add bash`
+   - **Run Bash**：运行安装后的 `/bin/bash -c "echo bash ok; uname -a; id"`
 3. 日志直接显示在 App 里。
 
 关键日志：
@@ -121,10 +125,17 @@ Helpers/guest-runner <elf> [guest argv...]
 [guest] mmap elf off=… patched=… mrs=… msr=…   运行时库打补丁（0.35.0 起）
 [guest] entry=… at_base=… at_entry=…           入口与 auxv
 [guest] svc N site=0x… x0…x3 tls=0x…           syscall 调用点
+[guest] socket family=… type=… -> N             新建 socket（0.38.0 起）
+[guest] connect fd=N family=2 ok/errno=…        TCP/UDP 连接
 [guest] unsupported syscall N                  缺 syscall
 [guest] signal N addr=… pc=… lr=… far=… esr=…  进程内故障现场
-[guest] alarm1/2/3 pc=…                        20s watchdog
+[guest] alarm1/2/3 pc=…                        30s watchdog（最多 12 次）
 ```
+
+网络层把 Linux 的 `sockaddr`（16 位 family）与 Darwin 的 `sockaddr`
+（`sa_len` + 8 位 family）逐字段转换；`SOL_SOCKET` 是 1 vs `0xffff`；
+`EAGAIN`/`EINPROGRESS`/`ECONNREFUSED` 等 errno 数值也全部翻译。
+每个 socket 都设置 `SO_NOSIGPIPE`，并把 guest 的 `MSG_NOSIGNAL` 丢弃。
 
 ## 目录
 
@@ -148,8 +159,8 @@ tools/make_fork_elf.py          生成 fork 测试 ELF
 - **M2（完成）**：真实 static-PIE busybox。
 - **M2.5（完成）**：rootfs + shell + 外部命令 fork/exec。
 - **M3.1（已完成）**：`PT_INTERP` + musl ld.so，`apk --version` 已通过。
-- **M3.2（进行中）**：Alpine rootfs + 本地 `apk add`，验收 `Run APK Add Hello`。
-- **M3.3**：网络 + `apk update`（socket/poll/TLS）。
+- **M3.2（已完成）**：Alpine rootfs + 本地 `apk add`，0.37.1 真机通过。
+- **M3.3（进行中）**：网络 + `apk update`（socket/poll/TLS），0.38.0 待真机。
 - **M4**：性能基准、syscall 特化、fork 快照优化、交互终端、常用工具验证。
 
 详细任务和验收标准见工作区仓库的 `docs/ROADMAP.md`。

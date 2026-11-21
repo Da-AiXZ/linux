@@ -11,7 +11,7 @@
 guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建 syscall 层。
 不是虚拟机、不是模拟器、不是解释器。
 
-## 当前状态（2026-11-22，0.37.1 / build 74）
+## 当前状态（2026-11-22，0.38.0 / build 75）
 
 - **M0–M2.5 全部真机通过**。0.34.1：`Run Shell` 六条命令（`ls /`、`cat /etc/motd`、
   `uname`、`ls -l /`、`id`、`pwd`）全对，`status=0`；`Run Fork Test` 父子分别输出。
@@ -80,9 +80,27 @@ guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建
     `Run Installed Hello` 输出 `hello from linux elf`，`status=0`。
     剩余杂音：`unsupported syscall 40/39`（apk 尝试 mount/umount2，忽略失败）、
     `/etc/apk/protected_paths.d`、`/etc/apk/cache` 探测失败（可选路径）。
-- 最新产物：`/workspace/LinuxProbe-0.37.1.ipa`
-  sha256 `5ea6b97d62acd58f3504bcfd2de183706caf56d1b468406972059b420dfa0a90`
-- **下一步**：M3.3 网络 + `apk update`（socket 透传、poll、DNS、TLS）；之后再修 fork 快照（M4）。
+- **M3.3 已实现（0.38.0，待真机）**：
+  - socket 全家族：`socket/socketpair/bind/listen/accept/accept4/connect/
+    getsockname/getpeername/sendto/recvfrom/sendmsg/recvmsg/setsockopt/
+    getsockopt/shutdown`
+  - `pselect6(72)`（用 `select` 模拟）、`ppoll(73)`、`clock_getres(114)`
+  - Linux↔Darwin 转换：`sockaddr`（16 位 family vs `sa_len`+8 位 family）、
+    `SOL_SOCKET`=1 vs `0xffff`、`SO_*` 选项、`MSG_*`、`POLL*`、`AF_INET6`=10 vs 30
+  - 每个 socket 设 `SO_NOSIGPIPE`；guest 的 `MSG_NOSIGNAL`(0x4000) 丢弃
+    （Darwin 上 0x4000 是 `MSG_RCVMORE`）
+  - **全局 errno 翻译**（`GuestLinuxErrnoFromDarwin`）：Darwin/Linux 在 1..34 之后
+    数值不同，`EAGAIN`=35 vs 11、`EINPROGRESS`=36 vs 115、`ECONNREFUSED`=61 vs 111；
+    musl 的 DNS 只认 11，不翻译必然失败
+  - rootfs：`/etc/apk/repositories` 指向 Alpine v3.20 main/community；
+    CI 把 minirootfs 的 `etc/apk/keys/*.rsa.pub` 与
+    `etc/ssl/certs/ca-certificates.crt` 放进 `Helpers/alpine/`
+  - watchdog 从 20s×3 放宽到 30s×12（网络下载需要时间）
+  - 新菜单：`Run APK Update (network)`、`Install Bash (network)`、`Run Bash`
+- 最新产物：`/workspace/LinuxProbe-0.38.0.ipa`
+  sha256 `aee0d84e48de92d8a02b5e9a55d5fb6bf80f090370e636e234ca2952b7b8f14f`
+- **下一步**：真机验证 `Run APK Update (network)` → `Install Bash (network)` →
+  `Run Bash`；通过后 M3.3 完成，进入 M4（fork 快照修复、性能、交互终端）。
 
 ## 两个仓库
 
@@ -195,6 +213,13 @@ CURRENT_PROJECT_VERSION: "N"
     （0.26.2 被 UTF-8 替换字符污染，2,302,928 → 3,829,530 B）。改完必须校验大小和 ELF 头。
 19. rootfs：guest `/` → `<容器>/Documents/rootfs`，由 App 通过 `LINUXPROBE_ROOT` 传入。
     `GuestBootstrapRootfs` 负责建目录、写 `/etc/*`、装 static busybox 与 Alpine 运行时。
+20. **errno 必须翻译**：Darwin 与 Linux 只有 1..34 相同；35 以后大范围错位
+    （`EAGAIN` 35 vs 11、`EINPROGRESS` 36 vs 115、`ECONNREFUSED` 61 vs 111、
+    `ELOOP` 62 vs 40、`ENAMETOOLONG` 63 vs 36）。所有返回 guest 的错误走
+    `GuestErrno()` / `GuestError()`，不要直接 `return -EXXX`（除非两边数值相同）。
+21. **socket 常量/结构也要翻译**：`sockaddr` 的 family 宽度、`SOL_SOCKET`、
+    `SO_*`、`MSG_*`、`POLL*`、`AF_INET6`。每个 socket 设 `SO_NOSIGPIPE`，
+    guest 的 `MSG_NOSIGNAL`(0x4000) 必须丢弃，否则 Darwin 会当成 `MSG_RCVMORE`。
 
 ## 调试
 
@@ -218,18 +243,16 @@ aarch64-linux-gnu-objdump -d Tools/busybox.static | less
 | `[guest] entry=… at_base=… at_entry=…` | 动态链接器入口与 auxv |
 | `[guest] unsupported syscall N` | ld.so/apk 需要的下一个 syscall |
 | `[guest] signal N … pc=… far=… esr=…` | 进程内故障现场 |
-| `[guest] alarm1/2/3 pc=…` | 20s watchdog |
+| `[guest] alarm1/2/3 pc=…` | 30s watchdog（最多 12 次） |
 
 定位：`offset = pc - base`，用 `llvm-objdump`/`aarch64-linux-gnu-objdump` 查该地址。
 
 ## 当前优先级
 
-1. **M3.3 网络 + `apk update`**：socket 透传（AF_INET / sockaddr 转换、SOL_SOCKET
-   选项常量）、`poll/ppoll/select`、`sendto/recvfrom/sendmsg/recvmsg`、DNS、TLS；
-   验收 `apk update`、`apk add bash`。
-   - 注意 Linux 与 Darwin 的 socket 常量不同（`SOL_SOCKET` Linux=1 / Darwin=0xffff，
-     `sockaddr` 有/无 `sa_len`）。
-   - `apk` 目前会调 `mount/umount2`（40/39），失败可忽略。
+1. **M3.3 真机验收**：`Run APK Update (network)` 应打印
+   `fetch https://dl-cdn.alpinelinux.org/alpine/v3.20/main/aarch64/APKINDEX.tar.gz`
+   与 `v3.20.x`；然后 `Install Bash (network)`、`Run Bash`。
+   若失败先看 `[guest] unsupported syscall N`、`[guest] socket/connect` 日志。
 2. M4：性能基准、syscall 按站点特化、fork 快照修复（动态镜像 fork + 恢复子进程选址）、交互终端、常用工具验证。
 
 ## 不要做
