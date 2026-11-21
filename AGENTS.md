@@ -11,7 +11,7 @@
 guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建 syscall 层。
 不是虚拟机、不是模拟器、不是解释器。
 
-## 当前状态（2026-11-22，0.38.3 / build 78）
+## 当前状态（2026-11-22，0.38.4 / build 79）
 
 - **M0–M2.5 全部真机通过**。0.34.1：`Run Shell` 六条命令（`ls /`、`cat /etc/motd`、
   `uname`、`ls -l /`、`id`、`pwd`）全对，`status=0`；`Run Fork Test` 父子分别输出。
@@ -119,8 +119,13 @@ guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建
   - 0.38.3：`GuestForgetMmap` 在 munmap 时删除/裁剪记录并回退游标；
     `GuestFindMmapGap` 按冲突区间终点跳跃（不再 16MB 盲跳），支持回绕复用低地址；
     记录上限 512→4096；候选地址仍用 `GuestRangeFree` 做宿主侧校验。
-- 最新产物：`/workspace/LinuxProbe-0.38.3.ipa`
-  sha256 `1066e1de29614a05f8ebafc3defccf03c10fb31e7133ba84a7b0572b3521b55e`
+- **0.38.3 真机**：刷屏消失，但 `apk update` 仍在 1 秒内 `IO ERROR`，随后
+    `no free guest address near stub (len=0x4000)` 并 SIGSEGV。原因是 112MB 跳板窗口里
+    还要放 64MB guest 堆 + 8MB 栈 + interp，留给数据的只有约 38MB，apk 索引需要更多。
+  - 0.38.4：**匿名 mmap 不再限制在跳板窗口内**，直接交给宿主 `mmap(NULL)` 选址
+    （匿名数据不含改写代码，不需要 `b` 可达）；只有文件映射/ELF 库仍用窗口内分配。
+- 最新产物：`/workspace/LinuxProbe-0.38.4.ipa`
+  sha256 `88d370e7f6df447ac319c88e79857f7be8032372258f407fce65f82ddd562f7a`
 - **下一步**：真机验证 `Run APK Update (network)` → `Install Bash (network)` →
   `Run Bash`；通过后 M3.3 完成，进入 M4（fork 快照修复、性能、交互终端）。
 
