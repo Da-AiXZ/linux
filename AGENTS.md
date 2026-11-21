@@ -54,6 +54,8 @@ CURRENT_PROJECT_VERSION: "N"
 11. **TPIDR_EL0 不可依赖**：XNU 会在中断/调度返回时把它重置成 0x4。装载时必须把 guest 里
     每条 `mrs xN, tpidr_el0` / `msr tpidr_el0, xN` 改写为 `bl` 到按寄存器号索引的 stub，
     读写影子变量 `GuestTlsPointer`；否则 glibc 第一次 TLS 访问就会崩。
+12. TLS stub 的栈保存只用 `str x30, [sp, #-16]!` / `ldr x30, [sp], #16`；
+    **不要**用 `ldp/stp ..., xzr` 形式（0.19.0 真机上会触发 SIGILL，ESR EC=0）。
 
 ## 调试
 
@@ -68,9 +70,9 @@ App 日志的关键行含义见工作区 `AGENTS.md` 第 6 节。
 
 ## 当前优先级
 
-1. 0.19.0 真机验证：`loaded` 行应出现 `tls_mrs=275`（pie-hello）/`tls_mrs=897`（busybox）、`tls_msr=1`；
-   svc 行的 `tls=` 在 `TLS_INIT_TP` 之后应是堆地址。
-2. 若仍有 `guest stopped: signal=11`，用新的 `pc - base` 继续定位（大概率已不是 TLS）。
+1. 0.20.1 真机验证：`tls stubs: … code=…` 应打印出 `f81f0ffe …` 等字；
+   若仍 `guest stopped: signal=4`，看 `guest thread 0 code:` 的第 5 个 word 到底是什么指令。
+2. 通过 TLS 后再看新的故障 `pc - base`，继续定位 glibc 启动。
 3. 若启动推进到文件/进程 syscall，补 `openat/newfstatat/getdents64` 等 + rootfs 映射。
 4. 若 glibc 仍收敛不了，换 musl static-PIE 对照。
 
