@@ -150,7 +150,7 @@ extern char **environ;
     while (environ[environmentCount] != NULL) {
         environmentCount++;
     }
-    char **environment = calloc(environmentCount + 2, sizeof(char *));
+    char **environment = calloc(environmentCount + 4, sizeof(char *));
     if (environment == NULL) {
         free(argv);
         posix_spawn_file_actions_destroy(&actions);
@@ -164,8 +164,21 @@ extern char **environ;
     }
     NSString *rootVariable = [NSString stringWithFormat:
         @"LINUXPROBE_ROOT=%@", rootPath];
+    /*
+     * OpenSSL looks for OPENSSLDIR/cert.pem by default.  Point it at the
+     * Alpine CA bundle explicitly so apk's HTTPS fetches verify even if the
+     * bundle layout changes.
+     */
+    NSString *certificateFile = [NSString stringWithFormat:
+        @"SSL_CERT_FILE=%@/etc/ssl/certs/ca-certificates.crt", rootPath];
+    NSString *certificateDirectory = [NSString stringWithFormat:
+        @"SSL_CERT_DIR=%@/etc/ssl/certs", rootPath];
     environment[environmentCount] = (char *)rootVariable.fileSystemRepresentation;
-    environment[environmentCount + 1] = NULL;
+    environment[environmentCount + 1] =
+        (char *)certificateFile.fileSystemRepresentation;
+    environment[environmentCount + 2] =
+        (char *)certificateDirectory.fileSystemRepresentation;
+    environment[environmentCount + 3] = NULL;
 
     pid_t pid = 0;
     int result = posix_spawn(&pid,

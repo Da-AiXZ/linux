@@ -916,6 +916,16 @@ static void GuestInstallAlpineRuntime(NSString *directory)
         }
     }
     GuestLog("[guest] alpine runtime files=%lu\n", (unsigned long)copied);
+
+    char certificatePath[GUEST_ROOT_MAX];
+    snprintf(certificatePath,
+             sizeof(certificatePath),
+             "%s/etc/ssl/certs/ca-certificates.crt",
+             GuestRootPath);
+    struct stat certificateStatus;
+    GuestLog("[guest] ca bundle=%s exists=%d\n",
+             certificatePath,
+             stat(certificatePath, &certificateStatus) == 0 ? 1 : 0);
 }
 
 static void GuestBootstrapRootfs(void)

@@ -86,6 +86,9 @@ jobs:
              "$APP/Helpers/alpine/etc/apk/keys/"
           cp /tmp/alpine-rootfs/etc/ssl/certs/ca-certificates.crt \
              "$APP/Helpers/alpine/etc/ssl/certs/ca-certificates.crt"
+          # OpenSSL's default trust file is <openssldir>/cert.pem.
+          cp /tmp/alpine-rootfs/etc/ssl/cert.pem \
+             "$APP/Helpers/alpine/etc/ssl/cert.pem"
           cp /tmp/alpine-rootfs/sbin/apk "$APP/Helpers/alpine-apk"
           cp /tmp/alpine-rootfs/bin/busybox "$APP/Helpers/alpine-busybox"
 
