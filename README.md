@@ -7,7 +7,7 @@
 不是虚拟机，不是模拟器，不是解释器：guest 是 arm64 Linux ELF，指令由 M1 直接执行；
 只把 `svc #0` 改写成分支，跳进自建的 syscall 分发器。
 
-## 当前状态（0.35.2）
+## 当前状态（0.35.3）
 
 | 阶段 | 状态 |
 |---|---|
@@ -15,9 +15,9 @@
 | M1 原生 ELF | ✅ 最小 aarch64 ELF 直接执行，`status=0` |
 | M2 真实 busybox | ✅ glibc static-PIE `busybox` / `pie-hello` 原生执行，`status=0` |
 | M2.5 文件系统 + shell | ✅ 0.34.1 真机：`Run Shell` 六条命令全部正确；外部命令走 checkpoint/restore fork + execve |
-| M3.1 动态链接器 | 🚧 0.35.0 已构建：`PT_INTERP` + musl `ld-musl-aarch64.so.1` + `AT_BASE`/`AT_ENTRY`；文件 `mmap` 改为 anon+pread；库在 mmap 时现场打 `svc`/TLS 补丁。0.35.1 把按钮收进右上角菜单；0.35.2 修 Alpine 运行时路径（`Helpers/Helpers/alpine` → `Helpers/alpine`）。**待真机验证** |
+| M3.1 动态链接器 | 🚧 0.35.0 已构建：`PT_INTERP` + musl `ld-musl-aarch64.so.1` + `AT_BASE`/`AT_ENTRY`；文件 `mmap` 改为 anon+pread；库在 mmap 时现场打 `svc`/TLS 补丁。0.35.1 菜单 UI；0.35.2 修 Alpine 路径；0.35.3 修 `msr tpidr_el0` 的 x30 自循环。**待真机验证** |
 
-最新版本 **0.35.2 (67)**。项目上下文、决策、真机日志和路线记录在
+最新版本 **0.35.3 (68)**。项目上下文、决策、真机日志和路线记录在
 [Da-AiXZ/linux-workspace](https://github.com/Da-AiXZ/linux-workspace)（私有）。
 
 ## 工作原理

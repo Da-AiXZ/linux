@@ -11,7 +11,7 @@
 guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建 syscall 层。
 不是虚拟机、不是模拟器、不是解释器。
 
-## 当前状态（2026-11-22，0.35.2 / build 67）
+## 当前状态（2026-11-22，0.35.3 / build 68）
 
 - **M0–M2.5 全部真机通过**。0.34.1：`Run Shell` 六条命令（`ls /`、`cat /etc/motd`、
   `uname`、`ls -l /`、`id`、`pwd`）全对，`status=0`；`Run Fork Test` 父子分别输出。
@@ -26,8 +26,11 @@ guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建
   - 0.35.2：`guest-runner` 在 `<App>/Helpers/`，Alpine 目录是 `<App>/Helpers/alpine`；
     之前误拼成 `Helpers/Helpers/alpine`，导致 `cannot read interp`。
     `/lib/*.so*` 在 rootfs 缺失时现在直接回退到 bundle 的 `Helpers/alpine/lib/`
-- 最新产物：`/workspace/LinuxProbe-0.35.2.ipa`
-  sha256 `a67e1a6882a7818547021f954b07e9c51ca36dc6e8178da50c90f23f17ca41d4`
+  - 0.35.3：`msr tpidr_el0` 也必须用不建链接的 per-site 岛。musl 的
+    `__set_thread_area` 是 leaf，`bl writeStub` 会先把 x30 改成 site+4，
+    函数末尾 `ret` 回到 site+4 自循环。岛只借 x16（保存/恢复），不碰 x30。
+- 最新产物：`/workspace/LinuxProbe-0.35.3.ipa`
+  sha256 `1e99e2146681d3647191e4965a40fcb0966ee2d6381a6a8c868a23abf552f624`
 - **下一步**：用户回传两个新菜单项的日志；通过则进 M3.2（Alpine rootfs + 本地 apk），
   不通过按日志修 `PT_INTERP` / `mmap` / ld.so。
 
@@ -165,7 +168,7 @@ aarch64-linux-gnu-objdump -d Tools/busybox.static | less
 
 ## 当前优先级
 
-1. **等 0.35.2 真机日志**：`Alpine BusyBox (dynamic)` 与 `Run APK --version`。
+1. **等 0.35.3 真机日志**：`Alpine BusyBox (dynamic)` 与 `Run APK --version`。
    - 成功标准：Alpine busybox 打印 `Linux … aarch64 GNU/Linux`；apk 打印
      `apk-tools 2.14.x`；两者 `status=0`。
    - 若卡住/崩溃：看 `interp` / `loaded` / `mmap elf` / `unsupported syscall` /
