@@ -4021,7 +4021,7 @@ static void GuestEmitForkSupport(uint8_t *base)
 #pragma mark - Guest mmap / mprotect for the dynamic linker
 
 #define GUEST_HOST_PAGE_SIZE 0x4000ULL
-#define GUEST_MMAP_RECORDS 512
+#define GUEST_MMAP_RECORDS 4096
 
 static struct {
     uintptr_t address;
@@ -4182,6 +4182,120 @@ static void GuestReleaseMmaps(void)
 }
 
 /*
+ * Guest munmap must also free the address for reuse.  Without this, every
+ * mmap/munmap cycle burned a fresh 16KB slot out of the 112MB window and a
+ * long-running program (apk reading an index over TLS) ran out of space.
+ */
+static void GuestForgetMmap(uintptr_t address, size_t length)
+{
+    uintptr_t end = address + length;
+    for (int index = 0; index < GuestMmapRecordCount; index++) {
+        uintptr_t recordStart = GuestMmapRecords[index].address;
+        uintptr_t recordEnd = recordStart + GuestMmapRecords[index].length;
+        if (recordEnd <= address || recordStart >= end) {
+            continue;
+        }
+        if (recordStart >= address && recordEnd <= end) {
+            GuestMmapRecords[index] =
+                GuestMmapRecords[GuestMmapRecordCount - 1];
+            GuestMmapRecordCount--;
+            index--;
+            continue;
+        }
+        if (recordStart < address && recordEnd > end) {
+            GuestMmapRecords[index].length = address - recordStart;
+            if (GuestMmapRecordCount < GUEST_MMAP_RECORDS) {
+                GuestMmapRecords[GuestMmapRecordCount].address = end;
+                GuestMmapRecords[GuestMmapRecordCount].length =
+                    recordEnd - end;
+                GuestMmapRecordCount++;
+            }
+            continue;
+        }
+        if (recordStart < address) {
+            GuestMmapRecords[index].length = address - recordStart;
+        } else {
+            GuestMmapRecords[index].address = end;
+            GuestMmapRecords[index].length = recordEnd - end;
+        }
+    }
+    if (GuestMmapCursor > address) {
+        GuestMmapCursor = GuestAlignDown(address);
+    }
+}
+
+static uintptr_t GuestMmapConflictEnd(uintptr_t address, size_t length)
+{
+    uintptr_t end = address + length;
+    uintptr_t conflictEnd = 0;
+
+    uintptr_t runtimeAddresses[] = {
+        GuestImageBase,
+        GuestInterpBase,
+        (uintptr_t)GuestStubPage,
+        GuestHeapBase,
+        (uintptr_t)GuestStackBase,
+    };
+    size_t runtimeLengths[] = {
+        (size_t)GuestImageSize,
+        (size_t)GuestInterpSize,
+        GUEST_STUB_PAGE_SIZE,
+        (size_t)(GuestHeapEnd - GuestHeapBase),
+        (size_t)GuestStackSize,
+    };
+    for (size_t index = 0;
+         index < sizeof(runtimeAddresses) / sizeof(runtimeAddresses[0]);
+         index++) {
+        if (runtimeAddresses[index] == 0 || runtimeLengths[index] == 0) {
+            continue;
+        }
+        uintptr_t rangeEnd = runtimeAddresses[index] + runtimeLengths[index];
+        if (runtimeAddresses[index] < end && address < rangeEnd) {
+            if (rangeEnd > conflictEnd) {
+                conflictEnd = rangeEnd;
+            }
+        }
+    }
+
+    for (int index = 0; index < GuestMmapRecordCount; index++) {
+        uintptr_t recordStart = GuestMmapRecords[index].address;
+        uintptr_t recordEnd = recordStart + GuestMmapRecords[index].length;
+        if (recordStart < end && address < recordEnd) {
+            if (recordEnd > conflictEnd) {
+                conflictEnd = recordEnd;
+            }
+        }
+    }
+    return conflictEnd;
+}
+
+static uintptr_t GuestFindMmapGap(uintptr_t start,
+                                  uintptr_t limit,
+                                  size_t length)
+{
+    uintptr_t candidate = GuestAlignUp(start);
+    while (candidate + length > candidate && candidate + length <= limit) {
+        uintptr_t conflictEnd = GuestMmapConflictEnd(candidate, length);
+        if (conflictEnd == 0) {
+            /*
+             * Records only cover our own guest mappings.  Also ask the host
+             * so we never MAP_FIXED over the runner's own __TEXT, dylibs or
+             * malloc arenas.
+             */
+            if (GuestRangeFree(candidate, length)) {
+                return candidate;
+            }
+            conflictEnd = candidate + GUEST_HOST_PAGE_SIZE;
+        }
+        if (conflictEnd <= candidate) {
+            conflictEnd = candidate + GUEST_HOST_PAGE_SIZE;
+        }
+        candidate = GuestAlignUp(conflictEnd);
+    }
+    return 0;
+}
+
+/*
  * Guest mmaps must stay within branch range of the island page.  Anonymous
  * mappings are also placed here so a later MAP_FIXED (e.g. musl's BSS tail)
  * does not land somewhere unpredictable.
@@ -4203,37 +4317,34 @@ static uintptr_t GuestAllocateMmapAddress(size_t length,
         GuestRangeFree(hint, length)) {
         return hint;
     }
-    if (GuestMmapCursor == 0) {
-        uintptr_t start = GuestImageBase + GuestImageSize;
-        if (GuestStubPage != NULL) {
-            uintptr_t stubEnd =
-                (uintptr_t)GuestStubPage + GUEST_STUB_PAGE_SIZE;
-            if (stubEnd > start) {
-                start = stubEnd;
-            }
+
+    uintptr_t windowStart = GuestAlignUp(GuestImageBase + GuestImageSize);
+    if (GuestStubPage != NULL) {
+        uintptr_t stubEnd = (uintptr_t)GuestStubPage + GUEST_STUB_PAGE_SIZE;
+        if (stubEnd > windowStart) {
+            windowStart = stubEnd;
         }
-        GuestMmapCursor = GuestAlignUp(start);
     }
     uintptr_t limit = GuestStubPage != NULL
         ? (uintptr_t)GuestStubPage + 0x07000000ULL
-        : GuestMmapCursor + 0x07000000ULL;
-    uintptr_t candidate = GuestMmapCursor;
-    for (int attempt = 0; attempt < 8192; attempt++) {
-        if (candidate + length < candidate ||
-            candidate + length > limit) {
-            break;
-        }
-        if (!GuestRangeOverlapsRuntime(candidate, length) &&
-            GuestRangeFree(candidate, length)) {
-            GuestMmapCursor = candidate + length;
-            return candidate;
-        }
-        candidate = GuestAlignUp(candidate +
-                                 (length > 0x1000000 ? length : 0x1000000));
+        : windowStart + 0x07000000ULL;
+
+    uintptr_t start = GuestMmapCursor;
+    if (start < windowStart) {
+        start = windowStart;
     }
-    GuestLog("[guest] mmap: no free guest address near stub (len=0x%lx)\n",
-             (unsigned long)length);
-    return 0;
+    uintptr_t candidate = GuestFindMmapGap(start, limit, length);
+    if (candidate == 0 && start > windowStart) {
+        /* Wrap: freed holes below the cursor are reusable too. */
+        candidate = GuestFindMmapGap(windowStart, start + length, length);
+    }
+    if (candidate == 0) {
+        GuestLog("[guest] mmap: no free guest address near stub (len=0x%lx)\n",
+                 (unsigned long)length);
+        return 0;
+    }
+    GuestMmapCursor = candidate + length;
+    return candidate;
 }
 
 static ssize_t GuestCopyFromFile(int descriptor,
@@ -4687,6 +4798,7 @@ static uint64_t GuestHandleMunmap(uintptr_t address, size_t length)
         return (uint64_t)(-EINVAL);
     }
     if (munmap((void *)address, length) == 0) {
+        GuestForgetMmap(address, length);
         return 0;
     }
     int error = errno;
@@ -4699,6 +4811,7 @@ static uint64_t GuestHandleMunmap(uintptr_t address, size_t length)
                      (unsigned long)address,
                      (unsigned long)(address + length),
                      (unsigned long)roundedStart);
+            GuestForgetMmap(roundedStart, roundedEnd - roundedStart);
             return 0;
         }
     }
