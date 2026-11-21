@@ -78,6 +78,14 @@ jobs:
              "$APP/Helpers/alpine/lib/libssl.so.3"
           cp /tmp/alpine-rootfs/lib/libz.so.1.3.1 \
              "$APP/Helpers/alpine/lib/libz.so.1"
+          # Repository signing keys and CA roots (both ship in the minirootfs)
+          # so `apk update` can verify indexes over https.
+          mkdir -p "$APP/Helpers/alpine/etc/apk/keys" \
+                   "$APP/Helpers/alpine/etc/ssl/certs"
+          cp /tmp/alpine-rootfs/etc/apk/keys/*.rsa.pub \
+             "$APP/Helpers/alpine/etc/apk/keys/"
+          cp /tmp/alpine-rootfs/etc/ssl/certs/ca-certificates.crt \
+             "$APP/Helpers/alpine/etc/ssl/certs/ca-certificates.crt"
           cp /tmp/alpine-rootfs/sbin/apk "$APP/Helpers/alpine-apk"
           cp /tmp/alpine-rootfs/bin/busybox "$APP/Helpers/alpine-busybox"
 

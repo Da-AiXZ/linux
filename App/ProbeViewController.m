@@ -130,6 +130,26 @@
                           handler:^(__kindof UIAction *action) {
         [weakSelf runInstalledHello];
     }];
+    UIAction *apkUpdate =
+        [UIAction actionWithTitle:@"Run APK Update (network)"
+                            image:nil
+                       identifier:nil
+                          handler:^(__kindof UIAction *action) {
+        [weakSelf runApkUpdate];
+    }];
+    UIAction *apkAddBash =
+        [UIAction actionWithTitle:@"Install Bash (network)"
+                            image:nil
+                       identifier:nil
+                          handler:^(__kindof UIAction *action) {
+        [weakSelf runApkAddBash];
+    }];
+    UIAction *bash = [UIAction actionWithTitle:@"Run Bash"
+                                        image:nil
+                                   identifier:nil
+                                      handler:^(__kindof UIAction *action) {
+        [weakSelf runBash];
+    }];
 
     UIMenu *probeSection = [UIMenu menuWithTitle:@""
                                            image:nil
@@ -146,7 +166,8 @@
                                        identifier:nil
                                           options:UIMenuOptionsDisplayInline
                                          children:@[alpineBusybox, apk, apkAdd,
-                                                    installedHello]];
+                                                    installedHello, apkUpdate,
+                                                    apkAddBash, bash]];
 
     return [UIMenu menuWithTitle:@"Linux Probe"
                        children:@[probeSection, staticSection, alpineSection]];
@@ -271,6 +292,29 @@
                 arguments:@[ @"apk", @"--initdb", @"add", @"--allow-untrusted",
                              @"/tmp/hello.apk" ]
                     label:@"Starting apk add --allow-untrusted /tmp/hello.apk..."];
+}
+
+- (void)runApkUpdate
+{
+    [self startGuestNamed:@"Helpers/alpine-apk"
+                arguments:@[ @"apk", @"--allow-untrusted", @"update" ]
+                    label:@"Starting apk --allow-untrusted update..."];
+}
+
+- (void)runApkAddBash
+{
+    [self startGuestNamed:@"Helpers/alpine-apk"
+                arguments:@[ @"apk", @"--allow-untrusted", @"add", @"bash" ]
+                    label:@"Starting apk --allow-untrusted add bash..."];
+}
+
+- (void)runBash
+{
+    NSString *bash = [[self guestRootPath]
+        stringByAppendingPathComponent:@"bin/bash"];
+    [self startGuestNamed:bash
+                arguments:@[ @"bash", @"-c", @"echo bash ok; uname -a; id" ]
+                    label:@"Starting installed /bin/bash -c ..."];
 }
 
 - (NSString *)guestRootPath

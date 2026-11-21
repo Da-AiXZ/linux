@@ -24,7 +24,13 @@
 #import <sys/mman.h>
 #import <sys/mount.h>
 #import <sys/file.h>
+#import <sys/select.h>
+#import <sys/socket.h>
 #import <sys/ucontext.h>
+#import <sys/un.h>
+#import <netinet/in.h>
+#import <netinet/tcp.h>
+#import <poll.h>
 #import <sys/stat.h>
 #import <sys/time.h>
 #import <sys/uio.h>
@@ -585,9 +591,144 @@ static void GuestSyscallTrampoline(void)
         "ret\n");
 }
 
+/*
+ * Darwin and Linux agree on errno 1..34 and then diverge almost
+ * everywhere.  The guest is Linux, so every error returned to it must be
+ * translated.  This matters immediately for networking: Darwin EAGAIN is
+ * 35 while Linux EAGAIN is 11, and musl's resolver treats anything other
+ * than 11 as a hard failure.
+ */
+static int GuestLinuxErrnoFromDarwin(int error)
+{
+    switch (error) {
+    case 0:
+        return 0;
+    case EDEADLK:
+        return 35;
+    case EAGAIN:
+        return 11;
+    case EINPROGRESS:
+        return 115;
+    case EALREADY:
+        return 114;
+    case ENOTSOCK:
+        return 88;
+    case EDESTADDRREQ:
+        return 89;
+    case EMSGSIZE:
+        return 90;
+    case EPROTOTYPE:
+        return 91;
+    case ENOPROTOOPT:
+        return 92;
+    case EPROTONOSUPPORT:
+        return 93;
+    case ESOCKTNOSUPPORT:
+        return 94;
+    case ENOTSUP:
+        return 95;
+    case EPFNOSUPPORT:
+        return 96;
+    case EAFNOSUPPORT:
+        return 97;
+    case EADDRINUSE:
+        return 98;
+    case EADDRNOTAVAIL:
+        return 99;
+    case ENETDOWN:
+        return 100;
+    case ENETUNREACH:
+        return 101;
+    case ENETRESET:
+        return 102;
+    case ECONNABORTED:
+        return 103;
+    case ECONNRESET:
+        return 104;
+    case ENOBUFS:
+        return 105;
+    case EISCONN:
+        return 106;
+    case ENOTCONN:
+        return 107;
+    case ESHUTDOWN:
+        return 108;
+    case ETOOMANYREFS:
+        return 109;
+    case ETIMEDOUT:
+        return 110;
+    case ECONNREFUSED:
+        return 111;
+    case EHOSTDOWN:
+        return 112;
+    case EHOSTUNREACH:
+        return 113;
+    case ELOOP:
+        return 40;
+    case ENAMETOOLONG:
+        return 36;
+    case ENOTEMPTY:
+        return 39;
+    case EUSERS:
+        return 87;
+    case EDQUOT:
+        return 122;
+    case ESTALE:
+        return 116;
+    case EREMOTE:
+        return 66;
+    case EOVERFLOW:
+        return 75;
+    case ECANCELED:
+        return 125;
+    case EIDRM:
+        return 43;
+    case ENOMSG:
+        return 42;
+    case EILSEQ:
+        return 84;
+    case ENOATTR:
+        return 61;
+    case EBADMSG:
+        return 74;
+    case EMULTIHOP:
+        return 72;
+    case ENODATA:
+        return 61;
+    case ENOLINK:
+        return 67;
+    case ENOSR:
+        return 63;
+    case ENOSTR:
+        return 60;
+    case EPROTO:
+        return 71;
+    case ETIME:
+        return 62;
+    case EOPNOTSUPP:
+        return 95;
+    case ENOTRECOVERABLE:
+        return 131;
+    case EOWNERDEAD:
+        return 130;
+    default:
+        return error;
+    }
+}
+
+static int GuestErrorCode(int error)
+{
+    return -GuestLinuxErrnoFromDarwin(error);
+}
+
+static uint64_t GuestError(int error)
+{
+    return (uint64_t)(int64_t)GuestErrorCode(error);
+}
+
 static uint64_t GuestErrno(void)
 {
-    return (uint64_t)(-(int64_t)errno);
+    return GuestError(errno);
 }
 
 #pragma mark - Guest filesystem
@@ -811,9 +952,9 @@ static void GuestBootstrapRootfs(void)
     static const char *directories[] = {
         "bin", "sbin", "lib", "lib64", "usr", "usr/bin", "usr/sbin",
         "usr/lib", "usr/lib64", "usr/share", "etc", "etc/apk", "etc/apk/keys",
-        "lib/apk", "lib/apk/db", "tmp", "var", "var/tmp",
-        "var/log", "var/cache", "dev", "proc", "sys", "root", "home",
-        "mnt", "media", "opt", "srv", "run", "boot",
+        "etc/ssl", "etc/ssl/certs", "lib/apk", "lib/apk/db", "tmp", "var",
+        "var/tmp", "var/log", "var/cache", "var/cache/apk", "dev", "proc",
+        "sys", "root", "home", "mnt", "media", "opt", "srv", "run", "boot",
     };
     for (size_t index = 0;
          index < sizeof(directories) / sizeof(directories[0]);
@@ -855,7 +996,12 @@ static void GuestBootstrapRootfs(void)
                        "linux:x:501:\n");
 
     snprintf(path, sizeof(path), "%s/etc/resolv.conf", GuestRootPath);
-    GuestWriteTextFile(path, "nameserver 1.1.1.1\n");
+    GuestWriteTextFile(path, "nameserver 1.1.1.1\nnameserver 8.8.8.8\n");
+
+    snprintf(path, sizeof(path), "%s/etc/hosts", GuestRootPath);
+    GuestWriteTextFile(path,
+                       "127.0.0.1 localhost localhost.localdomain\n"
+                       "::1 localhost\n");
 
     snprintf(path, sizeof(path), "%s/etc/nsswitch.conf", GuestRootPath);
     GuestWriteTextFile(path, "passwd: files\ngroup: files\nhosts: files\n");
@@ -864,7 +1010,9 @@ static void GuestBootstrapRootfs(void)
     GuestWriteTextFile(path, "aarch64\n");
 
     snprintf(path, sizeof(path), "%s/etc/apk/repositories", GuestRootPath);
-    GuestWriteTextFile(path, "# offline: no repositories configured\n");
+    GuestWriteTextFile(path,
+                       "https://dl-cdn.alpinelinux.org/alpine/v3.20/main\n"
+                       "https://dl-cdn.alpinelinux.org/alpine/v3.20/community\n");
 
     snprintf(path, sizeof(path), "%s/etc/apk/world", GuestRootPath);
     GuestCreateEmptyFileIfMissing(path);
@@ -1254,6 +1402,402 @@ static uint64_t GuestGetDents64(int fd, void *buffer, uint64_t count)
         cache->pendingValid = 0;
     }
     return written;
+}
+
+#pragma mark - Guest network
+
+#define GUEST_SOCK_CLOEXEC 0x80000
+#define GUEST_SOCK_NONBLOCK 0x800
+
+#define GUEST_SOL_SOCKET 1
+#define GUEST_AF_UNIX 1
+#define GUEST_AF_INET 2
+#define GUEST_AF_INET6 10
+
+/*
+ * Linux msghdr is 56 bytes: name, namelen(4)+pad, iov, iovlen(8),
+ * control, controllen(8), flags(4)+pad.  Darwin uses int/socklen_t for
+ * the two lengths and is 48 bytes, so the header is rebuilt field by
+ * field instead of passed straight through.
+ */
+typedef struct {
+    void *name;
+    uint32_t nameLength;
+    uint32_t namePadding;
+    void *iov;
+    uint64_t iovLength;
+    void *control;
+    uint64_t controlLength;
+    int32_t flags;
+    uint32_t flagsPadding;
+} GuestMessageHeader;
+
+static int GuestToHostSocketFamily(int family)
+{
+    switch (family) {
+    case GUEST_AF_UNIX:
+        return AF_UNIX;
+    case GUEST_AF_INET:
+        return AF_INET;
+    case GUEST_AF_INET6:
+        /* Linux AF_INET6 is 10, Darwin AF_INET6 is 30. */
+        return AF_INET6;
+    default:
+        return -1;
+    }
+}
+
+static int GuestFromHostSocketFamily(int family)
+{
+    switch (family) {
+    case AF_UNIX:
+        return GUEST_AF_UNIX;
+    case AF_INET:
+        return GUEST_AF_INET;
+    case AF_INET6:
+        return GUEST_AF_INET6;
+    default:
+        return 0;
+    }
+}
+
+/*
+ * MSG_NOSIGNAL does not exist on Darwin (0x4000 there means MSG_RCVMORE),
+ * so it is stripped from guest flags and replaced by SO_NOSIGPIPE on every
+ * socket we hand out.  MSG_DONTWAIT and MSG_WAITALL also have different
+ * numeric values on the two kernels.
+ */
+static int GuestConfigureSocket(int descriptor, int flags)
+{
+    if (descriptor < 0) {
+        return descriptor;
+    }
+    int enabled = 1;
+    setsockopt(descriptor,
+               SOL_SOCKET,
+               SO_NOSIGPIPE,
+               &enabled,
+               (socklen_t)sizeof(enabled));
+    if (flags & GUEST_SOCK_NONBLOCK) {
+        int current = fcntl(descriptor, F_GETFL);
+        if (current >= 0) {
+            fcntl(descriptor, F_SETFL, current | O_NONBLOCK);
+        }
+    }
+    if (flags & GUEST_SOCK_CLOEXEC) {
+        int current = fcntl(descriptor, F_GETFD);
+        if (current >= 0) {
+            fcntl(descriptor, F_SETFD, current | FD_CLOEXEC);
+        }
+    }
+    return descriptor;
+}
+
+static int GuestToHostMessageFlags(int flags)
+{
+    int result = 0;
+    if (flags & 0x0001) result |= MSG_OOB;
+    if (flags & 0x0002) result |= MSG_PEEK;
+    if (flags & 0x0004) result |= MSG_DONTROUTE;
+    if (flags & 0x0008) result |= MSG_CTRUNC;
+    if (flags & 0x0020) result |= MSG_TRUNC;
+#ifdef MSG_DONTWAIT
+    if (flags & 0x0040) result |= MSG_DONTWAIT;
+#endif
+    if (flags & 0x0080) result |= MSG_EOR;
+    if (flags & 0x0100) result |= MSG_WAITALL;
+    /* 0x4000 (MSG_NOSIGNAL) and 0x40000000 (MSG_CMSG_CLOEXEC) dropped. */
+    return result;
+}
+
+static int GuestFromHostMessageFlags(int flags)
+{
+    int result = 0;
+    if (flags & MSG_OOB) result |= 0x0001;
+    if (flags & MSG_PEEK) result |= 0x0002;
+    if (flags & MSG_DONTROUTE) result |= 0x0004;
+    if (flags & MSG_CTRUNC) result |= 0x0008;
+    if (flags & MSG_TRUNC) result |= 0x0020;
+#ifdef MSG_DONTWAIT
+    if (flags & MSG_DONTWAIT) result |= 0x0040;
+#endif
+    if (flags & MSG_EOR) result |= 0x0080;
+    if (flags & MSG_WAITALL) result |= 0x0100;
+    return result;
+}
+
+static short GuestToHostPollEvents(short events)
+{
+    short result = 0;
+    if (events & 0x0001) result |= POLLIN;
+    if (events & 0x0002) result |= POLLPRI;
+    if (events & 0x0004) result |= POLLOUT;
+    if (events & 0x0008) result |= POLLERR;
+    if (events & 0x0010) result |= POLLHUP;
+    if (events & 0x0020) result |= POLLNVAL;
+#ifdef POLLRDNORM
+    if (events & 0x0040) result |= POLLRDNORM;
+#endif
+#ifdef POLLRDBAND
+    if (events & 0x0080) result |= POLLRDBAND;
+#endif
+#ifdef POLLWRNORM
+    if (events & 0x0100) result |= POLLWRNORM;
+#endif
+#ifdef POLLWRBAND
+    if (events & 0x0200) result |= POLLWRBAND;
+#endif
+    return result;
+}
+
+static short GuestFromHostPollEvents(short events)
+{
+    short result = 0;
+    if (events & POLLIN) result |= 0x0001;
+    if (events & POLLPRI) result |= 0x0002;
+    if (events & POLLOUT) result |= 0x0004;
+    if (events & POLLERR) result |= 0x0008;
+    if (events & POLLHUP) result |= 0x0010;
+    if (events & POLLNVAL) result |= 0x0020;
+#ifdef POLLRDNORM
+    if (events & POLLRDNORM) result |= 0x0040;
+#endif
+#ifdef POLLRDBAND
+    if (events & POLLRDBAND) result |= 0x0080;
+#endif
+#ifdef POLLWRNORM
+    if (events & POLLWRNORM) result |= 0x0100;
+#endif
+#ifdef POLLWRBAND
+    if (events & POLLWRBAND) result |= 0x0200;
+#endif
+    return result;
+}
+
+static int GuestToHostSocketOption(int level, int option)
+{
+    if (level != GUEST_SOL_SOCKET) {
+        return option;
+    }
+    switch (option) {
+    case 1: return SO_DEBUG;
+    case 2: return SO_REUSEADDR;
+    case 3: return SO_TYPE;
+    case 4: return SO_ERROR;
+    case 5: return SO_DONTROUTE;
+    case 6: return SO_BROADCAST;
+    case 7: return SO_SNDBUF;
+    case 8: return SO_RCVBUF;
+    case 9: return SO_KEEPALIVE;
+    case 10: return SO_OOBINLINE;
+    case 13: return SO_LINGER;
+    case 15: return SO_REUSEPORT;
+    case 18: return SO_RCVLOWAT;
+    case 19: return SO_SNDLOWAT;
+    case 20: return SO_RCVTIMEO;
+    case 21: return SO_SNDTIMEO;
+    case 30: return SO_ACCEPTCONN;
+    default:
+        return -1;
+    }
+}
+
+static const char *GuestFromHostUnixPath(const char *hostPath,
+                                         char *buffer,
+                                         size_t size)
+{
+    size_t rootLength = strlen(GuestRootPath);
+    if (rootLength != 0 &&
+        strncmp(hostPath, GuestRootPath, rootLength) == 0 &&
+        (hostPath[rootLength] == '/' || hostPath[rootLength] == 0)) {
+        const char *relative = hostPath + rootLength;
+        int written = snprintf(buffer,
+                               size,
+                               "%s",
+                               relative[0] == 0 ? "/" : relative);
+        if (written > 0 && (size_t)written < size) {
+            return buffer;
+        }
+    }
+    return hostPath;
+}
+
+/*
+ * Linux sockaddr has a 16-bit sa_family at offset 0.  Darwin has sa_len
+ * at 0 and an 8-bit sa_family at 1.  Port/flowinfo/address fields sit at
+ * the same offsets on both sides, so only the first two bytes and the
+ * total length need fixing.
+ */
+static int GuestToHostSockaddr(const void *guestAddress,
+                               uint32_t guestLength,
+                               struct sockaddr_storage *storage,
+                               socklen_t *hostLength)
+{
+    if (guestAddress == NULL || guestLength < 2) {
+        return -EINVAL;
+    }
+    uint16_t family = *(const uint16_t *)guestAddress;
+    memset(storage, 0, sizeof(*storage));
+
+    if (family == GUEST_AF_INET) {
+        if (guestLength < 16) {
+            return -EINVAL;
+        }
+        struct sockaddr_in *output = (struct sockaddr_in *)storage;
+        output->sin_len = (uint8_t)sizeof(struct sockaddr_in);
+        output->sin_family = AF_INET;
+        memcpy(&output->sin_port, (const uint8_t *)guestAddress + 2, 2);
+        memcpy(&output->sin_addr, (const uint8_t *)guestAddress + 4, 4);
+        *hostLength = (socklen_t)sizeof(struct sockaddr_in);
+        return 0;
+    }
+
+    if (family == GUEST_AF_INET6) {
+        if (guestLength < 28) {
+            return -EINVAL;
+        }
+        struct sockaddr_in6 *output = (struct sockaddr_in6 *)storage;
+        output->sin6_len = (uint8_t)sizeof(struct sockaddr_in6);
+        output->sin6_family = AF_INET6;
+        memcpy(&output->sin6_port, (const uint8_t *)guestAddress + 2, 2);
+        memcpy(&output->sin6_flowinfo, (const uint8_t *)guestAddress + 4, 4);
+        memcpy(&output->sin6_addr, (const uint8_t *)guestAddress + 8, 16);
+        memcpy(&output->sin6_scope_id, (const uint8_t *)guestAddress + 24, 4);
+        *hostLength = (socklen_t)sizeof(struct sockaddr_in6);
+        return 0;
+    }
+
+    if (family == GUEST_AF_UNIX) {
+        const char *guestPath = (const char *)guestAddress + 2;
+        size_t guestPathLength = (size_t)guestLength - 2;
+        if (guestPathLength > 0 && guestPath[0] == 0) {
+            /* Darwin has no abstract Unix sockets. */
+            return GuestErrorCode(EOPNOTSUPP);
+        }
+        char relative[GUEST_ROOT_MAX];
+        if (guestPathLength >= sizeof(relative)) {
+            return GuestErrorCode(ENAMETOOLONG);
+        }
+        memcpy(relative, guestPath, guestPathLength);
+        relative[guestPathLength] = 0;
+
+        char hostPath[PATH_MAX];
+        const char *translated = GuestTranslatePath(GUEST_AT_FDCWD,
+                                                    relative,
+                                                    hostPath,
+                                                    sizeof(hostPath));
+        if (translated == NULL) {
+            return GuestErrorCode(ENAMETOOLONG);
+        }
+        size_t translatedLength = strlen(translated);
+        struct sockaddr_un *output = (struct sockaddr_un *)storage;
+        if (translatedLength > sizeof(output->sun_path) - 1) {
+            return GuestErrorCode(ENAMETOOLONG);
+        }
+        memcpy(output->sun_path, translated, translatedLength + 1);
+        output->sun_family = AF_UNIX;
+        output->sun_len = (uint8_t)(offsetof(struct sockaddr_un, sun_path) +
+                                    translatedLength + 1);
+        *hostLength = (socklen_t)output->sun_len;
+        return 0;
+    }
+
+    return GuestErrorCode(EAFNOSUPPORT);
+}
+
+static uint32_t GuestFromHostSockaddr(const struct sockaddr *address,
+                                      socklen_t addressLength,
+                                      void *guestAddress,
+                                      uint32_t guestCapacity)
+{
+    if (guestAddress == NULL || guestCapacity < 2 || address == NULL) {
+        return 0;
+    }
+    uint8_t *output = (uint8_t *)guestAddress;
+    int family = GuestFromHostSocketFamily(address->sa_family);
+    uint32_t length = 2;
+
+    if (family == GUEST_AF_INET && addressLength >= 16) {
+        length = 16;
+        memcpy(output + 2, (const uint8_t *)address + 2, 14);
+    } else if (family == GUEST_AF_INET6 && addressLength >= 28) {
+        length = 28;
+        memcpy(output + 2, (const uint8_t *)address + 2, 26);
+    } else if (family == GUEST_AF_UNIX) {
+        const struct sockaddr_un *unixAddress =
+            (const struct sockaddr_un *)address;
+        char relative[GUEST_ROOT_MAX];
+        const char *guestPath = GuestFromHostUnixPath(unixAddress->sun_path,
+                                                      relative,
+                                                      sizeof(relative));
+        size_t guestPathLength = strnlen(guestPath,
+                                         sizeof(unixAddress->sun_path));
+        if (guestPathLength > sizeof(unixAddress->sun_path)) {
+            guestPathLength = sizeof(unixAddress->sun_path);
+        }
+        if (2 + guestPathLength > guestCapacity) {
+            guestPathLength = guestCapacity - 2;
+        }
+        length = 2 + (uint32_t)guestPathLength;
+        if (length > 2) {
+            memcpy(output + 2, guestPath, guestPathLength);
+        }
+    } else {
+        family = 0;
+    }
+
+    if (length > guestCapacity) {
+        length = guestCapacity;
+    }
+    *(uint16_t *)output = (uint16_t)family;
+    return length;
+}
+
+static int GuestTimeoutToMilliseconds(const struct timespec *timeout)
+{
+    if (timeout == NULL) {
+        return -1;
+    }
+    if (timeout->tv_sec < 0 || timeout->tv_nsec < 0) {
+        return 0;
+    }
+    int64_t milliseconds = (int64_t)timeout->tv_sec * 1000 +
+        ((int64_t)timeout->tv_nsec + 999999) / 1000000;
+    if (milliseconds > INT_MAX) {
+        milliseconds = INT_MAX;
+    }
+    return (int)milliseconds;
+}
+
+static uint64_t GuestHandlePoll(uint64_t descriptorPointer,
+                                uint64_t descriptorCount,
+                                int timeoutMilliseconds)
+{
+    if (descriptorCount > 1024) {
+        return (uint64_t)(-EINVAL);
+    }
+    struct pollfd *descriptors = (struct pollfd *)(uintptr_t)descriptorPointer;
+    if (descriptorCount != 0 && descriptors == NULL) {
+        return (uint64_t)(-EFAULT);
+    }
+    for (uint64_t index = 0; index < descriptorCount; index++) {
+        descriptors[index].events =
+            GuestToHostPollEvents(descriptors[index].events);
+        descriptors[index].revents = 0;
+    }
+    int result = poll(descriptors, (nfds_t)descriptorCount, timeoutMilliseconds);
+    int error = errno;
+    for (uint64_t index = 0; index < descriptorCount; index++) {
+        descriptors[index].events =
+            GuestFromHostPollEvents(descriptors[index].events);
+        descriptors[index].revents =
+            GuestFromHostPollEvents(descriptors[index].revents);
+    }
+    if (result < 0) {
+        errno = error;
+        return GuestErrno();
+    }
+    return (uint64_t)result;
 }
 
 #pragma mark - Syscalls
@@ -1900,7 +2444,7 @@ uint64_t GuestSyscallDispatch(uint64_t *args,
         uint64_t operation = args[1] & 0x7F;
         if (operation == 0 || operation == 9) {
             /* No guest threads yet: report "value changed" so callers retry. */
-            return (uint64_t)(-EAGAIN);
+            return GuestError(EAGAIN);
         }
         return 0;
     }
@@ -1986,6 +2530,379 @@ uint64_t GuestSyscallDispatch(uint64_t *args,
             memset((void *)args[0], 0, 32);
         }
         return 0;
+    }
+    case 114: { /* clock_getres */
+        uint64_t *output = (uint64_t *)(uintptr_t)args[1];
+        if (output != NULL) {
+            output[0] = 0;
+            output[1] = 1000000;
+        }
+        return 0;
+    }
+    /* ---------------- network ---------------- */
+    case 198: { /* socket */
+        static unsigned int socketTrace = 0;
+        int family = GuestToHostSocketFamily((int)args[0]);
+        if (family < 0) {
+            GuestLog("[guest] socket: unsupported family %llu\n",
+                     (unsigned long long)args[0]);
+            return GuestError(EAFNOSUPPORT);
+        }
+        int type = (int)args[1];
+        int typeFlags = type & (GUEST_SOCK_CLOEXEC | GUEST_SOCK_NONBLOCK);
+        type &= ~(GUEST_SOCK_CLOEXEC | GUEST_SOCK_NONBLOCK);
+        int descriptor = socket(family, type, (int)args[2]);
+        if (descriptor < 0) {
+            return GuestErrno();
+        }
+        GuestConfigureSocket(descriptor, typeFlags);
+        if (socketTrace < 12) {
+            socketTrace++;
+            GuestLog("[guest] socket family=%llu type=0x%llx -> %d\n",
+                     (unsigned long long)args[0],
+                     (unsigned long long)args[1],
+                     descriptor);
+        }
+        return (uint64_t)descriptor;
+    }
+    case 199: { /* socketpair */
+        int family = GuestToHostSocketFamily((int)args[0]);
+        if (family < 0) {
+            return GuestError(EAFNOSUPPORT);
+        }
+        int type = (int)args[1];
+        int typeFlags = type & (GUEST_SOCK_CLOEXEC | GUEST_SOCK_NONBLOCK);
+        type &= ~(GUEST_SOCK_CLOEXEC | GUEST_SOCK_NONBLOCK);
+        int descriptors[2] = { -1, -1 };
+        if (socketpair(family, type, (int)args[2], descriptors) != 0) {
+            return GuestErrno();
+        }
+        GuestConfigureSocket(descriptors[0], typeFlags);
+        GuestConfigureSocket(descriptors[1], typeFlags);
+        if (args[3] != 0) {
+            ((int *)(uintptr_t)args[3])[0] = descriptors[0];
+            ((int *)(uintptr_t)args[3])[1] = descriptors[1];
+        }
+        return 0;
+    }
+    case 200: { /* bind */
+        struct sockaddr_storage address;
+        socklen_t length = 0;
+        int status = GuestToHostSockaddr((const void *)(uintptr_t)args[1],
+                                         (uint32_t)args[2],
+                                         &address,
+                                         &length);
+        if (status < 0) {
+            return (uint64_t)status;
+        }
+        return bind((int)args[0], (struct sockaddr *)&address, length) == 0
+            ? 0 : GuestErrno();
+    }
+    case 201: /* listen */
+        return listen((int)args[0], (int)args[1]) == 0 ? 0 : GuestErrno();
+    case 202: { /* accept */
+        struct sockaddr_storage address;
+        socklen_t length = (socklen_t)sizeof(address);
+        int descriptor = accept((int)args[0],
+                                (struct sockaddr *)&address,
+                                &length);
+        if (descriptor < 0) {
+            return GuestErrno();
+        }
+        GuestConfigureSocket(descriptor, 0);
+        if (args[1] != 0 && args[2] != 0) {
+            uint32_t capacity = *(uint32_t *)(uintptr_t)args[2];
+            *(uint32_t *)(uintptr_t)args[2] =
+                GuestFromHostSockaddr((struct sockaddr *)&address,
+                                      length,
+                                      (void *)(uintptr_t)args[1],
+                                      capacity);
+        }
+        return (uint64_t)descriptor;
+    }
+    case 242: { /* accept4 */
+        struct sockaddr_storage address;
+        socklen_t length = (socklen_t)sizeof(address);
+        int descriptor = accept((int)args[0],
+                                (struct sockaddr *)&address,
+                                &length);
+        if (descriptor < 0) {
+            return GuestErrno();
+        }
+        GuestConfigureSocket(descriptor, (int)args[3]);
+        if (args[1] != 0 && args[2] != 0) {
+            uint32_t capacity = *(uint32_t *)(uintptr_t)args[2];
+            *(uint32_t *)(uintptr_t)args[2] =
+                GuestFromHostSockaddr((struct sockaddr *)&address,
+                                      length,
+                                      (void *)(uintptr_t)args[1],
+                                      capacity);
+        }
+        return (uint64_t)descriptor;
+    }
+    case 203: { /* connect */
+        struct sockaddr_storage address;
+        socklen_t length = 0;
+        int status = GuestToHostSockaddr((const void *)(uintptr_t)args[1],
+                                         (uint32_t)args[2],
+                                         &address,
+                                         &length);
+        if (status < 0) {
+            return (uint64_t)status;
+        }
+        static unsigned int connectTrace = 0;
+        int result = connect((int)args[0],
+                             (struct sockaddr *)&address,
+                             length);
+        int hostFamily = ((struct sockaddr *)&address)->sa_family;
+        if (result != 0) {
+            int error = errno;
+            if (connectTrace < 8) {
+                connectTrace++;
+                GuestLog("[guest] connect fd=%d family=%d errno=%d\n",
+                         (int)args[0],
+                         hostFamily,
+                         error);
+            }
+            errno = error;
+            return GuestErrno();
+        }
+        if (connectTrace < 8) {
+            connectTrace++;
+            GuestLog("[guest] connect fd=%d family=%d ok\n",
+                     (int)args[0],
+                     hostFamily);
+        }
+        return 0;
+    }
+    case 204: /* getsockname */
+    case 205: { /* getpeername */
+        struct sockaddr_storage address;
+        socklen_t length = (socklen_t)sizeof(address);
+        int result = number == 204
+            ? getsockname((int)args[0], (struct sockaddr *)&address, &length)
+            : getpeername((int)args[0], (struct sockaddr *)&address, &length);
+        if (result != 0) {
+            return GuestErrno();
+        }
+        if (args[1] != 0 && args[2] != 0) {
+            uint32_t capacity = *(uint32_t *)(uintptr_t)args[2];
+            *(uint32_t *)(uintptr_t)args[2] =
+                GuestFromHostSockaddr((struct sockaddr *)&address,
+                                      length,
+                                      (void *)(uintptr_t)args[1],
+                                      capacity);
+        }
+        return 0;
+    }
+    case 206: { /* sendto */
+        struct sockaddr_storage address;
+        socklen_t length = 0;
+        const struct sockaddr *target = NULL;
+        if (args[4] != 0 && args[5] != 0) {
+            int status = GuestToHostSockaddr((const void *)(uintptr_t)args[4],
+                                             (uint32_t)args[5],
+                                             &address,
+                                             &length);
+            if (status < 0) {
+                return (uint64_t)status;
+            }
+            target = (const struct sockaddr *)&address;
+        }
+        ssize_t result = sendto((int)args[0],
+                                (const void *)(uintptr_t)args[1],
+                                (size_t)args[2],
+                                GuestToHostMessageFlags((int)args[3]),
+                                target,
+                                length);
+        return result < 0 ? GuestErrno() : (uint64_t)result;
+    }
+    case 207: { /* recvfrom */
+        struct sockaddr_storage address;
+        socklen_t length = (socklen_t)sizeof(address);
+        ssize_t result = recvfrom((int)args[0],
+                                  (void *)(uintptr_t)args[1],
+                                  (size_t)args[2],
+                                  GuestToHostMessageFlags((int)args[3]),
+                                  (struct sockaddr *)&address,
+                                  &length);
+        if (result < 0) {
+            return GuestErrno();
+        }
+        if (args[4] != 0 && args[5] != 0) {
+            uint32_t capacity = *(uint32_t *)(uintptr_t)args[5];
+            *(uint32_t *)(uintptr_t)args[5] =
+                GuestFromHostSockaddr((struct sockaddr *)&address,
+                                      length,
+                                      (void *)(uintptr_t)args[4],
+                                      capacity);
+        }
+        return (uint64_t)result;
+    }
+    case 208: { /* setsockopt */
+        int level = (int)args[1];
+        int option = (int)args[2];
+        int hostLevel = level == GUEST_SOL_SOCKET ? SOL_SOCKET : level;
+        int hostOption = GuestToHostSocketOption(level, option);
+        if (hostOption < 0) {
+            /* SO_BINDTODEVICE and other Linux-only knobs: accept silently. */
+            return 0;
+        }
+        if (level == GUEST_SOL_SOCKET && (option == 20 || option == 21)) {
+            if (args[3] == 0 || args[4] < 16) {
+                return (uint64_t)(-EINVAL);
+            }
+            const uint64_t *input = (const uint64_t *)(uintptr_t)args[3];
+            struct timeval value;
+            value.tv_sec = (time_t)input[0];
+            value.tv_usec = (suseconds_t)input[1];
+            return setsockopt((int)args[0],
+                              hostLevel,
+                              hostOption,
+                              &value,
+                              (socklen_t)sizeof(value)) == 0 ? 0 : GuestErrno();
+        }
+        return setsockopt((int)args[0],
+                          hostLevel,
+                          hostOption,
+                          (const void *)(uintptr_t)args[3],
+                          (socklen_t)args[4]) == 0 ? 0 : GuestErrno();
+    }
+    case 209: { /* getsockopt */
+        int level = (int)args[1];
+        int option = (int)args[2];
+        int hostLevel = level == GUEST_SOL_SOCKET ? SOL_SOCKET : level;
+        int hostOption = GuestToHostSocketOption(level, option);
+        if (args[4] == 0) {
+            return (uint64_t)(-EFAULT);
+        }
+        socklen_t *lengthPointer = (socklen_t *)(uintptr_t)args[4];
+        if (hostOption < 0) {
+            *lengthPointer = 0;
+            return 0;
+        }
+        if (level == GUEST_SOL_SOCKET && (option == 20 || option == 21)) {
+            struct timeval value;
+            socklen_t size = (socklen_t)sizeof(value);
+            if (getsockopt((int)args[0],
+                           hostLevel,
+                           hostOption,
+                           &value,
+                           &size) != 0) {
+                return GuestErrno();
+            }
+            if (args[3] != 0 && *lengthPointer >= 16) {
+                uint64_t *output = (uint64_t *)(uintptr_t)args[3];
+                output[0] = (uint64_t)value.tv_sec;
+                output[1] = (uint64_t)value.tv_usec;
+            }
+            *lengthPointer = 16;
+            return 0;
+        }
+        socklen_t size = *lengthPointer;
+        if (getsockopt((int)args[0],
+                       hostLevel,
+                       hostOption,
+                       (void *)(uintptr_t)args[3],
+                       &size) != 0) {
+            return GuestErrno();
+        }
+        *lengthPointer = size;
+        return 0;
+    }
+    case 210: /* shutdown */
+        return shutdown((int)args[0], (int)args[1]) == 0 ? 0 : GuestErrno();
+    case 211: { /* sendmsg */
+        GuestMessageHeader *guest =
+            (GuestMessageHeader *)(uintptr_t)args[1];
+        if (guest == NULL) {
+            return (uint64_t)(-EFAULT);
+        }
+        struct msghdr message;
+        memset(&message, 0, sizeof(message));
+        struct sockaddr_storage address;
+        socklen_t length = 0;
+        if (guest->name != NULL && guest->nameLength != 0) {
+            int status = GuestToHostSockaddr(guest->name,
+                                             guest->nameLength,
+                                             &address,
+                                             &length);
+            if (status < 0) {
+                return (uint64_t)status;
+            }
+            message.msg_name = &address;
+            message.msg_namelen = length;
+        }
+        message.msg_iov = (struct iovec *)guest->iov;
+        message.msg_iovlen = (int)guest->iovLength;
+        if (guest->control != NULL && guest->controlLength != 0) {
+            static unsigned int controlTrace = 0;
+            if (controlTrace < 4) {
+                controlTrace++;
+                GuestLog("[guest] sendmsg control data ignored\n");
+            }
+        }
+        ssize_t result = sendmsg((int)args[0],
+                                 &message,
+                                 GuestToHostMessageFlags((int)args[2]));
+        return result < 0 ? GuestErrno() : (uint64_t)result;
+    }
+    case 212: { /* recvmsg */
+        GuestMessageHeader *guest =
+            (GuestMessageHeader *)(uintptr_t)args[1];
+        if (guest == NULL) {
+            return (uint64_t)(-EFAULT);
+        }
+        struct msghdr message;
+        memset(&message, 0, sizeof(message));
+        struct sockaddr_storage address;
+        message.msg_name = &address;
+        message.msg_namelen = (socklen_t)sizeof(address);
+        message.msg_iov = (struct iovec *)guest->iov;
+        message.msg_iovlen = (int)guest->iovLength;
+        ssize_t result = recvmsg((int)args[0],
+                                 &message,
+                                 GuestToHostMessageFlags((int)args[2]));
+        if (result < 0) {
+            return GuestErrno();
+        }
+        if (guest->name != NULL) {
+            guest->nameLength =
+                GuestFromHostSockaddr((struct sockaddr *)&address,
+                                      message.msg_namelen,
+                                      guest->name,
+                                      guest->nameLength);
+        }
+        guest->flags = GuestFromHostMessageFlags(message.msg_flags);
+        if (guest->control != NULL) {
+            guest->controlLength = 0;
+        }
+        return (uint64_t)result;
+    }
+    case 72: { /* pselect6: Darwin has no pselect, emulate with select */
+        struct timeval value;
+        struct timeval *timeout = NULL;
+        if (args[4] != 0) {
+            const struct timespec *request =
+                (const struct timespec *)(uintptr_t)args[4];
+            value.tv_sec = (time_t)request->tv_sec;
+            value.tv_usec = (suseconds_t)(request->tv_nsec / 1000);
+            timeout = &value;
+        }
+        int result = select((int)args[0],
+                            (fd_set *)(uintptr_t)args[1],
+                            (fd_set *)(uintptr_t)args[2],
+                            (fd_set *)(uintptr_t)args[3],
+                            timeout);
+        return result < 0 ? GuestErrno() : (uint64_t)result;
+    }
+    case 73: { /* ppoll */
+        int milliseconds = -1;
+        if (args[2] != 0) {
+            milliseconds = GuestTimeoutToMilliseconds(
+                (const struct timespec *)(uintptr_t)args[2]);
+        }
+        return GuestHandlePoll(args[0], args[1], milliseconds);
     }
     case 214: { /* brk */
         static unsigned int brkTrace = 0;
@@ -2219,11 +3136,11 @@ static void GuestAlarmHandler(int signalNumber,
              (unsigned long long)sp);
     GuestDumpForkChild("alarm");
 
-    if (GuestWatchdogStage >= 3) {
+    if (GuestWatchdogStage >= 12) {
         GuestLog("[guest] watchdog: guest still running, aborting\n");
         _exit(4);
     }
-    alarm(20);
+    alarm(30);
 }
 
 static void GuestDumpWords(mach_port_t task,
@@ -4057,7 +4974,7 @@ static void GuestRestoreStackAndJump(void)
              (unsigned long long)header.brkCurrent,
              (unsigned long long)header.tlsPointer);
 
-    alarm(20);
+    alarm(30);
     {
         /*
          * Resume exactly like the trampoline epilogue would: sp = the saved
@@ -4965,7 +5882,7 @@ static int GuestLoadAndRunInternal(const char *guestPath,
 
     if (initial) {
         /* Single-threaded watchdog: see GuestAlarmHandler. */
-        alarm(20);
+        alarm(30);
 
         /*
          * All code patching is finished, so CS_DEBUGGED is no longer needed.
