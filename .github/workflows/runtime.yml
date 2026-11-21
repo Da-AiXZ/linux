@@ -54,6 +54,40 @@ jobs:
           ls -l "$ROOT/sbin/apk" "$ROOT/bin/busybox" \
                 "$ROOT/lib/ld-musl-aarch64.so.1"
 
+      - name: Probe RWX permission
+        run: |
+          set -eux
+          cat > "$RUNNER_TEMP/rwx.c" <<'EOF'
+          #include <sys/mman.h>
+          #include <sys/ptrace.h>
+          #include <stdio.h>
+          #include <errno.h>
+          #include <string.h>
+          #include <unistd.h>
+          int main(int argc, char **argv) {
+            if (argc > 1) {
+              errno = 0;
+              long r = ptrace(PT_TRACE_ME, 0, 0, 0);
+              printf("ptrace=%ld errno=%d (%s)\n", r, errno, strerror(errno));
+            }
+            void *p = mmap(0, 0x4000, PROT_READ|PROT_WRITE,
+                           MAP_PRIVATE|MAP_ANON, -1, 0);
+            errno = 0;
+            int r = mprotect(p, 0x4000, PROT_READ|PROT_EXEC);
+            printf("rx=%d errno=%d (%s)\n", r, errno, strerror(errno));
+            errno = 0;
+            r = mprotect(p, 0x4000, PROT_READ|PROT_WRITE|PROT_EXEC);
+            printf("rwx=%d errno=%d (%s)\n", r, errno, strerror(errno));
+            return 0;
+          }
+          EOF
+          clang -o "$RUNNER_TEMP/rwx" "$RUNNER_TEMP/rwx.c"
+          "$RUNNER_TEMP/rwx"
+          "$RUNNER_TEMP/rwx" trace
+          codesign --force --sign - --options runtime \
+            --entitlements "$RUNNER_TEMP/jit.entitlements" "$RUNNER_TEMP/rwx"
+          "$RUNNER_TEMP/rwx" trace
+
       - name: Run apk update
         run: |
           set -o pipefail
