@@ -111,3 +111,6 @@ tools/make_guest_elf.py         生成最小 aarch64 ELF
 - 使用私有 API，仅用于个人设备，不能上架。
 - 不 boot Linux 内核，不支持内核模块 / systemd。
 - 不支持 x86。
+- 参考项目：iSH / ios-linuxkit / LinuxRunner（解释器路线）、
+  [Kernarium](https://github.com/imxieyi/Kernarium)（原生 UML 内核 + 解释器用户态）。
+  本项目只做 guest 用户态的原生执行，不复制它们的代码。
