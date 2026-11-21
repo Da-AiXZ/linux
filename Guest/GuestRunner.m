@@ -416,7 +416,6 @@ uint64_t GuestSyscallDispatch(uint64_t *args,
         return (uint64_t)getpid();
     case 99: /* set_robust_list */
     case 135: /* rt_sigprocmask */
-    case 233: /* madvise */
         return 0;
     case 293: /* rseq */
         return (uint64_t)(-ENOSYS);
@@ -482,18 +481,50 @@ uint64_t GuestSyscallDispatch(uint64_t *args,
             return GuestBrkCurrent;
         }
         if (args[0] >= GuestHeapBase && args[0] <= GuestHeapEnd) {
-            GuestBrkCurrent = (uintptr_t)args[0];
+            uintptr_t requested = (uintptr_t)args[0];
+            if (requested > GuestBrkCurrent) {
+                /* Linux gives fresh zero pages when the break grows. */
+                memset((void *)GuestBrkCurrent,
+                       0,
+                       requested - GuestBrkCurrent);
+            }
+            GuestBrkCurrent = requested;
             return GuestBrkCurrent;
         }
         return GuestBrkCurrent;
     }
     case 222: { /* mmap */
+        static unsigned int mmapTrace = 0;
+        uint64_t guestFlags = args[3];
+        int flags = 0;
+        if (guestFlags & 0x01) flags |= MAP_SHARED;      /* Linux MAP_SHARED */
+        if (guestFlags & 0x02) flags |= MAP_PRIVATE;     /* Linux MAP_PRIVATE */
+        if (guestFlags & 0x10) flags |= MAP_FIXED;       /* same on both */
+        if (guestFlags & 0x20) flags |= MAP_ANON;        /* Linux MAP_ANONYMOUS */
+        if (guestFlags & 0x4000) flags |= MAP_NORESERVE; /* Linux MAP_NORESERVE */
+
         void *result = mmap((void *)args[0],
                             (size_t)args[1],
                             (int)args[2],
-                            (int)args[3],
-                            (int)args[4],
+                            flags,
+                            (guestFlags & 0x20) ? -1 : (int)args[4],
                             (off_t)args[5]);
+        int error = errno;
+        if (mmapTrace < 8) {
+            mmapTrace++;
+            fprintf(stdout,
+                    "[guest] mmap addr=0x%llx len=0x%llx prot=0x%llx "
+                    "flags=0x%llx->0x%x fd=%d result=%p errno=%d\n",
+                    (unsigned long long)args[0],
+                    (unsigned long long)args[1],
+                    (unsigned long long)args[2],
+                    (unsigned long long)guestFlags,
+                    flags,
+                    (int)args[4],
+                    result,
+                    result == MAP_FAILED ? error : 0);
+            fflush(stdout);
+        }
         return result == MAP_FAILED ? GuestErrno() : (uint64_t)result;
     }
     case 215: { /* munmap */
@@ -505,6 +536,19 @@ uint64_t GuestSyscallDispatch(uint64_t *args,
         return mprotect((void *)args[0],
                         (size_t)args[1],
                         (int)args[2]) == 0 ? 0 : GuestErrno();
+    }
+    case 233: { /* madvise */
+        int advice = (int)args[2];
+        if (advice == 4 || advice == 8) { /* MADV_DONTNEED / MADV_FREE */
+            /* Linux zero-fills anonymous pages on next touch. */
+            uintptr_t start = (uintptr_t)args[0];
+            size_t length = (size_t)args[1];
+            if (start >= GuestHeapBase && length != 0 &&
+                start + length > start && start + length <= GuestHeapEnd) {
+                memset((void *)start, 0, length);
+            }
+        }
+        return 0;
     }
     default:
         fprintf(stderr, "[guest] unsupported syscall %llu\n",
