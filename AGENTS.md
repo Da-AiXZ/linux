@@ -11,11 +11,11 @@
 guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建 syscall 层。
 不是虚拟机、不是模拟器、不是解释器。
 
-## 当前状态（2026-11-22，0.35.4 / build 69）
+## 当前状态（2026-11-22，0.35.5 / build 70）
 
 - **M0–M2.5 全部真机通过**。0.34.1：`Run Shell` 六条命令（`ls /`、`cat /etc/motd`、
   `uname`、`ls -l /`、`id`、`pwd`）全对，`status=0`；`Run Fork Test` 父子分别输出。
-- **M3.1 动态链接已基本打通，等待 0.35.4 真机日志**：
+- **M3.1 动态链接已基本打通，等待 0.35.5 真机日志**：
   - 解析 `PT_INTERP`，加载 musl `ld-musl-aarch64.so.1` 到独立基址
   - auxv 写 `AT_BASE`=动态链接器（ld.so）基址、`AT_ENTRY`=主程序入口
   - 文件 `mmap` 改成 anon + `pread` 模拟（4KB offset、未签名 `.so` 的 `PROT_EXEC`）
@@ -37,9 +37,15 @@ guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建
     （会 mprotect 到未映射页 → `ENOMEM`，且会把相邻 `.text` 的 `PROT_EXEC` 打掉）。
     改成 `GuestEnsureWritable`（只对未映射 host 页新建映射）+ `GuestProtectRange`
     （完整覆盖的页用精确权限，边缘 4KB/16KB 共享页取并集）。
-- 最新产物：`/workspace/LinuxProbe-0.35.4.ipa`
-  sha256 `9e26188ec4c7947bdcc282d9ce8a002be06aa9ff67e021039cb6c96d28301a94`
-- **下一步**：用户回传 0.35.4 的两个菜单项日志；通过则进 M3.2（Alpine rootfs + 本地 apk），
+  - **0.35.4 真机：库的 `MAP_FIXED` 全部成功**（`libcrypto`/`libssl`/`libz`/`libapk`
+    的 RW 段都返回正确地址），但随后在 `libz+0x2830` 取指 `SIGBUS`：
+    `esr=0x8200000f`（instruction abort，permission fault，level 3）。
+  - 0.35.5：`GuestProtectRange` 的精确区间起点写成了 `headPage + 0x4000`，
+    当 guest 地址已 16KB 对齐时**第一页永远不会被 mprotect**，整文件映射的第一页
+    停在 `PROT_READ|PROT_WRITE`（不可执行）。改成 `firstFull = GuestAlignUp(address)`。
+- 最新产物：`/workspace/LinuxProbe-0.35.5.ipa`
+  sha256 `73ffb5be57f54cbfdfbe33945cd141b28eefedff561fef1cf15706bb425697ac`
+- **下一步**：用户回传 0.35.5 的两个菜单项日志；通过则进 M3.2（Alpine rootfs + 本地 apk），
   不通过按日志继续修 `mmap` / ld.so 重定位。
 
 ## 两个仓库
@@ -182,7 +188,7 @@ aarch64-linux-gnu-objdump -d Tools/busybox.static | less
 
 ## 当前优先级
 
-1. **等 0.35.4 真机日志**：`Alpine BusyBox (dynamic)` 与 `Run APK --version`。
+1. **等 0.35.5 真机日志**：`Alpine BusyBox (dynamic)` 与 `Run APK --version`。
    - 成功标准：Alpine busybox 打印 `Linux … aarch64 GNU/Linux`；apk 打印
      `apk-tools 2.14.x`；两者 `status=0`。
    - 若卡住/崩溃：看 `interp` / `loaded` / `mmap elf` / `mprotect` /

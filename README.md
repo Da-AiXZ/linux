@@ -7,7 +7,7 @@
 不是虚拟机，不是模拟器，不是解释器：guest 是 arm64 Linux ELF，指令由 M1 直接执行；
 只把 `svc #0` 改写成分支，跳进自建的 syscall 分发器。
 
-## 当前状态（0.35.4）
+## 当前状态（0.35.5）
 
 | 阶段 | 状态 |
 |---|---|
@@ -15,9 +15,9 @@
 | M1 原生 ELF | ✅ 最小 aarch64 ELF 直接执行，`status=0` |
 | M2 真实 busybox | ✅ glibc static-PIE `busybox` / `pie-hello` 原生执行，`status=0` |
 | M2.5 文件系统 + shell | ✅ 0.34.1 真机：`Run Shell` 六条命令全部正确；外部命令走 checkpoint/restore fork + execve |
-| M3.1 动态链接器 | 🚧 0.35.3 真机：Alpine 动态 busybox 打印 `uname` 且 `status=0`；`apk` 加载 `libcrypto/libssl` 时 `mmap` 返回 `-ENOMEM`，0.35.4 修 MAP_FIXED 越界与 4KB/16KB 共享页权限。**待真机验证** |
+| M3.1 动态链接器 | 🚧 0.35.3 真机：Alpine 动态 busybox 打印 `uname` 且 `status=0`；0.35.4 真机：库的 RW 段 `MAP_FIXED` 全部成功，卡在 `libz+0x2830` 取指 permission fault（`esr=0x8200000f`）；0.35.4 修 `MAP_FIXED` 越界与 4KB/16KB 共享页权限；0.35.5 修 `GuestProtectRange` 在地址已 16KB 对齐时漏掉第一页（`libz` 首屏仍 RW，取指 permission fault）。**待真机验证** |
 
-最新版本 **0.35.4 (69)**。项目上下文、决策、真机日志和路线记录在
+最新版本 **0.35.5 (70)**。项目上下文、决策、真机日志和路线记录在
 [Da-AiXZ/linux-workspace](https://github.com/Da-AiXZ/linux-workspace)（私有）。
 
 ## 工作原理
