@@ -11,7 +11,7 @@
 guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建 syscall 层。
 不是虚拟机、不是模拟器、不是解释器。
 
-## 当前状态（2026-11-22，0.37.0 / build 73）
+## 当前状态（2026-11-22，0.37.1 / build 74）
 
 - **M0–M2.5 全部真机通过**。0.34.1：`Run Shell` 六条命令（`ls /`、`cat /etc/motd`、
   `uname`、`ls -l /`、`id`、`pwd`）全对，`status=0`；`Run Fork Test` 父子分别输出。
@@ -71,8 +71,12 @@ guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建
     `Helpers/alpine-apk add --allow-untrusted /tmp/hello.apk`；新增
     `Run Installed Hello` 直跑 `<rootfs>/usr/bin/hello`（`GuestLauncher` 支持绝对路径）。
     fork 快照的深层问题留到 M4 单独修。**待真机**。
-- 最新产物：`/workspace/LinuxProbe-0.37.0.ipa`
-  sha256 `975ba0e7233f1b70c7e413310e00c28dc8d2a653bc0a80409bd8b377f2aa2703`
+  - **0.37.0 真机**：直跑 `apk add` 已进入 apk 主逻辑，失败在
+    `openat /lib/apk/db/lock` → `ENOENT`（`Unable to lock database`，`status=99`）。
+  - 0.37.1：`apk add` 加 `--initdb`；`openat(O_CREAT)` 遇 `ENOENT` 时创建父目录并重试；
+    bootstrap 增加 `apk db dir=... exists=...` 诊断。**待真机**。
+- 最新产物：`/workspace/LinuxProbe-0.37.1.ipa`
+  sha256 `5ea6b97d62acd58f3504bcfd2de183706caf56d1b468406972059b420dfa0a90`
 - **下一步**：用户回传 `Run APK Add Hello` 日志；通过则进 M3.3（网络 + `apk update`）。
 
 ## 两个仓库

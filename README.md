@@ -7,7 +7,7 @@
 不是虚拟机，不是模拟器，不是解释器：guest 是 arm64 Linux ELF，指令由 M1 直接执行；
 只把 `svc #0` 改写成分支，跳进自建的 syscall 分发器。
 
-## 当前状态（0.37.0）
+## 当前状态（0.37.1）
 
 | 阶段 | 状态 |
 |---|---|
@@ -16,9 +16,9 @@
 | M2 真实 busybox | ✅ glibc static-PIE `busybox` / `pie-hello` 原生执行，`status=0` |
 | M2.5 文件系统 + shell | ✅ 0.34.1 真机：`Run Shell` 六条命令全部正确；外部命令走 checkpoint/restore fork + execve |
 | M3.1 动态链接器 | ✅ 0.35.5 真机：动态 Alpine busybox（`status=0`）与 `apk --version`（`apk-tools 2.14.4, compiled for aarch64.`，`status=0`）全部通过 |
-| M3.2 本地 apk | 🚧 0.36.x 真机发现 fork 快照有两个深层问题：动态镜像 fork 返回 `-ENOSYS`；恢复子进程里 execve 选不到 image base（`no free address range near trampoline`），`ls -l` 还偶发跳到堆地址。0.37.0 改为不经 shell：`Run APK Add Hello` 直接跑 `Helpers/alpine-apk add --allow-untrusted /tmp/hello.apk`，新增 `Run Installed Hello` 直跑 `/usr/bin/hello`。**待真机验证** |
+| M3.2 本地 apk | 🚧 0.36.x 真机发现 fork 快照有两个深层问题：动态镜像 fork 返回 `-ENOSYS`；恢复子进程里 execve 选不到 image base（`no free address range near trampoline`），`ls -l` 还偶发跳到堆地址。0.37.0 改为不经 shell直跑 `apk add`。0.37.1 真机发现 `/lib/apk/db/lock` 打不开（`ENOENT`）：`apk add` 加 `--initdb`，并在 `openat(O_CREAT)` 遇到 `ENOENT` 时先创建父目录再重试。**待真机验证** |
 
-最新版本 **0.37.0 (73)**。项目上下文、决策、真机日志和路线记录在
+最新版本 **0.37.1 (74)**。项目上下文、决策、真机日志和路线记录在
 [Da-AiXZ/linux-workspace](https://github.com/Da-AiXZ/linux-workspace)（私有）。
 
 ## 工作原理
