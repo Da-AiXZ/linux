@@ -12,10 +12,10 @@
 | 阶段 | 状态 |
 |---|---|
 | M1 原生 ELF 执行 | ✅ `hello from linux elf`，`status=0` |
-| M2 真实 busybox | 🚧 static-PIE busybox 已能加载（`patched=297`），正在解决 glibc 启动阶段的问题 |
+| M2 真实 busybox | 🚧 static-PIE busybox 已能加载（`patched=297`），glibc 启动进行中；0.26.1 修掉 TLS 写桩编码错误 |
 | M3 Alpine / Debian rootfs | ⏳ |
 
-最新版本 **0.26.0 (41)**。项目上下文、决策和路线记录在
+最新版本 **0.26.1 (42)**。项目上下文、决策和路线记录在
 [Da-AiXZ/linux-workspace](https://github.com/Da-AiXZ/linux-workspace)（私有）。
 
 ## 工作原理

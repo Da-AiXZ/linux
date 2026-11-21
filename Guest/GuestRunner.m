@@ -918,7 +918,7 @@ static void GuestEmitTlsWriteStub(uint8_t *stub, uint32_t rt)
     code[index++] = 0xF81F0FE9U; /* str x9, [sp, #-16]! */
 
     code[index++] = 0xAA1E03E1U; /* mov x1, x30 */
-    code[index++] = 0xAA0003E0U | rt; /* mov x0, x<rt> */
+    code[index++] = 0xAA0003E0U | (rt << 16); /* mov x0, x<rt> */
     code[index++] = 0xAA0303E2U; /* mov x2, x3 */
     code[index++] = 0xAA1503E3U; /* mov x3, x21 */
     code[index++] = 0xAA1A03E4U; /* mov x4, x26 */

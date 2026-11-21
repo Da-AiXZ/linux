@@ -56,6 +56,9 @@ CURRENT_PROJECT_VERSION: "N"
     读写影子变量 `GuestTlsPointer`；否则 glibc 第一次 TLS 访问就会崩。
 12. TLS stub 的栈保存只用 `str x30, [sp, #-16]!` / `ldr x30, [sp], #16`；
     **不要**用 `ldp/stp ..., xzr` 形式（0.19.0 真机上会触发 SIGILL，ESR EC=0）。
+13. 手写指令编码必须按字段位移填：`mov x0, x<rt>` 是 `0xAA0003E0 | (rt << 16)`，
+    `rt` 不能直接或进低 5 位（0.26.0 写成 `| rt`，实际生成 `mov x19, x0`，
+    把影子 TLS 指针写成了 guest 的 `x0`，导致 glibc TLS 全部错位）。
 
 ## 调试
 
@@ -70,9 +73,10 @@ App 日志的关键行含义见工作区 `AGENTS.md` 第 6 节。
 
 ## 当前优先级
 
-1. 0.22.0 真机验证：看 `[guest] tls write value=… site=…` 有几条、值是多少；
-   若只有一条（TLS_INIT_TP），说明影子变量被别的写坏了，而不是第二次 msr。
-2. 两个程序当前都停在 glibc `__ctype_init` 的 `ldr x1,[x1]`，崩溃时 `x0` 不是堆 TLS 指针。
+1. 0.26.1 真机验证：`tls write value=` 应等于 `heap_base + 0x740`（即 glibc 的 TP），
+   且 `dst`（= `[TP+0x10]`，TLS 块首字）应等于 `src`（`PT_TLS` 首字，指向 `_nl_global_locale`）。
+   两者一致说明 TLS 影子链路正确。
+2. 观察 glibc 启动推进到哪：下一个缺口按日志里的 `svc N` 补齐。
 3. 之后补文件类 syscall + rootfs 映射（见工作区 `docs/ROADMAP.md` M2.2）。
 
 ## 不要做
