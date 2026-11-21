@@ -1,8 +1,8 @@
 name: runtime
 
-# Reproduce the guest runtime on a desktop arm64 host.  macOS M1 runners use
-# the same 16 KB pages as the iPad, so this catches syscall/mmap/parse bugs
-# without spending a device cycle for every iteration.
+# Reproduce the guest runtime without a device.  The iOS simulator runs on
+# the same Apple Silicon CPU, uses 16 KB pages, and permits the RWX mapping
+# that the loader needs when 4 KB guest segments share a 16 KB host page.
 on:
   push:
     branches: [ main ]
@@ -11,37 +11,21 @@ on:
   workflow_dispatch:
 
 jobs:
-  macos-apk:
+  simulator-apk:
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build macOS guest runner
+      - name: Build simulator guest runner
         run: |
           set -eux
-          clang -target arm64-apple-macos14.0 -fobjc-arc -O1 \
+          xcrun --sdk iphonesimulator clang \
+            -target arm64-apple-ios16.0-simulator -fobjc-arc -O1 \
             -Wno-deprecated-declarations \
             -framework Foundation -framework CoreFoundation \
-            -o "$RUNNER_TEMP/guest-runner" Guest/GuestRunner.m
-          # The runtime intentionally unions permissions for 4 KB guest pages
-          # sharing a 16 KB host page, which can produce RWX.  iOS allows it
-          # through CS_DEBUGGED; on the macOS test host we need the JIT
-          # entitlements to do the same.
-          cat > "$RUNNER_TEMP/jit.entitlements" <<'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0"><dict>
-            <key>com.apple.security.cs.allow-jit</key><true/>
-            <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
-            <key>com.apple.security.cs.disable-library-validation</key><true/>
-          </dict></plist>
-          EOF
-          codesign --force --sign - --options runtime \
-            --entitlements "$RUNNER_TEMP/jit.entitlements" \
-            "$RUNNER_TEMP/guest-runner"
-          codesign --display --entitlements - "$RUNNER_TEMP/guest-runner" 2>&1 || true
-          file "$RUNNER_TEMP/guest-runner"
+            -o "$RUNNER_TEMP/guest-runner-sim" Guest/GuestRunner.m
+          file "$RUNNER_TEMP/guest-runner-sim"
 
       - name: Prepare Alpine rootfs
         run: |
@@ -54,54 +38,34 @@ jobs:
           ls -l "$ROOT/sbin/apk" "$ROOT/bin/busybox" \
                 "$ROOT/lib/ld-musl-aarch64.so.1"
 
-      - name: Probe RWX permission
+      - name: Boot simulator
         run: |
           set -eux
-          cat > "$RUNNER_TEMP/rwx.c" <<'EOF'
-          #include <sys/mman.h>
-          #include <sys/ptrace.h>
-          #include <stdio.h>
-          #include <errno.h>
-          #include <string.h>
-          #include <unistd.h>
-          int main(int argc, char **argv) {
-            if (argc > 1) {
-              errno = 0;
-              long r = ptrace(PT_TRACE_ME, 0, 0, 0);
-              printf("ptrace=%ld errno=%d (%s)\n", r, errno, strerror(errno));
-            }
-            void *p = mmap(0, 0x4000, PROT_READ|PROT_WRITE,
-                           MAP_PRIVATE|MAP_ANON, -1, 0);
-            errno = 0;
-            int r = mprotect(p, 0x4000, PROT_READ|PROT_EXEC);
-            printf("rx=%d errno=%d (%s)\n", r, errno, strerror(errno));
-            errno = 0;
-            r = mprotect(p, 0x4000, PROT_READ|PROT_WRITE|PROT_EXEC);
-            printf("rwx=%d errno=%d (%s)\n", r, errno, strerror(errno));
-            return 0;
-          }
-          EOF
-          clang -o "$RUNNER_TEMP/rwx" "$RUNNER_TEMP/rwx.c"
-          "$RUNNER_TEMP/rwx"
-          "$RUNNER_TEMP/rwx" trace
-          codesign --force --sign - --options runtime \
-            --entitlements "$RUNNER_TEMP/jit.entitlements" "$RUNNER_TEMP/rwx"
-          "$RUNNER_TEMP/rwx" trace
+          UDID=$(xcrun simctl list devices available \
+            | grep -m1 'iPhone' \
+            | grep -Eo '[0-9A-F]{8}-([0-9A-F]{4}-){3}[0-9A-F]{12}')
+          echo "UDID=$UDID" >> "$GITHUB_ENV"
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
 
       - name: Run apk update
         run: |
           set -o pipefail
           ROOT="$RUNNER_TEMP/rootfs"
-          LINUXPROBE_ROOT="$ROOT" "$RUNNER_TEMP/guest-runner" \
-            "$ROOT/sbin/apk" apk --no-cache --allow-untrusted update \
+          SIMCTL_CHILD_LINUXPROBE_ROOT="$ROOT" \
+            xcrun simctl spawn --console "$UDID" \
+              "$RUNNER_TEMP/guest-runner-sim" \
+              "$ROOT/sbin/apk" apk --no-cache --allow-untrusted update \
             2>&1 | tee "$RUNNER_TEMP/apk-update.log"
 
       - name: Run apk add bash
         run: |
           set -o pipefail
           ROOT="$RUNNER_TEMP/rootfs"
-          LINUXPROBE_ROOT="$ROOT" "$RUNNER_TEMP/guest-runner" \
-            "$ROOT/sbin/apk" apk --no-cache --allow-untrusted add bash \
+          SIMCTL_CHILD_LINUXPROBE_ROOT="$ROOT" \
+            xcrun simctl spawn --console "$UDID" \
+              "$RUNNER_TEMP/guest-runner-sim" \
+              "$ROOT/sbin/apk" apk --no-cache --allow-untrusted add bash \
             2>&1 | tee "$RUNNER_TEMP/apk-add.log"
 
       - name: Run installed bash
@@ -109,8 +73,10 @@ jobs:
           set -o pipefail
           ROOT="$RUNNER_TEMP/rootfs"
           test -x "$ROOT/bin/bash"
-          LINUXPROBE_ROOT="$ROOT" "$RUNNER_TEMP/guest-runner" \
-            "$ROOT/bin/bash" bash -c "echo bash ok; uname -a; id" \
+          SIMCTL_CHILD_LINUXPROBE_ROOT="$ROOT" \
+            xcrun simctl spawn --console "$UDID" \
+              "$RUNNER_TEMP/guest-runner-sim" \
+              "$ROOT/bin/bash" bash -c "echo bash ok; uname -a; id" \
             2>&1 | tee "$RUNNER_TEMP/bash.log"
 
       - name: Logs
@@ -118,5 +84,5 @@ jobs:
         run: |
           for log in apk-update apk-add bash; do
             echo "===== $log ====="
-            tail -100 "$RUNNER_TEMP/$log.log" 2>/dev/null || true
+            tail -120 "$RUNNER_TEMP/$log.log" 2>/dev/null || true
           done

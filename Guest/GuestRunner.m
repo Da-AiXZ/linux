@@ -466,9 +466,9 @@ static void GuestInstallFaultHandlers(void)
 
 static void GuestLogCodeSignState(const char *tag)
 {
-#if TARGET_OS_OSX
+#if TARGET_OS_OSX || TARGET_OS_SIMULATOR
     (void)tag;
-    GuestLog("[guest] csops skipped on macOS\n");
+    GuestLog("[guest] csops skipped on host/simulator\n");
 #else
     uint32_t flags = 0;
     int result = csops(getpid(), GUEST_CS_OPS_STATUS, &flags, sizeof(flags));
@@ -533,7 +533,14 @@ static void GuestProbeTpidr(void)
 
 static BOOL GuestEnableJIT(void)
 {
-#if TARGET_OS_OSX
+#if TARGET_OS_SIMULATOR
+    /*
+     * The simulator runs on the Mac but is not hardened and allows RWX for
+     * anonymous pages, so no CS_DEBUGGED handshake is needed.
+     */
+    GuestInstallFaultHandlers();
+    return YES;
+#elif TARGET_OS_OSX
     /*
      * macOS arm64 has 16 KB pages like the iPad.  The runtime deliberately
      * unions permissions for 4 KB guest pages sharing a 16 KB host page,
@@ -6192,7 +6199,7 @@ static int GuestLoadAndRunInternal(const char *guestPath,
         /* Single-threaded watchdog: see GuestAlarmHandler. */
         alarm(30);
 
-#if !TARGET_OS_OSX
+#if !TARGET_OS_OSX && !TARGET_OS_SIMULATOR
         /*
          * All code patching is finished, so CS_DEBUGGED is no longer needed.
          * iOS does not let a process detach itself (PT_DETACH returns EPERM),
