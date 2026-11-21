@@ -73,10 +73,12 @@ App 日志的关键行含义见工作区 `AGENTS.md` 第 6 节。
 
 ## 当前优先级
 
-1. 0.26.1 真机验证：`tls write value=` 应等于 `heap_base + 0x740`（即 glibc 的 TP），
-   且 `dst`（= `[TP+0x10]`，TLS 块首字）应等于 `src`（`PT_TLS` 首字，指向 `_nl_global_locale`）。
-   两者一致说明 TLS 影子链路正确。
-2. 观察 glibc 启动推进到哪：下一个缺口按日志里的 `svc N` 补齐。
+1. 0.26.1 已验证：`tls write value=heap+0x740` 且 `dst == src` → TLS 影子链路正确。
+   但仍在 `__ctype_init` 崩，且父进程 dump 的寄存器与 pc/x1 自相矛盾
+   （x0 像是 `__ctype_init` 跑完后的 ctype 表指针）。
+2. 0.26.2：`tls read` 日志增加 `slot/locale/locales0`（用 `vm_read_overwrite` 安全读取），
+   用来判断 `.data` 里的 `_nl_global_locale.__locales[0]` 是否已重定位：
+   若 `locales0` 是 `0x9xxxx`（小于 4GB）说明 `_dl_relocate_static_pie` 没处理 `.data`。
 3. 之后补文件类 syscall + rootfs 映射（见工作区 `docs/ROADMAP.md` M2.2）。
 
 ## 不要做

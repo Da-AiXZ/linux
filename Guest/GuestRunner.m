@@ -843,6 +843,21 @@ void GuestTlsWriteLog(uint64_t value,
  *
  * Stubs only touch x30 (saved on the stack) and xN.
  */
+static uint64_t GuestSafeRead64(uint64_t address, kern_return_t *status)
+{
+    uint64_t value = 0;
+    vm_size_t size = 0;
+    kern_return_t result = vm_read_overwrite(mach_task_self(),
+                                             (vm_address_t)address,
+                                             sizeof(value),
+                                             (vm_address_t)&value,
+                                             &size);
+    if (status != NULL) {
+        *status = result;
+    }
+    return result == KERN_SUCCESS ? value : 0;
+}
+
 void GuestTlsReadLog(uint64_t value, uint64_t returnAddress)
 {
     static uint64_t lastValue = 0;
@@ -850,11 +865,34 @@ void GuestTlsReadLog(uint64_t value, uint64_t returnAddress)
     if (count < 24 || value != lastValue) {
         count++;
         lastValue = value;
+
+        kern_return_t slotStatus = KERN_FAILURE;
+        kern_return_t localeStatus = KERN_FAILURE;
+        kern_return_t localesStatus = KERN_FAILURE;
+        uint64_t slot = GuestSafeRead64(value + 0x10, &slotStatus);
+        uint64_t locale = slotStatus == KERN_SUCCESS
+            ? GuestSafeRead64(slot, &localeStatus) : 0;
+        uint64_t locales0 = localeStatus == KERN_SUCCESS
+            ? GuestSafeRead64(locale, &localesStatus) : 0;
+        uint64_t source = 0;
+        if (GuestTlsInitImage != 0 && GuestTlsInitSize >= 8) {
+            source = *(volatile uint64_t *)GuestTlsInitImage;
+        }
+
         fprintf(stdout,
-                "[guest] tls read value=0x%llx site=0x%llx shadow=0x%llx\n",
+                "[guest] tls read value=0x%llx site=0x%llx shadow=0x%llx "
+                "slot=0x%llx locale=0x%llx locales0=0x%llx src=0x%llx "
+                "(%d/%d/%d)\n",
                 (unsigned long long)value,
                 (unsigned long long)(returnAddress - 4),
-                (unsigned long long)GuestTlsPointer);
+                (unsigned long long)GuestTlsPointer,
+                (unsigned long long)slot,
+                (unsigned long long)locale,
+                (unsigned long long)locales0,
+                (unsigned long long)source,
+                (int)slotStatus,
+                (int)localeStatus,
+                (int)localesStatus);
         fflush(stdout);
     }
 }
