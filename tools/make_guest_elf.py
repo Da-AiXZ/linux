@@ -23,16 +23,18 @@ def adr(rd, offset):
 def build(message: bytes) -> bytes:
     text_offset = 0x1000
 
-    # adr x1, message is at instruction 1; message starts after 8 instructions.
     instrs = []
     instrs.append(movz(0, 1))                    # mov x0, #1
-    instrs.append(adr(1, 8 * 4 - 4))             # adr x1, message
+    instrs.append(0)                             # adr x1, message (patched below)
     instrs.append(movz(2, len(message)))         # mov x2, #len
     instrs.append(movz(8, 64))                   # mov x8, #__NR_write
     instrs.append(0xD4000001)                    # svc #0
+    instrs.append(movz(1, 0))                    # mov x1, #0
+    instrs.append(0xB9000020)                    # str w0, [x1]  (fault probe)
     instrs.append(movz(0, 0))                    # mov x0, #0
     instrs.append(movz(8, 93))                   # mov x8, #__NR_exit
     instrs.append(0xD4000001)                    # svc #0
+    instrs[1] = adr(1, 4 * len(instrs) - 4)
 
     code = b"".join(struct.pack("<I", i) for i in instrs) + message
     filesz = text_offset + len(code)
