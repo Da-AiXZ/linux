@@ -70,11 +70,10 @@ App 日志的关键行含义见工作区 `AGENTS.md` 第 6 节。
 
 ## 当前优先级
 
-1. 0.21.0 真机验证：TLS 已通（`tls=` 稳定在堆地址）；看前 8 条 `mmap` 行里给 glibc 的分配是否成功。
-2. 若 malloc 仍崩（PIE `0xcf04`、busybox `0x7ff24` 附近），用**文字日志**的精确 `pc/far/寄存器` 定位
-   （截图 OCR 会弄错十六进制）。
-3. 若启动推进到文件/进程 syscall，补 `openat/newfstatat/getdents64` 等 + rootfs 映射。
-4. 若 glibc 仍收敛不了，换 musl static-PIE 对照。
+1. 0.22.0 真机验证：看 `[guest] tls write value=… site=…` 有几条、值是多少；
+   若只有一条（TLS_INIT_TP），说明影子变量被别的写坏了，而不是第二次 msr。
+2. 两个程序当前都停在 glibc `__ctype_init` 的 `ldr x1,[x1]`，崩溃时 `x0` 不是堆 TLS 指针。
+3. 之后补文件类 syscall + rootfs 映射（见工作区 `docs/ROADMAP.md` M2.2）。
 
 ## 不要做
 
