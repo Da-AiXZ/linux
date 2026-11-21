@@ -535,11 +535,16 @@ static BOOL GuestEnableJIT(void)
 {
 #if TARGET_OS_OSX
     /*
-     * macOS arm64 has 16 KB pages like the iPad but does not require
-     * CS_DEBUGGED for anonymous executable pages in an unsigned tool.
-     * Calling PT_TRACE_ME here would only make the CI shell our tracer and
-     * freeze the process if a guest fault is raised.
+     * macOS arm64 has 16 KB pages like the iPad.  The runtime deliberately
+     * unions permissions for 4 KB guest pages sharing a 16 KB host page,
+     * which can produce RWX; local JIT self-tests show that only a debugged
+     * process gets that permission, exactly like iOS.  PT_TRACE_ME is
+     * enough; do not raise SIGSTOP (there is no App-side tracer in CI).
      */
+    if (ptrace(GUEST_PT_TRACE_ME, 0, NULL, 0) < 0) {
+        GuestLog("[guest] macOS ptrace(PT_TRACE_ME) failed: %s\n",
+                 strerror(errno));
+    }
     GuestInstallFaultHandlers();
     return YES;
 #else
