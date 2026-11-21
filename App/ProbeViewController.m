@@ -137,6 +137,20 @@
                           handler:^(__kindof UIAction *action) {
         [weakSelf runApkUpdate];
     }];
+    UIAction *apkUpdateLocal =
+        [UIAction actionWithTitle:@"Run APK Update (local index)"
+                            image:nil
+                       identifier:nil
+                          handler:^(__kindof UIAction *action) {
+        [weakSelf runApkUpdateLocal];
+    }];
+    UIAction *gzipCheck =
+        [UIAction actionWithTitle:@"Run Gzip Check (main index)"
+                            image:nil
+                       identifier:nil
+                          handler:^(__kindof UIAction *action) {
+        [weakSelf runGzipCheck];
+    }];
     UIAction *apkAddBash =
         [UIAction actionWithTitle:@"Install Bash (network)"
                             image:nil
@@ -167,6 +181,7 @@
                                           options:UIMenuOptionsDisplayInline
                                          children:@[alpineBusybox, apk, apkAdd,
                                                     installedHello, apkUpdate,
+                                                    apkUpdateLocal, gzipCheck,
                                                     apkAddBash, bash]];
 
     return [UIMenu menuWithTitle:@"Linux Probe"
@@ -296,18 +311,63 @@
 
 - (void)runApkUpdate
 {
+    /*
+     * Keep apk's normal cache path: apk_cache_download() streams the index
+     * through gunzip + tar + RSA verification before renaming it into
+     * var/cache/apk, and load_index() then parses that cached file.  If the
+     * signature verifies, the network delivered byte-perfect data, which
+     * separates a transport problem from an index-parser problem.
+     */
     [self startGuestNamed:@"Helpers/alpine-apk"
-                arguments:@[ @"apk", @"--no-cache", @"--allow-untrusted",
-                             @"update" ]
-                    label:@"Starting apk --no-cache update..."];
+                arguments:@[ @"apk", @"--allow-untrusted", @"update" ]
+                    label:@"Starting apk update (cached)..."];
+}
+
+- (void)runApkUpdateLocal
+{
+    if (self.running) {
+        [self appendLog:@"another action is still running"];
+        return;
+    }
+    [self beginRunWithLabel:@"Starting apk update (local index)..."];
+
+    self.guestLauncher = [GuestLauncher new];
+    __weak typeof(self) weakSelf = self;
+    self.guestLauncher.logHandler = ^(NSString *line) {
+        [weakSelf appendLog:line];
+    };
+    self.guestLauncher.completionHandler = ^(int status) {
+        [weakSelf endRun];
+    };
+
+    [self.guestLauncher prepareLocalIndexRepositoryAtRoot:[self guestRootPath]];
+    if (![self.guestLauncher runGuestNamed:@"Helpers/alpine-apk"
+                                 arguments:@[ @"apk", @"--allow-untrusted",
+                                              @"--repositories-file",
+                                              @"/var/localrepo/repositories",
+                                              @"update" ]]) {
+        [self endRun];
+    }
+}
+
+- (void)runGzipCheck
+{
+    /*
+     * Alpine's busybox has its own inflate implementation, so this test
+     * exercises the guest read path and heap on the same 8MB of index data
+     * without any of apk's or zlib's buffering.
+     */
+    [self startGuestNamed:@"Helpers/alpine-busybox"
+                arguments:@[ @"busybox", @"gzip", @"-t",
+                             @"/var/cache/apk/APKINDEX.ee34dc71.tar.gz" ]
+                    label:@"Starting busybox gzip -t (main index)..."];
 }
 
 - (void)runApkAddBash
 {
     [self startGuestNamed:@"Helpers/alpine-apk"
-                arguments:@[ @"apk", @"--no-cache", @"--allow-untrusted",
-                             @"add", @"bash" ]
-                    label:@"Starting apk --no-cache add bash..."];
+                arguments:@[ @"apk", @"--allow-untrusted", @"add", @"bash" ]
+                    label:@"Starting apk add bash (cached)..."];
 }
 
 - (void)runBash

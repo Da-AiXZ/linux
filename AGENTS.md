@@ -11,7 +11,7 @@
 guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建 syscall 层。
 不是虚拟机、不是模拟器、不是解释器。
 
-## 当前状态（2026-11-22，0.38.7 / build 82）
+## 当前状态（2026-11-22，0.38.8 / build 83）
 
 - **M0–M2.5 全部真机通过**。0.34.1：`Run Shell` 六条命令（`ls /`、`cat /etc/motd`、
   `uname`、`ls -l /`、`id`、`pwd`）全对，`status=0`；`Run Fork Test` 父子分别输出。
@@ -154,9 +154,27 @@ guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建
   只能真机迭代；该实验也顺带暴露并修掉了上面的 open flag bug。
 - 最新产物：`/workspace/LinuxProbe-0.38.7.ipa`
   sha256 `0f21a3e5b97e5c7e481324d0d2d32ecd22a7bcc4dff128f1206f7690bc8b7db7`
-- **下一步**：真机再跑 `Run APK Update (network)`，这次重点看新日志里的
-  `[guest] svc errors:` 行（哪个 syscall 出错、最后错误值），以及
-  `svc totals` 里 `222/215/216/233` 的调用量。
+- **0.38.7 真机结论**：`svc errors` 里没有任何 `read`/`mmap`/`mremap` 失败，
+  只有预期内的 `connect EINPROGRESS`、`setsockopt ENOPROTOOPT`；main 依旧
+  `IO ERROR`，community 解析 1554 个包后 `database file format error`。
+  历史统计：0.38.4 缓存文件解析到 **5543（完整 main）**，0.38.5 缓存解析到
+  4523，0.38.6 流式到 1083，0.38.7 流式到 1554 —— **失败点随机**，且 0.38.5 的
+  下载环节（tee → gunzip → tar → RSA 签名）是成功的。结论：网络数据本身可信，
+  问题在 guest 侧解析/内存，而不是 TLS 或 socket。
+  0.38.8：`apk update` / `add bash` 回到 apk 正常缓存路径（下载必须通过
+  **RSA 签名校验**才会 rename 进 `var/cache/apk`，等于给下载数据做密码学校验）；
+  运行时按 fd 统计 socket 收发字节（close 时打印 `sock fd=… closed read=… write=…`）、
+  打印大块 `read` 与 socket EOF/错误、`setsockopt` 失败时打印 level/option；
+  App 打印缓存文件 **SHA-256**（CDN 参考：main `c9a6f6d0…`/474417 B，
+  community `2978db48…`/1831492 B）；新增两个离线菜单：
+  `Run APK Update (local index)`（把缓存索引复制成 `file://` 仓库再 update，
+  不经过网络）与 `Run Gzip Check (main index)`（busybox 自带 inflate，独立于 zlib）。
+- **下一步**：真机 0.38.8 依次跑
+  1) `Run APK Update (network)`：看 `sock … closed read=` 的字节数是否 ≥ 压缩包大小、
+     缓存 `sha256` 是否等于 CDN；
+  2) `Run APK Update (local index)`：同样的索引离线解析，重复几次看失败点是否漂移；
+  3) `Run Gzip Check (main index)`：`status=0` 说明 guest 读路径/堆能完整解压 2.2MB。
+  三者组合即可判定是“网络流式读取”还是“解析/内存”问题。
 
 ## 两个仓库
 

@@ -1902,8 +1902,118 @@ static uint32_t GuestSyscallCounts[512];
 static uint32_t GuestSyscallErrorCounts[512];
 static int64_t GuestSyscallLastErrors[512];
 
+/*
+ * Socket accounting.  0.38.7 showed that apk's index download fails after a
+ * random amount of data, so we need to know whether the TLS socket actually
+ * delivered the whole file.  Counts are per guest fd and dumped at exit.
+ */
+#define GUEST_SOCKET_TRACK 64
+typedef struct {
+    int fd;
+    uint64_t readBytes;
+    uint64_t writeBytes;
+} GuestSocketStats;
+
+static GuestSocketStats GuestSocketTable[GUEST_SOCKET_TRACK];
+static int GuestSocketTableCount = 0;
+
+static GuestSocketStats *GuestSocketEntry(int fd, BOOL create)
+{
+    for (int index = 0; index < GuestSocketTableCount; index++) {
+        if (GuestSocketTable[index].fd == fd) {
+            return &GuestSocketTable[index];
+        }
+    }
+    if (!create || GuestSocketTableCount >= GUEST_SOCKET_TRACK) {
+        return NULL;
+    }
+    GuestSocketStats *entry = &GuestSocketTable[GuestSocketTableCount++];
+    entry->fd = fd;
+    entry->readBytes = 0;
+    entry->writeBytes = 0;
+    return entry;
+}
+
+static void GuestTrackSocket(int fd)
+{
+    (void)GuestSocketEntry(fd, YES);
+}
+
+static void GuestDropSocket(int fd)
+{
+    for (int index = 0; index < GuestSocketTableCount; index++) {
+        if (GuestSocketTable[index].fd != fd) {
+            continue;
+        }
+        /* Log now: apk closes the TLS socket long before it exits. */
+        GuestLog("[guest] sock fd=%d closed read=%llu write=%llu\n",
+                 fd,
+                 (unsigned long long)GuestSocketTable[index].readBytes,
+                 (unsigned long long)GuestSocketTable[index].writeBytes);
+        GuestSocketTable[index] = GuestSocketTable[GuestSocketTableCount - 1];
+        GuestSocketTableCount--;
+        return;
+    }
+}
+
+static void GuestAccountSocket(int fd, ssize_t bytes, BOOL writing)
+{
+    if (bytes <= 0) {
+        return;
+    }
+    GuestSocketStats *entry = GuestSocketEntry(fd, NO);
+    if (entry == NULL) {
+        return;
+    }
+    if (writing) {
+        entry->writeBytes += (uint64_t)bytes;
+    } else {
+        entry->readBytes += (uint64_t)bytes;
+    }
+}
+
+static unsigned int GuestReadTraceCount = 0;
+
+static void GuestTraceRead(int fd, uint64_t request, ssize_t result, int error)
+{
+    BOOL socket = GuestSocketEntry(fd, NO) != NULL;
+    if (GuestReadTraceCount >= 96) {
+        return;
+    }
+    /*
+     * For sockets only the end of the stream matters (EOF or error); for
+     * regular files the large reads belong to apk's 128KB index istreams.
+     */
+    if (socket) {
+        if (result > 0) {
+            return;
+        }
+    } else if (result > 0 && request < 65536) {
+        return;
+    }
+    GuestReadTraceCount++;
+    if (result < 0) {
+        GuestLog("[guest] read fd=%d want=0x%llx error=%d\n",
+                 fd,
+                 (unsigned long long)request,
+                 error);
+    } else {
+        GuestLog("[guest] read fd=%d want=0x%llx got=%lld%s\n",
+                 fd,
+                 (unsigned long long)request,
+                 (long long)result,
+                 result == 0 ? (socket ? " (socket eof)" : " (eof)") : "");
+    }
+}
+
 static void GuestLogSyscallStats(void)
 {
+    for (int index = 0; index < GuestSocketTableCount; index++) {
+        GuestLog("[guest] sock fd=%d read=%llu write=%llu\n",
+                 GuestSocketTable[index].fd,
+                 (unsigned long long)GuestSocketTable[index].readBytes,
+                 (unsigned long long)GuestSocketTable[index].writeBytes);
+    }
     GuestLog( "[guest] svc totals:");
     for (int number = 0; number < 512; number++) {
         if (GuestSyscallCounts[number] == 0) {
@@ -1957,13 +2067,32 @@ static uint64_t GuestSyscallDispatchInner(uint64_t *args,
         ssize_t result = write((int)args[0],
                                (const void *)args[1],
                                (size_t)args[2]);
-        return result < 0 ? GuestErrno() : (uint64_t)result;
+        if (result < 0) {
+            int error = errno;
+            if (GuestSocketEntry((int)args[0], NO) != NULL) {
+                GuestLog("[guest] sock fd=%d write error=%d\n",
+                         (int)args[0],
+                         error);
+            }
+            errno = error;
+            return GuestErrno();
+        }
+        GuestAccountSocket((int)args[0], result, YES);
+        return (uint64_t)result;
     }
     case 63: { /* read */
         ssize_t result = read((int)args[0],
                               (void *)args[1],
                               (size_t)args[2]);
-        return result < 0 ? GuestErrno() : (uint64_t)result;
+        if (result < 0) {
+            int error = errno;
+            GuestTraceRead((int)args[0], args[2], -1, error);
+            errno = error;
+            return GuestErrno();
+        }
+        GuestAccountSocket((int)args[0], result, NO);
+        GuestTraceRead((int)args[0], args[2], result, 0);
+        return (uint64_t)result;
     }
     case 65: { /* readv (struct iovec is identical on Darwin) */
         ssize_t result = readv((int)args[0],
@@ -1986,6 +2115,7 @@ static uint64_t GuestSyscallDispatchInner(uint64_t *args,
     }
     case 57: /* close */
         GuestDirCacheDrop((int)args[0]);
+        GuestDropSocket((int)args[0]);
         return close((int)args[0]) == 0 ? 0 : GuestErrno();
     case 93: /* exit */
     case 94: /* exit_group */
@@ -2679,6 +2809,7 @@ static uint64_t GuestSyscallDispatchInner(uint64_t *args,
             return GuestErrno();
         }
         GuestConfigureSocket(descriptor, typeFlags);
+        GuestTrackSocket(descriptor);
         if (socketTrace < 12) {
             socketTrace++;
             GuestLog("[guest] socket family=%llu type=0x%llx -> %d\n",
@@ -2702,6 +2833,8 @@ static uint64_t GuestSyscallDispatchInner(uint64_t *args,
         }
         GuestConfigureSocket(descriptors[0], typeFlags);
         GuestConfigureSocket(descriptors[1], typeFlags);
+        GuestTrackSocket(descriptors[0]);
+        GuestTrackSocket(descriptors[1]);
         if (args[3] != 0) {
             ((int *)(uintptr_t)args[3])[0] = descriptors[0];
             ((int *)(uintptr_t)args[3])[1] = descriptors[1];
@@ -2733,6 +2866,7 @@ static uint64_t GuestSyscallDispatchInner(uint64_t *args,
             return GuestErrno();
         }
         GuestConfigureSocket(descriptor, 0);
+        GuestTrackSocket(descriptor);
         if (args[1] != 0 && args[2] != 0) {
             uint32_t capacity = *(uint32_t *)(uintptr_t)args[2];
             *(uint32_t *)(uintptr_t)args[2] =
@@ -2753,6 +2887,7 @@ static uint64_t GuestSyscallDispatchInner(uint64_t *args,
             return GuestErrno();
         }
         GuestConfigureSocket(descriptor, (int)args[3]);
+        GuestTrackSocket(descriptor);
         if (args[1] != 0 && args[2] != 0) {
             uint32_t capacity = *(uint32_t *)(uintptr_t)args[2];
             *(uint32_t *)(uintptr_t)args[2] =
@@ -2838,7 +2973,11 @@ static uint64_t GuestSyscallDispatchInner(uint64_t *args,
                                 GuestToHostMessageFlags((int)args[3]),
                                 target,
                                 length);
-        return result < 0 ? GuestErrno() : (uint64_t)result;
+        if (result < 0) {
+            return GuestErrno();
+        }
+        GuestAccountSocket((int)args[0], result, YES);
+        return (uint64_t)result;
     }
     case 207: { /* recvfrom */
         struct sockaddr_storage address;
@@ -2850,8 +2989,12 @@ static uint64_t GuestSyscallDispatchInner(uint64_t *args,
                                   (struct sockaddr *)&address,
                                   &length);
         if (result < 0) {
+            int error = errno;
+            GuestLog("[guest] recvfrom fd=%d error=%d\n", (int)args[0], error);
+            errno = error;
             return GuestErrno();
         }
+        GuestAccountSocket((int)args[0], result, NO);
         if (args[4] != 0 && args[5] != 0) {
             uint32_t capacity = *(uint32_t *)(uintptr_t)args[5];
             *(uint32_t *)(uintptr_t)args[5] =
@@ -2879,17 +3022,35 @@ static uint64_t GuestSyscallDispatchInner(uint64_t *args,
             struct timeval value;
             value.tv_sec = (time_t)input[0];
             value.tv_usec = (suseconds_t)input[1];
-            return setsockopt((int)args[0],
-                              hostLevel,
-                              hostOption,
-                              &value,
-                              (socklen_t)sizeof(value)) == 0 ? 0 : GuestErrno();
+            if (setsockopt((int)args[0],
+                           hostLevel,
+                           hostOption,
+                           &value,
+                           (socklen_t)sizeof(value)) != 0) {
+                int error = errno;
+                GuestLog("[guest] setsockopt fd=%d level=%d opt=%d "
+                         "hostLevel=%d hostOpt=%d error=%d\n",
+                         (int)args[0], level, option,
+                         hostLevel, hostOption, error);
+                errno = error;
+                return GuestErrno();
+            }
+            return 0;
         }
-        return setsockopt((int)args[0],
-                          hostLevel,
-                          hostOption,
-                          (const void *)(uintptr_t)args[3],
-                          (socklen_t)args[4]) == 0 ? 0 : GuestErrno();
+        if (setsockopt((int)args[0],
+                       hostLevel,
+                       hostOption,
+                       (const void *)(uintptr_t)args[3],
+                       (socklen_t)args[4]) != 0) {
+            int error = errno;
+            GuestLog("[guest] setsockopt fd=%d level=%d opt=%d "
+                     "hostLevel=%d hostOpt=%d error=%d\n",
+                     (int)args[0], level, option,
+                     hostLevel, hostOption, error);
+            errno = error;
+            return GuestErrno();
+        }
+        return 0;
     }
     case 209: { /* getsockopt */
         int level = (int)args[1];
@@ -2968,7 +3129,11 @@ static uint64_t GuestSyscallDispatchInner(uint64_t *args,
         ssize_t result = sendmsg((int)args[0],
                                  &message,
                                  GuestToHostMessageFlags((int)args[2]));
-        return result < 0 ? GuestErrno() : (uint64_t)result;
+        if (result < 0) {
+            return GuestErrno();
+        }
+        GuestAccountSocket((int)args[0], result, YES);
+        return (uint64_t)result;
     }
     case 212: { /* recvmsg */
         GuestMessageHeader *guest =
@@ -2987,8 +3152,12 @@ static uint64_t GuestSyscallDispatchInner(uint64_t *args,
                                  &message,
                                  GuestToHostMessageFlags((int)args[2]));
         if (result < 0) {
+            int error = errno;
+            GuestLog("[guest] recvmsg fd=%d error=%d\n", (int)args[0], error);
+            errno = error;
             return GuestErrno();
         }
+        GuestAccountSocket((int)args[0], result, NO);
         if (guest->name != NULL) {
             guest->nameLength =
                 GuestFromHostSockaddr((struct sockaddr *)&address,

@@ -5,6 +5,7 @@
 #import <mach/thread_act.h>
 #import <mach/thread_status.h>
 #import <mach/vm_map.h>
+#import <CommonCrypto/CommonDigest.h>
 #import <signal.h>
 #import <spawn.h>
 #import <string.h>
@@ -68,7 +69,9 @@ extern char **environ;
  * apk keeps its downloaded indexes under <rootfs>/var/cache/apk.  The
  * 0.38.5 device log showed a successful download followed by an "IO ERROR"
  * when the cached copy was read back, so dump enough of each file to tell a
- * truncated download (size/magic) from a valid one.
+ * truncated download (size/magic) from a valid one.  The SHA-256 answers the
+ * remaining question -- did the network deliver exactly the CDN bytes --
+ * because the indexes are static for weeks at a time.
  */
 - (void)logCacheStateAtRoot:(NSString *)rootPath
 {
@@ -100,11 +103,76 @@ extern char **environ;
                     [tail appendFormat:@"%02x", bytes[index]];
                 }
             }
+            NSMutableString *digest = [NSMutableString string];
+            unsigned char hash[CC_SHA256_DIGEST_LENGTH];
+            if (data.length != 0 &&
+                CC_SHA256(data.bytes, (CC_LONG)data.length, hash) != NULL) {
+                for (int index = 0; index < CC_SHA256_DIGEST_LENGTH; index++) {
+                    [digest appendFormat:@"%02x", hash[index]];
+                }
+            }
             [self log:[NSString stringWithFormat:
-                @"cache %@/%@ size=%llu head=%@ tail=%@",
-                relative, entry, size, head, tail]];
+                @"cache %@/%@ size=%llu head=%@ tail=%@ sha256=%@",
+                relative, entry, size, head, tail, digest]];
         }
     }
+}
+
+/*
+ * The cache file names are derived from the repository URL
+ * (APKINDEX.<first 4 bytes of SHA-1(url) hex>.tar.gz), so the two Alpine
+ * repositories always map to the names below.  Copying them into a
+ * file:// repository lets us run "apk update" with the exact same bytes but
+ * no network, which separates a stream/TLS problem from a parser problem.
+ */
+- (BOOL)prepareLocalIndexRepositoryAtRoot:(NSString *)rootPath
+{
+    NSFileManager *manager = [NSFileManager defaultManager];
+    NSString *cache = [rootPath stringByAppendingPathComponent:@"var/cache/apk"];
+    NSArray<NSArray<NSString *> *> *repositories = @[
+        @[ @"ee34dc71", @"main" ],
+        @[ @"7db31bb6", @"community" ],
+    ];
+
+    BOOL ready = YES;
+    NSMutableString *list = [NSMutableString string];
+    for (NSArray<NSString *> *repository in repositories) {
+        NSString *name = [NSString stringWithFormat:
+            @"APKINDEX.%@.tar.gz", repository[0]];
+        NSString *tag = repository[1];
+        NSString *source = [cache stringByAppendingPathComponent:name];
+        NSString *directory = [[rootPath stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"var/localrepo/%@/aarch64", tag]]
+            copy];
+        NSString *target = [directory stringByAppendingPathComponent:
+            @"APKINDEX.tar.gz"];
+        [manager createDirectoryAtPath:directory
+           withIntermediateDirectories:YES
+                            attributes:nil
+                                 error:NULL];
+        [manager removeItemAtPath:target error:NULL];
+        BOOL copied = [manager copyItemAtPath:source
+                                       toPath:target
+                                        error:NULL];
+        NSDictionary *attributes =
+            [manager attributesOfItemAtPath:target error:NULL];
+        [self log:[NSString stringWithFormat:
+            @"localrepo %@ %@ size=%@", tag,
+            copied ? @"ready" : @"missing source",
+            attributes[NSFileSize] ?: @0]];
+        if (!copied) {
+            ready = NO;
+        }
+        [list appendFormat:@"file:///var/localrepo/%@\n", tag];
+    }
+
+    NSString *listPath = [rootPath stringByAppendingPathComponent:
+        @"var/localrepo/repositories"];
+    [list writeToFile:listPath
+           atomically:YES
+             encoding:NSUTF8StringEncoding
+                error:NULL];
+    return ready;
 }
 
 - (BOOL)runBundledGuest
