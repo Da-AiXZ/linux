@@ -15,7 +15,7 @@
 | M2 真实 busybox | 🚧 static-PIE busybox 已能加载（`patched=297`），正在解决 glibc 启动阶段的问题 |
 | M3 Alpine / Debian rootfs | ⏳ |
 
-最新版本 **0.22.0 (37)**。项目上下文、决策和路线记录在
+最新版本 **0.23.0 (38)**。项目上下文、决策和路线记录在
 [Da-AiXZ/linux-workspace](https://github.com/Da-AiXZ/linux-workspace)（私有）。
 
 ## 工作原理
