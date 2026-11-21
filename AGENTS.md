@@ -11,7 +11,7 @@
 guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建 syscall 层。
 不是虚拟机、不是模拟器、不是解释器。
 
-## 当前状态（2026-11-22，0.38.8 / build 83）
+## 当前状态（2026-11-22，0.38.9 / build 84）
 
 - **M0–M2.5 全部真机通过**。0.34.1：`Run Shell` 六条命令（`ls /`、`cat /etc/motd`、
   `uname`、`ls -l /`、`id`、`pwd`）全对，`status=0`；`Run Fork Test` 父子分别输出。
@@ -169,12 +169,34 @@ guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建
   community `2978db48…`/1831492 B）；新增两个离线菜单：
   `Run APK Update (local index)`（把缓存索引复制成 `file://` 仓库再 update，
   不经过网络）与 `Run Gzip Check (main index)`（busybox 自带 inflate，独立于 zlib）。
-- **下一步**：真机 0.38.8 依次跑
-  1) `Run APK Update (network)`：看 `sock … closed read=` 的字节数是否 ≥ 压缩包大小、
-     缓存 `sha256` 是否等于 CDN；
-  2) `Run APK Update (local index)`：同样的索引离线解析，重复几次看失败点是否漂移；
-  3) `Run Gzip Check (main index)`：`status=0` 说明 guest 读路径/堆能完整解压 2.2MB。
-  三者组合即可判定是“网络流式读取”还是“解析/内存”问题。
+- **0.38.8 真机结论（关键）**：三路取证一次把范围缩小了：
+  1. 缓存文件 SHA-256 与 CDN **完全相同**（main `c9a6f6d0…` 474417 B，
+     community `2978db48…` 1831492 B）→ 下载/TLS 完全没有问题；
+  2. `Run Gzip Check`（busybox 自带 inflate）对索引 `status=0` → guest 读路径与堆
+     能完整解压数 MB；
+  3. `Run APK Update (local index)`（file:// 仓库、零网络）：main 每次都成功，
+     **community 每次都 EIO**；两次运行分别解析到 10541 / 24049 个包
+     （24049 = 5543 + 18506，即第二次全部解析完才报错）→ 失败点漂移。
+  对照实验：同一份 apk 2.14.4 + 同两个索引文件在 x86_64 Linux 上
+  `apk --allow-untrusted --repositories-file … update` = `OK: 24049`、`status=0`。
+  **结论：apk 与数据都正确，guest 侧内存在解析过程中被破坏**（EIO 只可能来自
+  `io_gunzip.c` 的 `inflate` 默认分支）。
+  日志里还暴露一个真实 bug：`mmap records full, leaking` 刷了 2422 行。根因是
+  mallocng 只按 4KB 粒度要/还内存，而 Darwin 内核按 16KB 取整；`munmap` 后
+  `GuestForgetMmap` 用的是 guest 的 4KB 长度，记录只被“裁短”而不是删除，
+  每次释放留下最多 12KB 残留记录，最终撑满 4096 条表项。
+- 0.38.9：`GuestHandleMunmap` 按宿主页取整后的有效区间去 `GuestForgetMmap`
+  （消除残留记录）；新增两类内存破坏探针：
+  ① 每个 ≥64KB 匿名映射在 `align4k(requested)` 之后的宿主页空隙写 canary，
+  在 `munmap`/`mremap`/进程退出时校验；
+  ② 每次 ≥64KB 的 `read` 后按 4KB 页做 FNV 哈希，在下一次同缓冲 `read`、
+  `close`、退出时重算并打印**发生变化的页号**（对应 apk 128KB istream 缓冲的偏移）。
+  任一探针命中会打印 `mmap slack overwritten` / `read buffer check … changed= N+0x…`。
+- **下一步**：真机 0.38.9 跑 `Run APK Update (local index)`（可连跑两次）+
+  `Run Gzip Check (community index)`。若出现 `read buffer check` 且页号固定，
+  直接说明是谁在写 apk 的输入缓冲；若 canary 命中则说明有人越界写映射末尾；
+  若两者都干净，则破坏点在 zlib 自身的小块状态（下一步给 inflate_state/
+  32KB window 单独建映射并加 guards）。
 
 ## 两个仓库
 
