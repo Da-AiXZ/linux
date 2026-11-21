@@ -1,10 +1,23 @@
 #import "GuestLauncher.h"
 
+#import <mach/arm/thread_status.h>
+#import <mach/mach.h>
+#import <mach/thread_act.h>
+#import <mach/thread_status.h>
+#import <mach/vm_map.h>
+#import <signal.h>
 #import <spawn.h>
+#import <string.h>
 #import <sys/wait.h>
 #import <unistd.h>
 
 extern char **environ;
+
+@interface GuestLauncher ()
+
+- (void)dumpThreadsOfGuest:(pid_t)pid;
+
+@end
 
 @implementation GuestLauncher
 
@@ -91,7 +104,10 @@ extern char **environ;
     [self log:[NSString stringWithFormat:@"guest runner pid=%d", pid]];
 
     int readFD = fds[0];
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+    dispatch_queue_t queue =
+        dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
+
+    dispatch_async(queue, ^{
         NSMutableData *buffer = [NSMutableData data];
         uint8_t chunk[4096];
 
@@ -108,9 +124,38 @@ extern char **environ;
             break;
         }
         close(readFD);
+    });
 
+    /*
+     * guest-runner 用 PT_TRACE_ME 换 CS_DEBUGGED，所以它处于被调试状态：
+     * 任何致命信号都会让整个任务停住等调试器，它自己的 signal handler 和
+     * watchdog 都不会跑。这里必须由父进程（本 App）以 WUNTRACED 收停止
+     * 事件，再从宿主侧读取线程现场，然后杀掉它。
+     */
+    dispatch_async(queue, ^{
         int status = 0;
-        waitpid(pid, &status, 0);
+        for (;;) {
+            pid_t waited = waitpid(pid, &status, WUNTRACED);
+            if (waited < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                [self log:[NSString stringWithFormat:@"guest waitpid failed: %s",
+                           strerror(errno)]];
+                status = 0;
+                break;
+            }
+
+            if (WIFSTOPPED(status)) {
+                [self log:[NSString stringWithFormat:@"guest stopped: signal=%d",
+                           WSTOPSIG(status)]];
+                [self dumpThreadsOfGuest:pid];
+                kill(pid, SIGKILL);
+                continue;
+            }
+            break;
+        }
+
         if (WIFEXITED(status)) {
             [self log:[NSString stringWithFormat:@"guest exited: status=%d",
                        WEXITSTATUS(status)]];
@@ -130,6 +175,55 @@ extern char **environ;
     });
 
     return YES;
+}
+
+- (void)dumpThreadsOfGuest:(pid_t)pid
+{
+    mach_port_t task = MACH_PORT_NULL;
+    kern_return_t result = task_for_pid(mach_task_self(), pid, &task);
+    if (result != KERN_SUCCESS) {
+        [self log:[NSString stringWithFormat:@"guest task_for_pid=%d", result]];
+        return;
+    }
+
+    thread_act_array_t threads = NULL;
+    mach_msg_type_number_t count = 0;
+    result = task_threads(task, &threads, &count);
+    if (result != KERN_SUCCESS) {
+        [self log:[NSString stringWithFormat:@"guest task_threads=%d", result]];
+        mach_port_deallocate(mach_task_self(), task);
+        return;
+    }
+
+    for (mach_msg_type_number_t index = 0; index < count; index++) {
+        arm_thread_state64_t state;
+        mach_msg_type_number_t stateCount = ARM_THREAD_STATE64_COUNT;
+        kern_return_t stateResult = thread_get_state(threads[index],
+                                                     ARM_THREAD_STATE64,
+                                                     (thread_state_t)&state,
+                                                     &stateCount);
+        if (stateResult == KERN_SUCCESS) {
+            [self log:[NSString stringWithFormat:
+                @"guest thread %u pc=0x%llx lr=0x%llx sp=0x%llx fp=0x%llx "
+                @"x0=0x%llx x8=0x%llx",
+                (unsigned)index,
+                (unsigned long long)state.__pc,
+                (unsigned long long)state.__lr,
+                (unsigned long long)state.__sp,
+                (unsigned long long)state.__fp,
+                (unsigned long long)state.__x[0],
+                (unsigned long long)state.__x[8]]];
+        } else {
+            [self log:[NSString stringWithFormat:@"guest thread %u state=%d",
+                       (unsigned)index, stateResult]];
+        }
+        mach_port_deallocate(mach_task_self(), threads[index]);
+    }
+
+    vm_deallocate(mach_task_self(),
+                  (vm_address_t)threads,
+                  count * sizeof(thread_act_t));
+    mach_port_deallocate(mach_task_self(), task);
 }
 
 - (void)drain:(NSMutableData *)buffer
