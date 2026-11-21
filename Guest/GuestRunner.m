@@ -888,6 +888,18 @@ static void GuestInstallAlpineRuntime(NSString *directory)
     NSUInteger copied = 0;
     for (NSString *relative in enumerator) {
         NSString *from = [source stringByAppendingPathComponent:relative];
+        /*
+         * enumeratorAtPath: also yields directories.  Copying one with
+         * copyItemAtPath: would replace the whole destination directory and
+         * delete rootfs files that were not in the bundle (this is how 0.38.0
+         * lost /etc/apk/arch and /etc/resolv.conf).  Only copy leaves;
+         * parent directories are created below.
+         */
+        BOOL relativeIsDirectory = NO;
+        if ([manager fileExistsAtPath:from isDirectory:&relativeIsDirectory] &&
+            relativeIsDirectory) {
+            continue;
+        }
         NSString *to = [destination stringByAppendingPathComponent:relative];
         [manager createDirectoryAtPath:[to stringByDeletingLastPathComponent]
            withIntermediateDirectories:YES
