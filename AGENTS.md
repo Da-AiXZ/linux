@@ -65,10 +65,10 @@ App 日志的关键行含义见工作区 `AGENTS.md` 第 6 节。
 
 ## 当前优先级
 
-1. 0.17.0 真机验证：应出现 `guest stopped: signal=11` + `guest thread N pc=…` + `guest signalled: signal=9`；
-   用 `pc - base` 定位 glibc 死点。
-2. 若 App 的 `waitpid(WUNTRACED)` 收不到停止事件，改在 App 里 `ptrace(PT_ATTACHEXC)` + Mach 异常（跨进程调试器）。
-3. 若 glibc static-PIE 启动仍不通，改用 musl static-PIE（Alpine 工具链）。
+1. 0.18.0 真机验证：看 `[guest] tpidr probe` 与 `svc … tpidr=…`，确认 TPIDR_EL0 写入是否生效、
+   是否能活过一次 syscall；停止现场的 `x4`（PIE）/`x0`（busybox）与 `far` 给出故障时的 TP 值。
+2. 若 TPIDR_EL0 不可用（写入不生效或被内核重置），改写 guest 的 `msr/mrs tpidr_el0`（影子变量模拟）。
+3. 若 TP 正常但值无效，回头查 `__libc_setup_tls` 的分配路径（brk/mmap 语义）。
 4. 之后补文件类 syscall + rootfs 路径映射（见工作区 `docs/ROADMAP.md` M2.2）。
 
 ## 不要做
