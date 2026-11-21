@@ -74,7 +74,13 @@ extern char **environ;
     NSString *bundle = NSBundle.mainBundle.bundlePath;
     NSString *runner = [bundle stringByAppendingPathComponent:
         @"Helpers/guest-runner"];
-    NSString *guest = [bundle stringByAppendingPathComponent:relativePath];
+    /*
+     * Most actions pass a bundle-relative path.  "Run Installed Hello" passes
+     * an absolute host path inside the guest rootfs instead.
+     */
+    NSString *guest = [relativePath isAbsolutePath]
+        ? relativePath
+        : [bundle stringByAppendingPathComponent:relativePath];
 
     NSFileManager *manager = [NSFileManager defaultManager];
     if (![manager isExecutableFileAtPath:runner]) {

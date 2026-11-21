@@ -123,6 +123,13 @@
                                         handler:^(__kindof UIAction *action) {
         [weakSelf runApkAdd];
     }];
+    UIAction *installedHello =
+        [UIAction actionWithTitle:@"Run Installed Hello"
+                            image:nil
+                       identifier:nil
+                          handler:^(__kindof UIAction *action) {
+        [weakSelf runInstalledHello];
+    }];
 
     UIMenu *probeSection = [UIMenu menuWithTitle:@""
                                            image:nil
@@ -138,7 +145,8 @@
                                             image:nil
                                        identifier:nil
                                           options:UIMenuOptionsDisplayInline
-                                         children:@[alpineBusybox, apk, apkAdd]];
+                                         children:@[alpineBusybox, apk, apkAdd,
+                                                    installedHello]];
 
     return [UIMenu menuWithTitle:@"Linux Probe"
                        children:@[probeSection, staticSection, alpineSection]];
@@ -254,17 +262,39 @@
 - (void)runApkAdd
 {
     /*
-     * Use the static busybox as the parent: a dynamic image cannot fork yet
-     * (fork snapshots only support static images), so the Alpine busybox
-     * shell would fail with "can't fork".  The child then execs the dynamic
-     * /sbin/apk, which exercises the dynamic loader too.
+     * Run apk directly instead of through a guest shell.  A fork from a
+     * restored child is still fragile (dynamic fork is unsupported and the
+     * base scan can collide with the restored heap), and apk only needs to
+     * install the local package here.
      */
-    NSString *command =
-        @"apk add --allow-untrusted /tmp/hello.apk; echo '--- hello'; "
-         "/usr/bin/hello";
-    [self startGuestNamed:@"Helpers/busybox"
-                arguments:@[ @"busybox", @"sh", @"-c", command ]
+    [self startGuestNamed:@"Helpers/alpine-apk"
+                arguments:@[ @"apk", @"add", @"--allow-untrusted",
+                             @"/tmp/hello.apk" ]
                     label:@"Starting apk add --allow-untrusted /tmp/hello.apk..."];
+}
+
+- (NSString *)guestRootPath
+{
+    NSString *temporary = NSTemporaryDirectory();
+    NSString *documents = nil;
+    if ([temporary containsString:@"/Containers/Data/Application/"]) {
+        documents = [[temporary stringByDeletingLastPathComponent]
+            stringByAppendingPathComponent:@"Documents"];
+    }
+    if (documents.length == 0) {
+        documents = NSSearchPathForDirectoriesInDomains(
+            NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+    }
+    return [documents stringByAppendingPathComponent:@"rootfs"];
+}
+
+- (void)runInstalledHello
+{
+    NSString *hello = [[self guestRootPath]
+        stringByAppendingPathComponent:@"usr/bin/hello"];
+    [self startGuestNamed:hello
+                arguments:@[ @"hello" ]
+                    label:@"Starting installed /usr/bin/hello..."];
 }
 
 - (void)startGuestNamed:(NSString *)relativePath
