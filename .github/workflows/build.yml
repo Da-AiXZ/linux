@@ -1,0 +1,158 @@
+name: build
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain info
+        run: |
+          xcodebuild -version
+          xcode-select -p
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Install signing tool
+        run: brew install ldid || true
+
+      - name: Fetch Alpine runtime
+        run: |
+          set -eux
+          curl -fsSL -o /tmp/alpine-minirootfs.tar.gz \
+            https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/aarch64/alpine-minirootfs-3.20.3-aarch64.tar.gz
+          mkdir -p /tmp/alpine-rootfs
+          tar -xzf /tmp/alpine-minirootfs.tar.gz -C /tmp/alpine-rootfs
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Build
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project LinuxProbe.xcodeproj \
+            -scheme Probe \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package IPA
+        run: |
+          set -eux
+          APP="build/Build/Products/Release-iphoneos/Probe.app"
+          HELPER="build/Build/Products/Release-iphoneos/probe-helper"
+          GUEST="build/Build/Products/Release-iphoneos/guest-runner"
+          test -d "$APP"
+          test -f "$HELPER"
+          test -f "$GUEST"
+          mkdir -p "$APP/Helpers"
+          cp "$HELPER" "$APP/Helpers/probe-helper"
+          cp "$HELPER" "$APP/Helpers/probe-helper.dat"
+          cp "$GUEST" "$APP/Helpers/guest-runner"
+          cp Tools/busybox.static "$APP/Helpers/busybox"
+          cp Tools/pie-hello "$APP/Helpers/pie-hello"
+          mkdir -p "$APP/Helpers/alpine/lib"
+          cp /tmp/alpine-rootfs/lib/ld-musl-aarch64.so.1 \
+             "$APP/Helpers/alpine/lib/ld-musl-aarch64.so.1"
+          cp /tmp/alpine-rootfs/lib/ld-musl-aarch64.so.1 \
+             "$APP/Helpers/alpine/lib/libc.musl-aarch64.so.1"
+          cp /tmp/alpine-rootfs/lib/libapk.so.2.14.0 \
+             "$APP/Helpers/alpine/lib/libapk.so.2.14.0"
+          cp /tmp/alpine-rootfs/lib/libcrypto.so.3 \
+             "$APP/Helpers/alpine/lib/libcrypto.so.3"
+          cp /tmp/alpine-rootfs/lib/libssl.so.3 \
+             "$APP/Helpers/alpine/lib/libssl.so.3"
+          cp /tmp/alpine-rootfs/lib/libz.so.1.3.1 \
+             "$APP/Helpers/alpine/lib/libz.so.1"
+          cp /tmp/alpine-rootfs/sbin/apk "$APP/Helpers/alpine-apk"
+          cp /tmp/alpine-rootfs/bin/busybox "$APP/Helpers/alpine-busybox"
+          chmod 755 "$APP/Helpers/probe-helper"
+          chmod 644 "$APP/Helpers/probe-helper.dat"
+          chmod 755 "$APP/Helpers/guest-runner"
+          chmod 755 "$APP/Helpers/busybox"
+          chmod 755 "$APP/Helpers/pie-hello"
+          chmod 755 "$APP/Helpers/alpine-apk" "$APP/Helpers/alpine-busybox"
+          python3 tools/make_guest_elf.py "$APP/guest-hello.elf"
+          python3 tools/make_fork_elf.py "$APP/fork-test.elf"
+          rm -rf Payload PayloadUnsigned LinuxProbe.ipa LinuxProbe-unsigned.ipa
+          mkdir Payload
+          mkdir -p PayloadUnsigned/Payload
+          ditto "$APP" "Payload/Probe.app"
+          ditto "$APP" "PayloadUnsigned/Payload/Probe.app"
+
+          # Unsigned variant: let TrollStore perform the complete signature
+          # pass if the pre-signed appex is rejected by PlugInKit.
+          (cd PayloadUnsigned && /usr/bin/zip -r -y ../LinuxProbe-unsigned.ipa Payload)
+
+          # Best-effort signing with the probe entitlements. TrollStore
+          # re-signs on install; keeping the entitlements embedded makes the
+          # probe meaningful when it is installed through TrollStore.
+          if command -v ldid >/dev/null 2>&1; then
+            ldid -SApp/Probe.entitlements "Payload/Probe.app/Probe" \
+              || codesign --force --sign - --entitlements App/Probe.entitlements \
+                   "Payload/Probe.app/Probe" || true
+            ldid -SLiveProcess/LiveProcess.entitlements \
+              "Payload/Probe.app/PlugIns/LiveProcess.appex/LiveProcess" \
+              || codesign --force --sign - \
+                   --entitlements LiveProcess/LiveProcess.entitlements \
+                   "Payload/Probe.app/PlugIns/LiveProcess.appex/LiveProcess" || true
+            ldid -SHelper/ProbeHelper.entitlements \
+              "Payload/Probe.app/Helpers/probe-helper" \
+              || codesign --force --sign - \
+                   --entitlements Helper/ProbeHelper.entitlements \
+                   "Payload/Probe.app/Helpers/probe-helper" || true
+            ldid -SHelper/ProbeHelper.entitlements \
+              "Payload/Probe.app/Helpers/probe-helper.dat" \
+              || codesign --force --sign - \
+                   --entitlements Helper/ProbeHelper.entitlements \
+                   "Payload/Probe.app/Helpers/probe-helper.dat" || true
+            ldid -SGuest/GuestRunner.entitlements \
+              "Payload/Probe.app/Helpers/guest-runner" \
+              || codesign --force --sign - \
+                   --entitlements Guest/GuestRunner.entitlements \
+                   "Payload/Probe.app/Helpers/guest-runner" || true
+          else
+            codesign --force --sign - --entitlements App/Probe.entitlements \
+              "Payload/Probe.app/Probe" || true
+            codesign --force --sign - \
+              --entitlements LiveProcess/LiveProcess.entitlements \
+              "Payload/Probe.app/PlugIns/LiveProcess.appex/LiveProcess" || true
+            codesign --force --sign - \
+              --entitlements Helper/ProbeHelper.entitlements \
+              "Payload/Probe.app/Helpers/probe-helper" || true
+            codesign --force --sign - \
+              --entitlements Helper/ProbeHelper.entitlements \
+              "Payload/Probe.app/Helpers/probe-helper.dat" || true
+            codesign --force --sign - \
+              --entitlements Guest/GuestRunner.entitlements \
+              "Payload/Probe.app/Helpers/guest-runner" || true
+          fi
+          codesign --force --sign - \
+            --entitlements LiveProcess/LiveProcess.entitlements \
+            "Payload/Probe.app/PlugIns/LiveProcess.appex" || true
+          codesign --force --sign - \
+            --entitlements App/Probe.entitlements \
+            "Payload/Probe.app" || true
+
+          /usr/bin/zip -r -y LinuxProbe.ipa Payload
+
+      - name: Upload IPAs
+        uses: actions/upload-artifact@v4
+        with:
+          name: LinuxProbe-ipas
+          path: LinuxProbe*.ipa
+          if-no-files-found: error
