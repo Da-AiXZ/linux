@@ -765,17 +765,37 @@ static uint32_t GuestEncodeAdrp(uint32_t rd, uintptr_t from, uintptr_t to)
     return 0x90000000U | (immlo << 29) | (immhi << 5) | rd;
 }
 
+static uint32_t GuestEncodeStpPre(uint32_t rt, uint32_t rt2)
+{
+    return 0xA9800000U | (0x7EU << 15) | (rt2 << 10) | (31U << 5) | rt;
+}
+
+static uint32_t GuestEncodeLdpPost(uint32_t rt, uint32_t rt2)
+{
+    return 0xA8C00000U | (2U << 15) | (rt2 << 10) | (31U << 5) | rt;
+}
+
+void GuestTlsWriteLog(uint64_t value, uint64_t returnAddress)
+{
+    GuestTlsPointer = value;
+    fprintf(stdout,
+            "[guest] tls write value=0x%llx site=0x%llx\n",
+            (unsigned long long)value,
+            (unsigned long long)(returnAddress - 4));
+    fflush(stdout);
+}
+
 /*
  * TPIDR_EL0 cannot be trusted here: XNU resets it to its own value (0x4)
  * on some kernel returns, so a guest TLS pointer written by glibc is gone
  * before the next TLS access.  Emulate it in a shadow variable instead:
  *
  *   mrs xN, tpidr_el0 -> bl readStub[N]  (xN = GuestTlsPointer)
- *   msr tpidr_el0, xN -> bl writeStub[N] (GuestTlsPointer = xN)
+ *   msr tpidr_el0, xN -> bl writeStub[N] (GuestTlsPointer = xN, logged)
  *
  * Stubs only touch x30 (saved on the stack) and xN.
  */
-static void GuestEmitTlsStub(uint8_t *stub, BOOL isWrite, uint32_t rt)
+static void GuestEmitTlsReadStub(uint8_t *stub, uint32_t rt)
 {
     uintptr_t shadow = (uintptr_t)&GuestTlsPointer;
     uint32_t pageOffset = (uint32_t)(shadow & 0xFFF);
@@ -783,12 +803,41 @@ static void GuestEmitTlsStub(uint8_t *stub, BOOL isWrite, uint32_t rt)
 
     code[0] = 0xF81F0FFEU; /* str x30, [sp, #-16]! */
     code[1] = GuestEncodeAdrp(30, (uintptr_t)stub, shadow);
-    code[2] = (isWrite ? 0xF9000000U : 0xF9400000U) |
+    code[2] = 0xF9400000U |
               ((pageOffset / 8) << 10) |
               (30U << 5) |
               rt;
     code[3] = 0xF84107FEU; /* ldr x30, [sp], #16 */
     code[4] = 0xD65F03C0U; /* ret */
+}
+
+static void GuestEmitTlsWriteStub(uint8_t *stub, uint32_t rt)
+{
+    uint32_t *code = (uint32_t *)stub;
+    size_t index = 0;
+
+    code[index++] = 0xF81F0FFEU; /* str x30, [sp, #-16]! */
+    for (uint32_t pair = 28; pair >= 2; pair -= 2) {
+        code[index++] = GuestEncodeStpPre(pair, pair + 1);
+    }
+    code[index++] = 0xD53B4209U; /* mrs x9, nzcv */
+    code[index++] = 0xF81F0FE9U; /* str x9, [sp, #-16]! */
+
+    code[index++] = 0xAA1E03E1U; /* mov x1, x30 */
+    code[index++] = 0xAA0003E0U | rt; /* mov x0, x<rt> */
+    code[index++] = GuestEncodeAdrp(16, (uintptr_t)stub,
+                                    (uintptr_t)&GuestTlsWriteLog);
+    code[index++] = 0x91000210U |
+                    (((uintptr_t)&GuestTlsWriteLog & 0xFFF) << 10);
+    code[index++] = 0xD63F0200U; /* blr x16 */
+
+    code[index++] = 0xF84107E9U; /* ldr x9, [sp], #16 */
+    code[index++] = 0xD51B4209U; /* msr nzcv, x9 */
+    for (uint32_t pair = 0; pair <= 26; pair += 2) {
+        code[index++] = GuestEncodeLdpPost(pair, pair + 1);
+    }
+    code[index++] = 0xF84107FEU; /* ldr x30, [sp], #16 */
+    code[index++] = 0xD65F03C0U; /* ret */
 }
 
 static uintptr_t GuestMapStub(uintptr_t imageStart,
@@ -833,22 +882,30 @@ static uintptr_t GuestMapStub(uintptr_t imageStart,
 
         for (uint32_t rt = 0; rt < GUEST_TLS_STUB_COUNT; rt++) {
             uint8_t *readStub = page + 0x400 + rt * 32;
-            uint8_t *writeStub = page + 0x800 + rt * 32;
-            GuestEmitTlsStub(readStub, NO, rt);
-            GuestEmitTlsStub(writeStub, YES, rt);
+            uint8_t *writeStub = page + 0x800 + rt * 0xB0;
+            GuestEmitTlsReadStub(readStub, rt);
+            GuestEmitTlsWriteStub(writeStub, rt);
             GuestTlsReadStubs[rt] = (uintptr_t)readStub;
             GuestTlsWriteStubs[rt] = (uintptr_t)writeStub;
         }
 
-        sys_icache_invalidate(page, 0x1000);
+        sys_icache_invalidate(page, 0x2000);
         mprotect(page, 0x4000, PROT_READ | PROT_EXEC);
 
+        const uint32_t *readStub =
+            (const uint32_t *)GuestTlsReadStubs[0];
         const uint32_t *writeStub =
             (const uint32_t *)GuestTlsWriteStubs[19];
         fprintf(stdout,
-                "[guest] tls stubs: read0=0x%lx write19=0x%lx "
-                "code=%08x %08x %08x %08x %08x\n",
+                "[guest] tls stubs: read0=0x%lx code=%08x %08x %08x %08x %08x\n",
                 (unsigned long)GuestTlsReadStubs[0],
+                readStub[0],
+                readStub[1],
+                readStub[2],
+                readStub[3],
+                readStub[4]);
+        fprintf(stdout,
+                "[guest] tls stubs: write19=0x%lx code=%08x %08x %08x %08x %08x\n",
                 (unsigned long)GuestTlsWriteStubs[19],
                 writeStub[0],
                 writeStub[1],
