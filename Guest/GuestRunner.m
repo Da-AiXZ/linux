@@ -228,7 +228,8 @@ static void GuestSyscallTrampoline(void)
     /*
      * Linux preserves every register except x0 across a syscall, and
      * glibc relies on that (e.g. __sbrk issues two brk svcs and only
-     * sets x8 once). Save and restore x1-x17 around the C dispatch.
+     * sets x8 once). It also preserves TPIDR_EL0 and NZCV, which the
+     * Darwin host runtime may otherwise change under us.
      */
     __asm__ volatile(
         "stp x29, x30, [sp, #-16]!\n"
@@ -241,10 +242,18 @@ static void GuestSyscallTrampoline(void)
         "stp x4, x5, [sp, #-16]!\n"
         "stp x2, x3, [sp, #-16]!\n"
         "stp x0, x1, [sp, #-16]!\n"
-        "mov x0, sp\n"
+        "sub sp, sp, #16\n"
+        "mrs x9, tpidr_el0\n"
+        "mrs x10, nzcv\n"
+        "stp x9, x10, [sp]\n"
+        "add x0, sp, #16\n"
         "mov x1, x8\n"
         "mov x2, x30\n"
         "bl _GuestSyscallDispatch\n"
+        "ldp x9, x10, [sp]\n"
+        "msr tpidr_el0, x9\n"
+        "msr nzcv, x10\n"
+        "add sp, sp, #16\n"
         "ldp x9, x1, [sp], #16\n"
         "ldp x2, x3, [sp], #16\n"
         "ldp x4, x5, [sp], #16\n"
