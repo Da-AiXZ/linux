@@ -20,7 +20,7 @@ def adr(rd, offset):
     return 0x10000000 | (immlo << 29) | (immhi << 5) | rd
 
 
-def build(message: bytes) -> bytes:
+def build(message: bytes, fault_probe: bool = True) -> bytes:
     text_offset = 0x1000
 
     instrs = []
@@ -29,8 +29,9 @@ def build(message: bytes) -> bytes:
     instrs.append(movz(2, len(message)))         # mov x2, #len
     instrs.append(movz(8, 64))                   # mov x8, #__NR_write
     instrs.append(0xD4000001)                    # svc #0
-    instrs.append(movz(1, 0))                    # mov x1, #0
-    instrs.append(0xB9000020)                    # str w0, [x1]  (fault probe)
+    if fault_probe:
+        instrs.append(movz(1, 0))                # mov x1, #0
+        instrs.append(0xB9000020)                # str w0, [x1]  (fault probe)
     instrs.append(movz(0, 0))                    # mov x0, #0
     instrs.append(movz(8, 93))                   # mov x8, #__NR_exit
     instrs.append(0xD4000001)                    # svc #0
@@ -78,6 +79,7 @@ def build(message: bytes) -> bytes:
 
 if __name__ == "__main__":
     output = sys.argv[1] if len(sys.argv) > 1 else "guest-hello.elf"
+    probe = "--no-fault" not in sys.argv[2:]
     with open(output, "wb") as handle:
-        handle.write(build(b"hello from linux elf\n"))
+        handle.write(build(b"hello from linux elf\n", fault_probe=probe))
     print(f"wrote {output}")

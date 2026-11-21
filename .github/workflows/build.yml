@@ -80,6 +80,14 @@ jobs:
              "$APP/Helpers/alpine/lib/libz.so.1"
           cp /tmp/alpine-rootfs/sbin/apk "$APP/Helpers/alpine-apk"
           cp /tmp/alpine-rootfs/bin/busybox "$APP/Helpers/alpine-busybox"
+
+          # Build a tiny unsigned Alpine package for `apk add` testing.  The
+          # payload is one of our own minimal aarch64 ELF programs (without
+          # the deliberate fault probe).
+          python3 tools/make_guest_elf.py /tmp/hello.elf --no-fault
+          python3 tools/make_hello_apk.py /tmp/hello.elf \
+            "$APP/Helpers/hello.apk"
+
           chmod 755 "$APP/Helpers/probe-helper"
           chmod 644 "$APP/Helpers/probe-helper.dat"
           chmod 755 "$APP/Helpers/guest-runner"

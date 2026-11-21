@@ -117,6 +117,12 @@
                                       handler:^(__kindof UIAction *action) {
         [weakSelf runApk];
     }];
+    UIAction *apkAdd = [UIAction actionWithTitle:@"Run APK Add Hello"
+                                          image:nil
+                                     identifier:nil
+                                        handler:^(__kindof UIAction *action) {
+        [weakSelf runApkAdd];
+    }];
 
     UIMenu *probeSection = [UIMenu menuWithTitle:@""
                                            image:nil
@@ -132,7 +138,7 @@
                                             image:nil
                                        identifier:nil
                                           options:UIMenuOptionsDisplayInline
-                                         children:@[alpineBusybox, apk]];
+                                         children:@[alpineBusybox, apk, apkAdd]];
 
     return [UIMenu menuWithTitle:@"Linux Probe"
                        children:@[probeSection, staticSection, alpineSection]];
@@ -243,6 +249,16 @@
     [self startGuestNamed:@"Helpers/alpine-apk"
                 arguments:@[ @"apk", @"--version" ]
                     label:@"Starting apk --version..."];
+}
+
+- (void)runApkAdd
+{
+    NSString *command =
+        @"apk add --allow-untrusted /tmp/hello.apk; echo '--- hello'; "
+         "/usr/bin/hello";
+    [self startGuestNamed:@"Helpers/alpine-busybox"
+                arguments:@[ @"busybox", @"sh", @"-c", command ]
+                    label:@"Starting apk add --allow-untrusted /tmp/hello.apk..."];
 }
 
 - (void)startGuestNamed:(NSString *)relativePath

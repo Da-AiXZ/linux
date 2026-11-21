@@ -22,6 +22,8 @@
 #import <stdlib.h>
 #import <string.h>
 #import <sys/mman.h>
+#import <sys/mount.h>
+#import <sys/file.h>
 #import <sys/ucontext.h>
 #import <sys/stat.h>
 #import <sys/time.h>
@@ -621,6 +623,22 @@ static void GuestWriteTextFile(const char *path, const char *text)
     close(descriptor);
 }
 
+/*
+ * apk owns /etc/apk/world and /lib/apk/db/installed.  Recreating them on
+ * every run would erase the installed package database, so only create them
+ * when they are missing (first boot).
+ */
+static void GuestCreateEmptyFileIfMissing(const char *path)
+{
+    if (access(path, F_OK) == 0) {
+        return;
+    }
+    int descriptor = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
+    if (descriptor >= 0) {
+        close(descriptor);
+    }
+}
+
 static void GuestCopyHostFile(const char *sourcePath, const char *targetPath)
 {
     int source = open(sourcePath, O_RDONLY);
@@ -767,7 +785,8 @@ static void GuestBootstrapRootfs(void)
 
     static const char *directories[] = {
         "bin", "sbin", "lib", "lib64", "usr", "usr/bin", "usr/sbin",
-        "usr/lib", "usr/lib64", "usr/share", "etc", "tmp", "var", "var/tmp",
+        "usr/lib", "usr/lib64", "usr/share", "etc", "etc/apk", "etc/apk/keys",
+        "lib/apk", "lib/apk/db", "tmp", "var", "var/tmp",
         "var/log", "var/cache", "dev", "proc", "sys", "root", "home",
         "mnt", "media", "opt", "srv", "run", "boot",
     };
@@ -816,6 +835,18 @@ static void GuestBootstrapRootfs(void)
     snprintf(path, sizeof(path), "%s/etc/nsswitch.conf", GuestRootPath);
     GuestWriteTextFile(path, "passwd: files\ngroup: files\nhosts: files\n");
 
+    snprintf(path, sizeof(path), "%s/etc/apk/arch", GuestRootPath);
+    GuestWriteTextFile(path, "aarch64\n");
+
+    snprintf(path, sizeof(path), "%s/etc/apk/repositories", GuestRootPath);
+    GuestWriteTextFile(path, "# offline: no repositories configured\n");
+
+    snprintf(path, sizeof(path), "%s/etc/apk/world", GuestRootPath);
+    GuestCreateEmptyFileIfMissing(path);
+
+    snprintf(path, sizeof(path), "%s/lib/apk/db/installed", GuestRootPath);
+    GuestCreateEmptyFileIfMissing(path);
+
     char executable[PATH_MAX];
     uint32_t executableSize = sizeof(executable);
     if (_NSGetExecutablePath(executable, &executableSize) == 0) {
@@ -845,6 +876,31 @@ static void GuestBootstrapRootfs(void)
         GuestCreateAppletLinks(target, "busybox");
         snprintf(target, sizeof(target), "%s/usr/bin", GuestRootPath);
         GuestCreateAppletLinks(target, "../../bin/busybox");
+
+        snprintf(source, sizeof(source), "%s/alpine-apk", executable);
+        snprintf(target, sizeof(target), "%s/sbin/apk", GuestRootPath);
+        struct stat apkStatus;
+        if (stat(target, &apkStatus) != 0 ||
+            apkStatus.st_size == 0) {
+            GuestCopyHostFile(source, target);
+        } else {
+            struct stat sourceApkStatus;
+            if (stat(source, &sourceApkStatus) == 0 &&
+                sourceApkStatus.st_size != apkStatus.st_size) {
+                GuestCopyHostFile(source, target);
+            }
+        }
+        snprintf(target, sizeof(target), "%s/sbin/apk", GuestRootPath);
+        chmod(target, 0755);
+
+        /* Test package for `apk add --allow-untrusted /tmp/hello.apk`. */
+        snprintf(source, sizeof(source), "%s/hello.apk", executable);
+        struct stat helloSource;
+        if (stat(source, &helloSource) == 0) {
+            snprintf(target, sizeof(target), "%s/tmp/hello.apk", GuestRootPath);
+            GuestCopyHostFile(source, target);
+            chmod(target, 0644);
+        }
 
         GuestInstallAlpineRuntime([NSString stringWithUTF8String:executable]);
 
@@ -1024,6 +1080,26 @@ static void GuestFillStat(const struct stat *source, void *destination)
     *(uint64_t *)(bytes + 96) = (uint64_t)source->st_mtimespec.tv_nsec;
     *(uint64_t *)(bytes + 104) = (uint64_t)source->st_ctimespec.tv_sec;
     *(uint64_t *)(bytes + 112) = (uint64_t)source->st_ctimespec.tv_nsec;
+}
+
+/*
+ * Linux arm64 struct statfs (120 bytes).  Darwin's struct statfs has a
+ * completely different layout, so apk (free-space checks) would read junk
+ * if we passed it through.
+ */
+static void GuestFillStatfs(const struct statfs *source, void *destination)
+{
+    uint8_t *bytes = (uint8_t *)destination;
+    memset(bytes, 0, 120);
+    *(uint64_t *)(bytes + 0) = 0xEF53; /* looks like a normal writable FS */
+    *(uint64_t *)(bytes + 8) = (uint64_t)source->f_bsize;
+    *(uint64_t *)(bytes + 16) = (uint64_t)source->f_blocks;
+    *(uint64_t *)(bytes + 24) = (uint64_t)source->f_bfree;
+    *(uint64_t *)(bytes + 32) = (uint64_t)source->f_bavail;
+    *(uint64_t *)(bytes + 40) = (uint64_t)source->f_files;
+    *(uint64_t *)(bytes + 48) = (uint64_t)source->f_ffree;
+    *(uint64_t *)(bytes + 64) = 255; /* f_namelen */
+    *(uint64_t *)(bytes + 72) = (uint64_t)source->f_bsize; /* f_frsize */
 }
 
 /*
@@ -1225,14 +1301,15 @@ uint64_t GuestSyscallDispatch(uint64_t *args,
         return (uint64_t)getpid();
     case 173: /* getppid */
         return (uint64_t)getppid();
-    case 174:
-        return (uint64_t)getuid();
-    case 175:
-        return (uint64_t)geteuid();
-    case 176:
-        return (uint64_t)getgid();
-    case 177:
-        return (uint64_t)getegid();
+    case 174: /* getuid */
+    case 175: /* geteuid */
+    case 176: /* getgid */
+    case 177: /* getegid */
+        /*
+         * The guest is a single-user Linux runtime and apk refuses to install
+         * unless it runs as root.  Host file permissions still apply.
+         */
+        return 0;
     case 160: { /* uname */
         char *output = (char *)args[0];
         if (output == NULL) {
@@ -1413,6 +1490,59 @@ uint64_t GuestSyscallDispatch(uint64_t *args,
         GuestFillStat(&status, (void *)args[1]);
         return 0;
     }
+    case 43: { /* statfs */
+        char hostPath[GUEST_ROOT_MAX];
+        if (GuestTranslatePath(GUEST_AT_FDCWD,
+                               (const char *)args[0],
+                               hostPath,
+                               sizeof(hostPath)) == NULL) {
+            return (uint64_t)(-ENOENT);
+        }
+        if (args[1] == 0) {
+            return (uint64_t)(-EFAULT);
+        }
+        struct statfs status;
+        if (statfs(hostPath, &status) != 0) {
+            return GuestErrno();
+        }
+        GuestFillStatfs(&status, (void *)args[1]);
+        return 0;
+    }
+    case 44: { /* fstatfs */
+        if (args[1] == 0) {
+            return (uint64_t)(-EFAULT);
+        }
+        struct statfs status;
+        if (fstatfs((int)args[0], &status) != 0) {
+            return GuestErrno();
+        }
+        GuestFillStatfs(&status, (void *)args[1]);
+        return 0;
+    }
+    case 32: /* flock */
+        return flock((int)args[0], (int)args[1]) == 0 ? 0 : GuestErrno();
+    case 52: /* fchmod */
+        return fchmod((int)args[0], (mode_t)args[1]) == 0 ? 0 : GuestErrno();
+    case 53: { /* fchmodat */
+        char hostPath[GUEST_ROOT_MAX];
+        if (GuestTranslatePath((int)args[0],
+                               (const char *)args[1],
+                               hostPath,
+                               sizeof(hostPath)) == NULL) {
+            return (uint64_t)(-ENOENT);
+        }
+        return chmod(hostPath, (mode_t)args[2]) == 0 ? 0 : GuestErrno();
+    }
+    case 54: /* fchownat */
+    case 55: /* fchown */
+        /*
+         * The host process runs as the mobile user while the guest thinks it
+         * is root, so a real chown would fail with EPERM and confuse apk.
+         * Ownership is irrelevant for this single-user runtime.
+         */
+        return 0;
+    case 166: /* umask */
+        return (uint64_t)umask((mode_t)args[0]);
     case 23: { /* dup */
         int result = dup((int)args[0]);
         return result < 0 ? GuestErrno() : (uint64_t)result;
