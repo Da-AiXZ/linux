@@ -253,10 +253,16 @@
 
 - (void)runApkAdd
 {
+    /*
+     * Use the static busybox as the parent: a dynamic image cannot fork yet
+     * (fork snapshots only support static images), so the Alpine busybox
+     * shell would fail with "can't fork".  The child then execs the dynamic
+     * /sbin/apk, which exercises the dynamic loader too.
+     */
     NSString *command =
         @"apk add --allow-untrusted /tmp/hello.apk; echo '--- hello'; "
          "/usr/bin/hello";
-    [self startGuestNamed:@"Helpers/alpine-busybox"
+    [self startGuestNamed:@"Helpers/busybox"
                 arguments:@[ @"busybox", @"sh", @"-c", command ]
                     label:@"Starting apk add --allow-untrusted /tmp/hello.apk..."];
 }

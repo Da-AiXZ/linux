@@ -2060,18 +2060,30 @@ static uintptr_t GuestChooseBase(uint64_t imageSize, uintptr_t trampoline)
         return GuestForcedBase;
     }
 
-    const uintptr_t offsets[] = {
-        0x04000000, 0x06000000, 0x02000000, 0x07000000,
+    /*
+     * A restored child can have the snapshot buffer, the 64MB guest heap,
+     * the guest stack and the island occupying the positive offsets, which
+     * used to leave "no free address range near trampoline".  Scan both
+     * directions in 16MB steps; stay within 64MB so the island (image
+     * +/-32MB) is still reachable from the shared trampoline.
+     */
+    const int64_t offsets[] = {
+        0x04000000, 0x03000000, 0x02000000, 0x01000000,
+        -0x01000000, -0x02000000, -0x03000000, -0x04000000,
     };
 
     for (size_t index = 0; index < sizeof(offsets) / sizeof(offsets[0]);
          index++) {
-        uintptr_t candidate = (trampoline + offsets[index]) & ~0x3FFFULL;
-        int64_t distance = (int64_t)candidate - (int64_t)trampoline;
-        if (distance < 0 || distance > 0x07000000) {
+        uintptr_t candidate =
+            (uintptr_t)((int64_t)trampoline + offsets[index]) & ~0x3FFFULL;
+        if (candidate < 0x100000000ULL) {
             continue;
         }
-        if (candidate + imageSize > trampoline + 0x07800000ULL) {
+        int64_t distance = (int64_t)candidate - (int64_t)trampoline;
+        if (distance < -(1LL << 26) || distance > (1LL << 26)) {
+            continue;
+        }
+        if (candidate + imageSize > trampoline + 0x06800000ULL) {
             continue;
         }
         if (GuestRangeFree(candidate, (size_t)imageSize)) {
