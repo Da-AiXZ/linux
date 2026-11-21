@@ -313,6 +313,11 @@ uint64_t GuestSyscallDispatch(uint64_t *args,
         return close((int)args[0]) == 0 ? 0 : GuestErrno();
     case 93: /* exit */
     case 94: /* exit_group */
+        fprintf(stdout,
+                "[guest] exit syscall %llu code=%lld\n",
+                (unsigned long long)number,
+                (long long)args[0]);
+        fflush(stdout);
         _exit((int)args[0]);
     case 172: /* getpid */
         return (uint64_t)getpid();
@@ -916,7 +921,15 @@ static int GuestLoadAndRun(int argc, char *argv[])
     fflush(stdout);
 
     GuestJump(entry, stackPointer);
+    fprintf(stdout, "[guest] jump returned\n");
+    fflush(stdout);
     return 0;
+}
+
+static void GuestHostExit(void)
+{
+    fprintf(stdout, "[guest] host exit handler\n");
+    fflush(stdout);
 }
 
 int main(int argc, char *argv[])
@@ -924,6 +937,7 @@ int main(int argc, char *argv[])
     @autoreleasepool {
         setvbuf(stdout, NULL, _IONBF, 0);
         setvbuf(stderr, NULL, _IONBF, 0);
+        atexit(GuestHostExit);
 
         fprintf(stdout, "[guest] runner pid=%d\n", getpid());
         if (argc < 2) {
@@ -945,6 +959,9 @@ int main(int argc, char *argv[])
             return 5;
         }
 
-        return GuestLoadAndRun(argc, argv);
+        int result = GuestLoadAndRun(argc, argv);
+        fprintf(stdout, "[guest] host main rc=%d\n", result);
+        fflush(stdout);
+        return result;
     }
 }

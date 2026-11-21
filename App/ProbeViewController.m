@@ -8,6 +8,7 @@
 @property (nonatomic, strong) UIButton *runButton;
 @property (nonatomic, strong) UIButton *guestButton;
 @property (nonatomic, strong) UIButton *busyboxButton;
+@property (nonatomic, strong) UIButton *pieButton;
 @property (nonatomic, strong) ProbeController *probe;
 @property (nonatomic, strong) GuestLauncher *guestLauncher;
 @property (nonatomic, strong) NSDateFormatter *formatter;
@@ -68,13 +69,28 @@
                  forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:self.busyboxButton];
 
+    self.pieButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [self.pieButton setTitle:@"Run PIE Hello" forState:UIControlStateNormal];
+    self.pieButton.titleLabel.font = [UIFont boldSystemFontOfSize:17];
+    self.pieButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.pieButton addTarget:self
+                       action:@selector(runPieHello:)
+             forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:self.pieButton];
+
     UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
         [self.logView.topAnchor constraintEqualToAnchor:safe.topAnchor],
         [self.logView.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
         [self.logView.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
-        [self.logView.bottomAnchor constraintEqualToAnchor:self.busyboxButton.topAnchor
+        [self.logView.bottomAnchor constraintEqualToAnchor:self.pieButton.topAnchor
                                                   constant:-8],
+
+        [self.pieButton.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
+        [self.pieButton.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
+        [self.pieButton.bottomAnchor constraintEqualToAnchor:self.busyboxButton.topAnchor
+                                                    constant:-8],
+        [self.pieButton.heightAnchor constraintEqualToConstant:40],
 
         [self.busyboxButton.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
         [self.busyboxButton.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
@@ -153,6 +169,14 @@
                 arguments:@[ @"busybox", @"uname", @"-a" ]
                    button:self.busyboxButton
                     label:@"Starting BusyBox..."];
+}
+
+- (void)runPieHello:(UIButton *)sender
+{
+    [self startGuestNamed:@"Helpers/pie-hello"
+                arguments:@[ @"pie-hello" ]
+                   button:self.pieButton
+                    label:@"Starting PIE hello..."];
 }
 
 - (void)startGuestNamed:(NSString *)relativePath
