@@ -4723,13 +4723,14 @@ static uint64_t GuestHandleMmap(uint64_t hint,
             result = GuestHandleFixedAnon(target, requested, prot);
             goto trace;
         }
-        target = GuestAllocateMmapAddress(mapLength, (uintptr_t)hint, NO);
-        if (target == 0) {
-            return (uint64_t)(-ENOMEM);
-        }
-        flags |= MAP_FIXED;
-
-        void *map = mmap((void *)target,
+        /*
+         * Anonymous data mappings never contain rewritten code, so they do
+         * not need to live within branch range of the island.  Let the host
+         * choose the address instead: apk keeps tens of megabytes of index
+         * data live at once and the 112MB island window also has to hold the
+         * 64MB heap, the 8MB stack and the dynamic linker.
+         */
+        void *map = mmap(NULL,
                          mapLength,
                          PROT_READ | PROT_WRITE,
                          flags,
@@ -4738,6 +4739,7 @@ static uint64_t GuestHandleMmap(uint64_t hint,
         if (map == MAP_FAILED) {
             return GuestErrno();
         }
+        target = (uintptr_t)map;
         if (GuestProtectRange(target, mapLength, prot) != 0) {
             int error = errno;
             munmap(map, mapLength);
