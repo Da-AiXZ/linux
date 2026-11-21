@@ -120,6 +120,12 @@ kern_return_t catch_exception_raise(mach_port_t exception_port,
             result == KERN_SUCCESS ? (unsigned long long)state.x[0] : 0ULL,
             result == KERN_SUCCESS ? (unsigned long long)state.x[8] : 0ULL,
             result);
+    fflush(stdout);
+
+    if (exception == EXC_BAD_ACCESS || exception == EXC_BAD_INSTRUCTION) {
+        /* A guest fault is fatal; stop the run and leave the record. */
+        _exit(70);
+    }
     return KERN_FAILURE;
 }
 
@@ -167,7 +173,11 @@ static uint32_t GuestJITSelfTest(void)
 static void *GuestExceptionThread(void *argument)
 {
     mach_port_t port = (mach_port_t)(uintptr_t)argument;
-    mach_msg_server(exc_server, 2048, port, 0);
+    fprintf(stdout, "[guest] exception server start port=0x%x\n", port);
+    fflush(stdout);
+    kern_return_t result = mach_msg_server(exc_server, 2048, port, 0);
+    fprintf(stdout, "[guest] exception server exit=%d\n", result);
+    fflush(stdout);
     return NULL;
 }
 
@@ -186,23 +196,39 @@ static BOOL GuestEnableJIT(void)
             sigexcResult < 0 ? errno : 0);
 
     mach_port_t port = MACH_PORT_NULL;
-    if (mach_port_allocate(mach_task_self(),
-                           MACH_PORT_RIGHT_RECEIVE,
-                           &port) != KERN_SUCCESS) {
+    kern_return_t allocateResult = mach_port_allocate(mach_task_self(),
+                                                      MACH_PORT_RIGHT_RECEIVE,
+                                                      &port);
+    if (allocateResult != KERN_SUCCESS) {
+        fprintf(stderr, "[guest] exception port allocate failed: %d\n",
+                allocateResult);
         return NO;
     }
 
-    mach_port_insert_right(mach_task_self(),
-                           port,
-                           port,
-                           MACH_MSG_TYPE_MAKE_SEND);
-    task_set_exception_ports(mach_task_self(),
-                             EXC_MASK_SOFTWARE |
-                                 EXC_MASK_BAD_ACCESS |
-                                 EXC_MASK_BAD_INSTRUCTION,
-                             port,
-                             EXCEPTION_DEFAULT,
-                             THREAD_STATE_NONE);
+    kern_return_t insertResult = mach_port_insert_right(mach_task_self(),
+                                                        port,
+                                                        port,
+                                                        MACH_MSG_TYPE_MAKE_SEND);
+    exception_mask_t mask = EXC_MASK_SOFTWARE |
+                            EXC_MASK_BAD_ACCESS |
+                            EXC_MASK_BAD_INSTRUCTION;
+    kern_return_t taskResult = task_set_exception_ports(mach_task_self(),
+                                                        mask,
+                                                        port,
+                                                        EXCEPTION_DEFAULT,
+                                                        THREAD_STATE_NONE);
+    kern_return_t threadResult = thread_set_exception_ports(
+        pthread_mach_thread_np(pthread_self()),
+        mask,
+        port,
+        EXCEPTION_DEFAULT,
+        THREAD_STATE_NONE);
+    fprintf(stdout,
+            "[guest] exception ports: alloc=%d insert=%d task=%d thread=%d\n",
+            allocateResult,
+            insertResult,
+            taskResult,
+            threadResult);
 
     pthread_t thread;
     if (pthread_create(&thread,
