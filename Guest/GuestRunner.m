@@ -477,7 +477,14 @@ uint64_t GuestSyscallDispatch(uint64_t *args,
         return (uint64_t)length;
     }
     case 214: { /* brk */
+        static unsigned int brkTrace = 0;
         if (args[0] == 0) {
+            if (brkTrace < 4) {
+                brkTrace++;
+                fprintf(stdout, "[guest] brk(0) -> 0x%lx\n",
+                        (unsigned long)GuestBrkCurrent);
+                fflush(stdout);
+            }
             return GuestBrkCurrent;
         }
         if (args[0] >= GuestHeapBase && args[0] <= GuestHeapEnd) {
@@ -489,6 +496,13 @@ uint64_t GuestSyscallDispatch(uint64_t *args,
                        requested - GuestBrkCurrent);
             }
             GuestBrkCurrent = requested;
+            if (brkTrace < 4) {
+                brkTrace++;
+                fprintf(stdout, "[guest] brk(0x%lx) -> 0x%lx\n",
+                        (unsigned long)requested,
+                        (unsigned long)GuestBrkCurrent);
+                fflush(stdout);
+            }
             return GuestBrkCurrent;
         }
         return GuestBrkCurrent;
@@ -833,7 +847,7 @@ static void GuestEmitTlsWriteStub(uint8_t *stub, uint32_t rt)
 
     code[index++] = 0xF84107E9U; /* ldr x9, [sp], #16 */
     code[index++] = 0xD51B4209U; /* msr nzcv, x9 */
-    for (uint32_t pair = 0; pair <= 26; pair += 2) {
+    for (uint32_t pair = 2; pair <= 28; pair += 2) {
         code[index++] = GuestEncodeLdpPost(pair, pair + 1);
     }
     code[index++] = 0xF84107FEU; /* ldr x30, [sp], #16 */
@@ -889,7 +903,7 @@ static uintptr_t GuestMapStub(uintptr_t imageStart,
             GuestTlsWriteStubs[rt] = (uintptr_t)writeStub;
         }
 
-        sys_icache_invalidate(page, 0x2000);
+        sys_icache_invalidate(page, 0x4000);
         mprotect(page, 0x4000, PROT_READ | PROT_EXEC);
 
         const uint32_t *readStub =
