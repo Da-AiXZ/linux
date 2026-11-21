@@ -168,11 +168,14 @@ extern char **environ;
      * OpenSSL looks for OPENSSLDIR/cert.pem by default.  Point it at the
      * Alpine CA bundle explicitly so apk's HTTPS fetches verify even if the
      * bundle layout changes.
+     *
+     * These must be GUEST paths.  The guest opens them through the syscall
+     * layer, which prepends LINUXPROBE_ROOT; passing a host path here made
+     * the guest look for <rootfs>/var/mobile/... and left OpenSSL with an
+     * empty trust store ("certificate verify failed").
      */
-    NSString *certificateFile = [NSString stringWithFormat:
-        @"SSL_CERT_FILE=%@/etc/ssl/certs/ca-certificates.crt", rootPath];
-    NSString *certificateDirectory = [NSString stringWithFormat:
-        @"SSL_CERT_DIR=%@/etc/ssl/certs", rootPath];
+    NSString *certificateFile = @"SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt";
+    NSString *certificateDirectory = @"SSL_CERT_DIR=/etc/ssl/certs";
     environment[environmentCount] = (char *)rootVariable.fileSystemRepresentation;
     environment[environmentCount + 1] =
         (char *)certificateFile.fileSystemRepresentation;

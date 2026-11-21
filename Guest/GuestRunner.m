@@ -923,9 +923,40 @@ static void GuestInstallAlpineRuntime(NSString *directory)
              "%s/etc/ssl/certs/ca-certificates.crt",
              GuestRootPath);
     struct stat certificateStatus;
-    GuestLog("[guest] ca bundle=%s exists=%d\n",
+    int certificateExists = stat(certificatePath, &certificateStatus) == 0;
+    GuestLog("[guest] ca bundle=%s exists=%d size=%lld\n",
              certificatePath,
-             stat(certificatePath, &certificateStatus) == 0 ? 1 : 0);
+             certificateExists,
+             certificateExists ? (long long)certificateStatus.st_size : -1LL);
+
+    /*
+     * OpenSSL's compiled-in default is <openssldir>/cert.pem.  Keep a second
+     * diagnostic for it: with a bad SSL_CERT_FILE the whole default trust
+     * store is skipped, so knowing whether this fallback exists matters.
+     */
+    char defaultCertificatePath[GUEST_ROOT_MAX];
+    snprintf(defaultCertificatePath,
+             sizeof(defaultCertificatePath),
+             "%s/etc/ssl/cert.pem",
+             GuestRootPath);
+    struct stat defaultCertificateStatus;
+    int defaultCertificateExists =
+        stat(defaultCertificatePath, &defaultCertificateStatus) == 0;
+    GuestLog("[guest] cert.pem=%s exists=%d size=%lld\n",
+             defaultCertificatePath,
+             defaultCertificateExists,
+             defaultCertificateExists
+                 ? (long long)defaultCertificateStatus.st_size
+                 : -1LL);
+
+    const char *certificateVariable = getenv("SSL_CERT_FILE");
+    const char *certificateDirectoryVariable = getenv("SSL_CERT_DIR");
+    GuestLog("[guest] tls env: SSL_CERT_FILE=%s SSL_CERT_DIR=%s\n",
+             certificateVariable != NULL ? certificateVariable : "(unset)",
+             certificateDirectoryVariable != NULL
+                 ? certificateDirectoryVariable
+                 : "(unset)");
+    GuestLog("[guest] time=%lld\n", (long long)time(NULL));
 }
 
 static void GuestBootstrapRootfs(void)
