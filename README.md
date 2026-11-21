@@ -15,7 +15,7 @@
 | M2 真实 busybox | 🚧 static-PIE busybox 已能加载（`patched=297`），正在解决 glibc 启动阶段的问题 |
 | M3 Alpine / Debian rootfs | ⏳ |
 
-最新版本 **0.16.3 (24)**。项目上下文、决策和路线记录在
+最新版本 **0.16.9 (30)**。项目上下文、决策和路线记录在
 [Da-AiXZ/linux-workspace](https://github.com/Da-AiXZ/linux-workspace)（私有）。
 
 ## 工作原理
@@ -25,7 +25,7 @@ Probe.app（宿主）
   │  posix_spawn + 管道
   ▼
 Helpers/guest-runner <elf> [guest argv...]
-  ├─ ptrace(PT_TRACE_ME) + PT_SIGEXC → CS_DEBUGGED（TrollStore 环境下可用）
+  ├─ ptrace(PT_TRACE_ME) → CS_DEBUGGED（TrollStore 环境下可用）
   ├─ 读取 ELF，按 16KB 页对齐映射到 4GB 以上（ET_DYN / static-PIE）
   ├─ 扫描可执行段，把每条 svc #0 改写为 bl 跳板岛
   │     跳板岛: ldr x16, #8; br x16; .quad GuestSyscallTrampoline
@@ -39,7 +39,9 @@ Helpers/guest-runner <elf> [guest argv...]
 ## 实测约束（决定架构的关键）
 
 1. **JIT**：`MAP_JIT` 不可用；`dynamic-codesigning` 在 A12+/iOS 15+ 会闪退。
-   用 `ptrace(PT_TRACE_ME)` → `PT_SIGEXC` → 自建异常端口（UTM 的技巧）获得 `CS_DEBUGGED`。
+   用 `ptrace(PT_TRACE_ME)` 获得 `CS_DEBUGGED`。**不要用 `PT_SIGEXC` + 自建 Mach 异常端口**：
+   实测（0.16.7/0.16.8）端口注册成功但收不到 guest 故障，进程静默 `status=1`；
+   故障诊断用 POSIX `sigaction`（0.16.9 起，打印 `pc/lr/sp/far/esr` 与 `fault offset`）。
 2. **4GB 以下不可映射**：64 位进程 `VM_MIN_ADDRESS = 0x100000000`，`VM_FLAGS_OVERWRITE` 也不行。
    guest 必须是 **ET_DYN / static-PIE**（Alpine 官方 `busybox-static` 是 ET_EXEC，不能用）。
 3. **主程序布局**：`__PAGEZERO` 必须是 4GB、`__TEXT` 在 `0x100000000`；缩小 pagezero 会导致
@@ -81,6 +83,8 @@ Helpers/guest-runner <elf> [guest argv...]
 [guest] entry=… aligned=1 words=… argv0=…      入口
 [guest] heap=0x…                               64MB guest 堆
 [guest] svc N site=0x… x0=…                    syscall 调用点
+[guest] signal N addr=… pc=… far=…            故障现场（SIGSEGV/BUS/ILL/FPE）
+[guest] fault offset=0x…                       pc - base，拿去 objdump
 [guest] watchdog1/2: pc=… sp=…                 卡住时的现场
 ```
 

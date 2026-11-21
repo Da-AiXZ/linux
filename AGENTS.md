@@ -45,6 +45,9 @@ CURRENT_PROJECT_VERSION: "N"
    由跳板岛绝对跳转，避免 `bl` ±128MB 限制。
 6. 入口栈上的 argv/envp/auxv 必须完整（`AT_PHDR/AT_PHNUM/AT_PHENT/AT_PAGESZ/AT_RANDOM/AT_HWCAP/AT_EXECFN/AT_ENTRY`）。
 7. `brk` 返回**当前 break**，初始为堆起始；堆是预映射的 64MB。
+8. syscall 返回必须保留 `x1–x17`、`TPIDR_EL0`、`NZCV`（glibc 依赖）。
+9. JIT 只靠 `ptrace(PT_TRACE_ME)`；**不要**加 `PT_SIGEXC` + 自建 Mach 异常端口——实测收不到故障。
+   故障诊断用 `sigaction`，输出 `addr/pc/lr/sp/far/esr` 与 `pc - base`。
 
 ## 调试
 
@@ -59,10 +62,11 @@ App 日志的关键行含义见工作区 `AGENTS.md` 第 6 节。
 
 ## 当前优先级
 
-1. 分析 0.16.3 真机日志（`svc` 的 `site=`、`exception`、`watchdog`），确认 glibc TLS 问题是否已随
-   `brk` 修复消失。
-2. 若 glibc static-PIE 启动仍不通，改用 musl static-PIE（Alpine 工具链）。
-3. 之后补文件类 syscall + rootfs 路径映射（见 `docs/ROADMAP.md` M2.2）。
+1. 0.16.9 真机验证：`Run Linux Test` 应出现 `[guest] signal 11 addr=0x0 …` + `status=70`；
+   然后 `Run PIE Hello` / `Run BusyBox`，用 `[guest] fault offset` 定位 glibc 死点。
+2. 若信号链路也不通，改用"父进程 spawn + 子进程故障"模型排查。
+3. 若 glibc static-PIE 启动仍不通，改用 musl static-PIE（Alpine 工具链）。
+4. 之后补文件类 syscall + rootfs 路径映射（见工作区 `docs/ROADMAP.md` M2.2）。
 
 ## 不要做
 
