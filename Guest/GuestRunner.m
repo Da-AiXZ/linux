@@ -2922,6 +2922,96 @@ static inline uintptr_t GuestAlignUp(uintptr_t value)
            ~(uintptr_t)(GUEST_HOST_PAGE_SIZE - 1);
 }
 
+static int GuestHostPageProtection(uintptr_t address, int *protection)
+{
+    vm_address_t region = (vm_address_t)address;
+    vm_size_t size = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t objectName = MACH_PORT_NULL;
+    memset(&info, 0, sizeof(info));
+    kern_return_t result = vm_region_64(mach_task_self(),
+                                        &region,
+                                        &size,
+                                        VM_REGION_BASIC_INFO_64,
+                                        (vm_region_info_t)&info,
+                                        &count,
+                                        &objectName);
+    if (objectName != MACH_PORT_NULL) {
+        mach_port_deallocate(mach_task_self(), objectName);
+    }
+    if (result != KERN_SUCCESS ||
+        (uintptr_t)region > address ||
+        (uintptr_t)region + size <= address) {
+        return -1;
+    }
+    *protection = info.protection;
+    return 0;
+}
+
+/*
+ * Host pages are 16KB while the guest thinks in 4KB pages, so a guest
+ * mprotect often covers only part of a host page.  Applying the request to
+ * the whole 16KB page would silently change the permissions of the
+ * neighbouring guest pages; RELRO at a segment boundary used to clear
+ * PROT_EXEC from the tail of .text that shared the page.  Fully covered
+ * host pages get the exact request, partial edge pages only gain bits.
+ */
+static int GuestProtectPartialPage(uintptr_t page, int prot)
+{
+    int current = 0;
+    if (GuestHostPageProtection(page, &current) != 0) {
+        return -1;
+    }
+    int merged = current | prot;
+    if (merged == current) {
+        return 0;
+    }
+    return mprotect((void *)page, (size_t)GUEST_HOST_PAGE_SIZE, merged);
+}
+
+static int GuestProtectRange(uintptr_t address, size_t length, int prot)
+{
+    if (length == 0) {
+        return 0;
+    }
+    uintptr_t end = address + length;
+    if (end < address) {
+        return -1;
+    }
+    uintptr_t headPage = GuestAlignDown(address);
+    uintptr_t tailPage = GuestAlignDown(end - 1);
+    int status = 0;
+
+    if (headPage == tailPage) {
+        if (address == headPage && end == headPage + GUEST_HOST_PAGE_SIZE) {
+            status = mprotect((void *)headPage,
+                              (size_t)GUEST_HOST_PAGE_SIZE,
+                              prot);
+        } else {
+            status = GuestProtectPartialPage(headPage, prot);
+        }
+    } else {
+        if (address != headPage) {
+            status = GuestProtectPartialPage(headPage, prot);
+        }
+        uintptr_t middleStart = headPage + GUEST_HOST_PAGE_SIZE;
+        if (status == 0 && tailPage > middleStart) {
+            status = mprotect((void *)middleStart,
+                              (size_t)(tailPage - middleStart),
+                              prot);
+        }
+        if (status == 0 && end != tailPage + GUEST_HOST_PAGE_SIZE) {
+            status = GuestProtectPartialPage(tailPage, prot);
+        }
+    }
+
+    if (status == 0 && (prot & PROT_EXEC) != 0) {
+        sys_icache_invalidate((void *)address, length);
+    }
+    return status;
+}
+
 static BOOL GuestRangeOverlapsRuntime(uintptr_t address, size_t length)
 {
     if (length == 0) {
@@ -3205,62 +3295,56 @@ static int GuestPatchMappedElf(int descriptor,
     return 0;
 }
 
+/*
+ * Make [address, address+length) writable at host page granularity without
+ * replacing pages that already exist: a 4KB guest range may share its 16KB
+ * host page with a neighbouring guest mapping whose bytes and permissions
+ * must survive.  Only genuinely unmapped host pages are created.
+ */
+static int GuestEnsureWritable(uintptr_t address, size_t length)
+{
+    uintptr_t end = address + length;
+    for (uintptr_t page = GuestAlignDown(address);
+         page < end;
+         page += GUEST_HOST_PAGE_SIZE) {
+        int current = 0;
+        if (GuestHostPageProtection(page, &current) != 0) {
+            void *map = mmap((void *)page,
+                             (size_t)GUEST_HOST_PAGE_SIZE,
+                             PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANON | MAP_FIXED,
+                             -1,
+                             0);
+            if (map == MAP_FAILED) {
+                return -1;
+            }
+            continue;
+        }
+        if ((current & PROT_WRITE) == 0 &&
+            mprotect((void *)page,
+                     (size_t)GUEST_HOST_PAGE_SIZE,
+                     current | PROT_WRITE) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static uint64_t GuestHandleFixedAnon(uintptr_t address,
                                      size_t length,
                                      int prot)
 {
-    uintptr_t roundedStart = GuestAlignDown(address);
-    uintptr_t roundedEnd = GuestAlignUp(address + length);
-    size_t roundedLength = (size_t)(roundedEnd - roundedStart);
-    uint8_t head[GUEST_HOST_PAGE_SIZE] = { 0 };
-    uint8_t tail[GUEST_HOST_PAGE_SIZE] = { 0 };
-    size_t headLength = (size_t)(address - roundedStart);
-    size_t tailLength = (size_t)(roundedEnd - (address + length));
-    if (headLength > sizeof(head) || tailLength > sizeof(tail)) {
-        return (uint64_t)(-EINVAL);
-    }
-
-    vm_size_t got = 0;
-    if (headLength != 0 &&
-        vm_read_overwrite(mach_task_self(),
-                          (vm_address_t)roundedStart,
-                          (vm_size_t)headLength,
-                          (vm_address_t)head,
-                          &got) != KERN_SUCCESS) {
-        memset(head, 0, headLength);
-    }
-    if (tailLength != 0 &&
-        vm_read_overwrite(mach_task_self(),
-                          (vm_address_t)(address + length),
-                          (vm_size_t)tailLength,
-                          (vm_address_t)tail,
-                          &got) != KERN_SUCCESS) {
-        memset(tail, 0, tailLength);
-    }
-
-    void *map = mmap((void *)roundedStart,
-                     roundedLength,
-                     PROT_READ | PROT_WRITE,
-                     MAP_PRIVATE | MAP_ANON | MAP_FIXED,
-                     -1,
-                     0);
-    if (map == MAP_FAILED) {
+    if (GuestEnsureWritable(address, length) != 0) {
         return GuestErrno();
     }
-    if (headLength != 0) {
-        memcpy((void *)roundedStart, head, headLength);
-    }
-    if (tailLength != 0) {
-        memcpy((void *)(address + length), tail, tailLength);
-    }
-    if (prot != (PROT_READ | PROT_WRITE) &&
-        mprotect((void *)roundedStart, roundedLength, prot) != 0) {
+    memset((void *)address, 0, length);
+    if (GuestProtectRange(address, length, prot) != 0) {
         return GuestErrno();
     }
-    GuestLog("[guest] mmap anon fixed 0x%lx..0x%lx rounded to 0x%lx\n",
+    GuestLog("[guest] mmap anon fixed 0x%lx..0x%lx in host page 0x%lx\n",
              (unsigned long)address,
              (unsigned long)(address + length),
-             (unsigned long)roundedStart);
+             (unsigned long)GuestAlignDown(address));
     return (uint64_t)address;
 }
 
@@ -3308,8 +3392,7 @@ static uint64_t GuestHandleFileMap(int descriptor,
                  tlsWrites);
     }
 
-    if (prot != (PROT_READ | PROT_WRITE) &&
-        mprotect(map, length, prot) != 0) {
+    if (GuestProtectRange(address, length, prot) != 0) {
         int error = errno;
         munmap(map, length);
         return (uint64_t)(-error);
@@ -3326,30 +3409,15 @@ static uint64_t GuestHandleFixedFileMap(int descriptor,
                                         size_t length,
                                         int prot)
 {
-    uintptr_t roundedStart = GuestAlignDown(address);
-    uintptr_t roundedEnd = GuestAlignUp(address + length);
-    size_t roundedLength = (size_t)(roundedEnd - roundedStart);
-
     /*
-     * ld.so already mapped the whole file, so the neighbouring bytes exist.
-     * Make the host pages writable, overlay this segment, then apply the
-     * segment's real protection to the whole 16KB page.
+     * ld.so already mapped the whole file, so this MAP_FIXED only needs to
+     * overlay the segment and make it writable.  The guest range can start
+     * or end in the middle of a 16KB host page; remapping the rounded range
+     * used to hit unmapped pages (ENOMEM) and also discarded the
+     * neighbouring segment's bytes and permissions.
      */
-    if (mprotect((void *)roundedStart,
-                 roundedLength,
-                 PROT_READ | PROT_WRITE) != 0) {
-        void *map = mmap((void *)roundedStart,
-                         roundedLength,
-                         PROT_READ | PROT_WRITE,
-                         MAP_PRIVATE | MAP_ANON | MAP_FIXED,
-                         -1,
-                         0);
-        if (map == MAP_FAILED) {
-            return GuestErrno();
-        }
-        GuestLog("[guest] mmap fixed 0x%lx rounded to fresh page 0x%lx\n",
-                 (unsigned long)address,
-                 (unsigned long)roundedStart);
+    if (GuestEnsureWritable(address, length) != 0) {
+        return GuestErrno();
     }
 
     memset((void *)address, 0, length);
@@ -3379,7 +3447,7 @@ static uint64_t GuestHandleFixedFileMap(int descriptor,
                  tlsWrites);
     }
 
-    if (mprotect((void *)roundedStart, roundedLength, prot) != 0) {
+    if (GuestProtectRange(address, length, prot) != 0) {
         return GuestErrno();
     }
     return (uint64_t)address;
@@ -3426,18 +3494,14 @@ static uint64_t GuestHandleMmap(uint64_t hint,
                          (unsigned long)target);
                 return (uint64_t)(-EINVAL);
             }
-            if (target & (GUEST_HOST_PAGE_SIZE - 1)) {
-                result = GuestHandleFixedAnon(target, requested, prot);
-                goto trace;
-            }
-            flags |= MAP_FIXED;
-        } else {
-            target = GuestAllocateMmapAddress(mapLength, (uintptr_t)hint, NO);
-            if (target == 0) {
-                return (uint64_t)(-ENOMEM);
-            }
-            flags |= MAP_FIXED;
+            result = GuestHandleFixedAnon(target, requested, prot);
+            goto trace;
         }
+        target = GuestAllocateMmapAddress(mapLength, (uintptr_t)hint, NO);
+        if (target == 0) {
+            return (uint64_t)(-ENOMEM);
+        }
+        flags |= MAP_FIXED;
 
         void *map = mmap((void *)target,
                          mapLength,
@@ -3448,15 +3512,12 @@ static uint64_t GuestHandleMmap(uint64_t hint,
         if (map == MAP_FAILED) {
             return GuestErrno();
         }
-        if (prot != (PROT_READ | PROT_WRITE) &&
-            mprotect(map, mapLength, prot) != 0) {
+        if (GuestProtectRange(target, mapLength, prot) != 0) {
             int error = errno;
             munmap(map, mapLength);
             return (uint64_t)(-error);
         }
-        if (!fixed) {
-            GuestRememberMmap(target, mapLength);
-        }
+        GuestRememberMmap(target, mapLength);
         result = (uint64_t)target;
     } else {
         if (descriptor < 0) {
@@ -3468,20 +3529,11 @@ static uint64_t GuestHandleMmap(uint64_t hint,
                          (unsigned long)hint);
                 return (uint64_t)(-EINVAL);
             }
-            if ((uintptr_t)hint & (GUEST_HOST_PAGE_SIZE - 1)) {
-                result = GuestHandleFixedFileMap(descriptor,
-                                                 offset,
-                                                 (uintptr_t)hint,
-                                                 mapLength,
-                                                 prot);
-            } else {
-                result = GuestHandleFileMap(descriptor,
-                                            offset,
-                                            (uintptr_t)hint,
-                                            mapLength,
-                                            prot,
-                                            NO);
-            }
+            result = GuestHandleFixedFileMap(descriptor,
+                                             offset,
+                                             (uintptr_t)hint,
+                                             requested,
+                                             prot);
         } else {
             uintptr_t target = GuestAllocateMmapAddress(mapLength,
                                                         (uintptr_t)hint,
@@ -3545,25 +3597,23 @@ static uint64_t GuestHandleMprotect(uintptr_t address,
     if (length == 0) {
         return 0;
     }
-    if (mprotect((void *)address, length, prot) == 0) {
-        return 0;
-    }
-    int error = errno;
-    if ((address & (GUEST_HOST_PAGE_SIZE - 1)) != 0 ||
-        (length & (GUEST_HOST_PAGE_SIZE - 1)) != 0) {
-        uintptr_t roundedStart = GuestAlignDown(address);
-        uintptr_t roundedEnd = GuestAlignUp(address + length);
-        if (mprotect((void *)roundedStart,
-                     (size_t)(roundedEnd - roundedStart),
-                     prot) == 0) {
-            GuestLog("[guest] mprotect 0x%lx..0x%lx rounded to 0x%lx\n",
-                     (unsigned long)address,
-                     (unsigned long)(address + length),
-                     (unsigned long)roundedStart);
+    if ((address & (GUEST_HOST_PAGE_SIZE - 1)) == 0 &&
+        (length & (GUEST_HOST_PAGE_SIZE - 1)) == 0) {
+        if (mprotect((void *)address, length, prot) == 0) {
+            if ((prot & PROT_EXEC) != 0) {
+                sys_icache_invalidate((void *)address, length);
+            }
             return 0;
         }
     }
-    return (uint64_t)(-error);
+    if (GuestProtectRange(address, length, prot) == 0) {
+        GuestLog("[guest] mprotect 0x%lx..0x%lx host pages from 0x%lx\n",
+                 (unsigned long)address,
+                 (unsigned long)(address + length),
+                 (unsigned long)GuestAlignDown(address));
+        return 0;
+    }
+    return GuestErrno();
 }
 
 static uintptr_t GuestMapStub(uintptr_t imageStart,
