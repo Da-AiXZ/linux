@@ -8,3 +8,5 @@ xcuserdata/
 *.xcworkspace/xcuserdata/
 .remote/
 .workbuddy/
+
+dist/
