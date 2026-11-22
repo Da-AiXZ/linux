@@ -127,6 +127,8 @@ static void zspyReset(void)
     zspyLastOffset = 0;
 }
 
+static void zspyState(const void *state);
+
 /*
  * Called for every completed inflate(), including the ones that only fill the
  * output buffer.  A tick every 128 calls keeps the log readable while still
@@ -147,7 +149,8 @@ static void zspyReport(zspy_stream *stream, int result, uInt before)
 
     if (result < 0 || result == 2) {
         zspyLog("[zspy] fail ret=%d total_in=%lu total_out=%lu"
-                " avail_in=%u avail_out=%u chunk=%u crc=%08lx calls=%u\n",
+                " avail_in=%u avail_out=%u chunk=%u crc=%08lx calls=%u"
+                " msg=%s\n",
                 result,
                 (unsigned long)stream->total_in,
                 (unsigned long)stream->total_out,
@@ -155,7 +158,15 @@ static void zspyReport(zspy_stream *stream, int result, uInt before)
                 (unsigned int)stream->avail_out,
                 (unsigned int)consumed,
                 (unsigned long)zspyInputCrc,
-                zspyCalls);
+                zspyCalls,
+                stream->msg != NULL ? stream->msg : "-");
+        /*
+         * 0.40.18: the message is the cheapest possible discriminator.
+         * "incorrect data check" means the bytes inflated were wrong while
+         * the state was fine; "invalid distance" / "invalid code" means the
+         * state or the code table was damaged.  Print the state fields too.
+         */
+        zspyState(stream->state);
         return;
     }
     if (result == 1) { /* Z_STREAM_END */
