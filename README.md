@@ -7,19 +7,44 @@
 不是虚拟机，不是模拟器，不是解释器：guest 是 arm64 Linux ELF，指令由 M1 直接执行；
 只把 `svc #0` 改写成分支，跳进自建的 syscall 分发器。
 
-## 当前状态（0.39.3）
+## 当前状态（0.40.11）
 
 | 阶段 | 状态 |
 |---|---|
 | M0 能力探针 | ✅ JIT、fork/spawn、`task_for_pid`、Mach 服务、Hypervisor trap 全部实测 |
 | M1 原生 ELF | ✅ 最小 aarch64 ELF 直接执行，`status=0` |
 | M2 真实 busybox | ✅ glibc static-PIE `busybox` / `pie-hello` 原生执行，`status=0` |
-| M2.5 文件系统 + shell | ✅ 0.34.1 真机：`Run Shell` 六条命令全部正确；外部命令走 checkpoint/restore fork + execve |
-| M3.1 动态链接器 | ✅ 0.35.5 真机：动态 Alpine busybox（`status=0`）与 `apk --version`（`apk-tools 2.14.4, compiled for aarch64.`，`status=0`）全部通过 |
-| M3.2 本地 apk | ✅ 0.37.1 真机：`apk add --initdb --allow-untrusted /tmp/hello.apk` → `(1/1) Installing hello (1.0-r0)`、`status=0`；`Run Installed Hello` 输出 `hello from linux elf` |
-| M3.3 网络 | 🚧 0.38.0 实现 socket 全家族、`pselect6/ppoll`、Linux↔Darwin errno 翻译；0.38.1 修 rootfs `/etc`；0.38.2 带 `cert.pem`；0.38.3 回收 mmap；0.38.4 匿名映射移出跳板窗口；0.38.5 真机 TLS 通过；0.38.6 加 `--no-cache`/mremap/缓存 dump；0.38.7 修 aarch64 open flag 常量并打印 syscall 统计；0.38.8 回到 apk 缓存路径（下载与 CDN **SHA-256 完全一致**）、离线本地索引 update；0.38.9 修掉 mmap 记录泄漏，canary 与 istream 缓冲完整性探针全部干净（输入字节未变、无越界）；0.39.0 把 guest `AT_PAGESZ` 改成 16KB（真机可用，main 索引已能完整解析）；0.39.1 真机证明每块大 read 与 `pread` 逐字节一致、偏移严格顺序（输入 100% 正确），0.39.2 证明 zlib 版本无关（1.2.13 同样失败），0.39.3 给每个匿名映射加 16KB guard page 抓越界写者。**剩余唯一问题**：`apk` 解析索引时随机 `IO ERROR`（`inflate` 返回 `Z_DATA_ERROR`）。已逐条证伪：下载/TLS、缓存文件 SHA-256、apk 版本（Linux 同版本同文件 `OK: 24049`）、输入缓冲被改写、映射末尾越界、4K/16K 页粒度、读到的字节与偏移（`pread` 逐字节一致）、zlib 版本（1.2.13/1.3.1 一致）→ 只剩 **zlib 自身堆状态被写坏**；0.39.3 用 guard page 抓写者 |
+| M2.5 文件系统 + shell | ✅ `Run Shell` 六条命令全部正确；外部命令走 checkpoint/restore fork + execve |
+| M3.1 动态链接器 | ✅ 动态 Alpine busybox 与 `apk --version` 全部通过 |
+| M3.2 本地 apk | ✅ `apk add --initdb --allow-untrusted /tmp/hello.apk` 安装并运行成功 |
+| M3.3 网络 | 🚧 传输层全通（DNS/TCP/TLS/下载/RSA 校验），**卡在 `apk` 解析 `APKINDEX.tar.gz`** |
+| 线程 / guest 信号 / 动态 fork / PTY | ❌ 未实现（M3.3 之后） |
 
-最新版本 **0.39.3 (88)**。项目上下文、决策、真机日志和路线记录在
+最新版本 **0.40.11 (106)**。
+
+### 唯一阻塞项：索引解析时 `IO ERROR`
+
+`apk` 读取仓库索引时 `inflate()` 失败，`apk` 打印 `IO ERROR`，表现为随机失败
+（同一进程有时能完整解析 `OK: 24049`）。
+
+已经**证明**的事实（详见 workspace 仓库 `docs/BUG-index-io-error.md` 第 20 节）：
+
+- 缓存索引与官方 CDN **逐字节一致**（sha256 `c9a6f6d0…` / `2978db48…`）；
+- zlib 实际消费的字节与磁盘**逐位相同**（`crc32(file[:667],1)=1023b41d`，与设备上报值相同）；
+- 索引是**多成员 gzip**，前 667 B 是签名段（解出 1024 B），zlib 在 667 处结束是正确行为；
+- 加载的 libz **没有被补丁改写**（`svc=0 mrs=0 msr=0`）；
+- 崩溃时 `inflate_state` **入场干净**（两个流逐字段相同）；
+- 每次 `mmap` 返回的地址在创建时**都有真实后备**（`vm_region_64` 校验）；
+- 崩溃地址**既不在释放区间**、**也不在任何映射记录**里。
+
+收敛结论：libz 在写一块**从未登记、也从未释放**的地址。三条否定交叉后，唯一剩下的路径是
+`GuestHandleFixedAnon`（子页 `MAP_FIXED`）——它只把地址改成可写并 `memset`，
+**既不建立映射也不登记记录**，因此 guard page、canary、释放环表全都覆盖不到它。
+
+下一步：给该路径补 `GuestRememberMmap` 与日志、审计 `GuestEnsureWritable` 是否真的建立映射、
+把 `GuestHandleMremap` 里直接调宿主的 `munmap` 换成页感知释放。
+
+项目上下文、决策、真机日志和路线记录在
 [Da-AiXZ/linux-workspace](https://github.com/Da-AiXZ/linux-workspace)（私有）。
 
 ## 工作原理

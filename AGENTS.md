@@ -428,3 +428,23 @@ aarch64-linux-gnu-objdump -d Tools/busybox.static | less
 - 不要把 `svc`/`mrs` 改成 `bl`（x30 会被破坏）。
 - 不要用宿主 fork 子进程执行 guest 代码（子进程没有可执行映射）。
 - 不要用文本工具重写 `Tools/*` 二进制。
+
+## 诊断工具（0.40.x 加的，排查索引 IO ERROR 时写的）
+
+| 脚本 | 作用 |
+|---|---|
+| `Tools/verify_patch_sites.py` | 与 `GuestPatchCodeRange` **逐字节同算法**统计 `svc`/`mrs tpidr_el0`/`msr` 站点数，用来核对真机的 `patched=N tls_mrs=N tls_msr=N`。**注意**：478/90/1 是 interp（`ld-musl`）的，apk 与 libz 都是 0 |
+| `Tools/check_exports.py` | 解析 `.dynsym` 校验共享库导出的符号集合；CI 用它断言仪器版 libz 的 27 个符号，缺一个就回退 Alpine 版本 |
+| `Tools/elf_peek.py` | 把设备上报的 `base+offset` 换算成文件偏移，打印程序头、指令字与前后符号。**坑**：这个 `.so` 的 `p_vaddr - p_offset = 0x10000`，`offset-0x10000` 才是文件偏移 |
+| `Tools/patch_inffast.py` | 构建期往 zlib `inffast.c` 的 `if (op > whave)` 前注入 `dprintf`，打印窗口拷贝的判定值 |
+| `Tools/zguard.c` | 替换 zlib 分配器（`-DMY_ZCALLOC`），每个分配独占映射 + 尾页 `PROT_NONE`。`USE_GUARDED_ZLIB=1` 才启用 |
+| `Tools/log_server.py` | 设备日志回传 + 命令队列（支持 `动作名@最低build` 门槛） |
+| `Tools/wait_for_log.py` | 阻塞等待 `.remote/inbox.txt` 出现新行，用于"日志一到就唤醒助手" |
+
+### 仪器版 libz（`USE_ZSPY_ZLIB`，默认开）
+
+`Tools/zspy.c` + `-DZ_PREFIX`：同名导出 zlib 全部公开符号，转发到 `z_*`，
+并在每次 `inflate()` 记录实际消费字节数与 CRC、以及 `inflate_state` 关键字段。
+崩溃时这些行是唯一能看到 zlib 内部状态的窗口。
+
+**发布前记得关掉**（`USE_ZSPY_ZLIB=0`），否则用户拿到的是带日志的库。
