@@ -11,7 +11,7 @@
 guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建 syscall 层。
 不是虚拟机、不是模拟器、不是解释器。
 
-## 当前状态（2026-11-22，0.39.1 / build 86）
+## 当前状态（2026-11-22，0.39.2 / build 87）
 
 - **M0–M2.5 全部真机通过**。0.34.1：`Run Shell` 六条命令（`ls /`、`cat /etc/motd`、
   `uname`、`ls -l /`、`id`、`pwd`）全对，`status=0`；`Run Fork Test` 父子分别输出。
@@ -218,6 +218,21 @@ guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建
   若 `jumps>0` → 有人把索引 fd 倒回去了（症状完全吻合：数据是合法文件字节但位置错）；
   若 `mismatch>0` → guest 拿到的字节与文件不一致；
   若都干净 → 压缩字节可证明正确，破坏只剩 zlib 自身堆状态，下一步隔离其分配。
+- **0.39.1 真机（决定性）**：两次运行都是
+  `read guard checks=18 changed=0 jumps=0 verified=18 mismatch=0` /
+  `checks=11 … verified=11`。也就是说**每一块 ≥64KB 的 read 都与同偏移的 `pread`
+  逐字节相同，且偏移严格顺序推进**：guest 拿到的压缩字节 100% 正确。
+  同一次运行里 community（8.2MB / 18506 包）可以完整解析并打印 `OK: 24049`
+  （= 5543 + 18506），只是另一个仓库随机 EIO，失败位置每次都不同。
+  → 读路径、页粒度、apk 与数据全部排除，**只剩 zlib 本身**（`inflate` 收到正确输入
+  却返回 Z_DATA_ERROR），要么是版本相关的代码路径，要么是它的
+  `inflate_state`/32KB window 被写坏。
+- 0.39.2：**zlib A/B** —— CI 从 Alpine 3.18 取 `zlib 1.2.13-r1`
+  （`lib/libz.so.1.2.13`，SONAME 相同可直接替换），打进 `Helpers/alpine/lib/libz.so.1`；
+  失败则回退 3.20 的 1.3.1。启动 bootstrap 新增 `libz size=…`
+  （**132880 = 1.2.13，132960 = 1.3.1**），用来确认设备上真正加载的是哪一版。
+  若 1.2.13 不再 EIO → 版本相关，直接以 1.2.13 交付；若照样 EIO → 版本无关，
+  下一步给每个匿名映射加 guard page（16KB PROT_NONE）抓越界写者。
 
 ## 两个仓库
 
