@@ -96,7 +96,10 @@ static uLong zspyConsumed;
 static uLong zspyInputCrc = 1; /* zlib starts crc32 at 0, but 0 is ambiguous */
 static uLong zspyLastOffset;
 static unsigned int zspyChunks;
-static uLong zspyOutCrc; /* gzip trailer uses crc32 starting at 0 */
+static uLong zspyOutCrc;
+static const Bytef *zspyChunkPtr;
+static uLong zspyChunkBlocks[32];
+static uInt zspyChunkBlockCount; /* gzip trailer uses crc32 starting at 0 */
 static uInt zspyPrevLeft;
 static Bytef *zspyOutStart;
 static const Bytef *zspyPrevIn;
@@ -135,6 +138,8 @@ static void zspyReset(void)
     zspyConsumed = 0;
     zspyInputCrc = 1;
     zspyLastOffset = 0;
+    zspyChunkPtr = NULL;
+    zspyChunkBlockCount = 0;
 }
 
 static void zspyState(const void *state);
@@ -163,6 +168,22 @@ static void zspyReport(zspy_stream *stream, int result, uInt before)
     zspyLastOffset = stream->total_in;
     zspyPrevLeft = stream->avail_in;
     zspyPrevIn = stream->next_in;
+
+    if (zspyChunkPtr != NULL && zspyChunkBlockCount != 0) {
+        uInt index;
+        for (index = 0; index < zspyChunkBlockCount; index++) {
+            size_t at = (size_t)index * 4096;
+            uLong now = z_crc32(1, zspyChunkPtr + at, 4096);
+            if (now != zspyChunkBlocks[index]) {
+                zspyLog("[zm] block changed at +%lu of 0x%lx old=%08lx new=%08lx\n",
+                        (unsigned long)at,
+                        (unsigned long)(uintptr_t)zspyChunkPtr,
+                        (unsigned long)zspyChunkBlocks[index],
+                        (unsigned long)now);
+                zspyChunkBlocks[index] = now;
+            }
+        }
+    }
 
     if (result < 0 || result == 2) {
         zspyLog("[zspy] fail ret=%d total_in=%lu total_out=%lu"
@@ -315,6 +336,24 @@ int inflate(zspy_stream *stream, int flush)
                        stream->next_in != zspyPrevIn);
     if (freshChunk && stream->avail_in >= 512 && stream->next_in != NULL) {
         uLong chunkCrc = z_crc32(1, stream->next_in, stream->avail_in);
+        /*
+         * 0.40.28: keep a fingerprint of every 4KB of this chunk and re-check
+         * it after inflate() returns.  A block that changes while zlib is
+         * running was written by something else -- zlib never writes to its
+         * input -- and the offset says whether the damage landed in the data
+         * (decoded bytes wrong) or in the gzip trailer (data right, check
+         * fails).  That is exactly the split the six-run batch showed.
+         */
+        zspyChunkPtr = stream->next_in;
+        zspyChunkBlockCount = 0;
+        {
+            uInt at;
+            for (at = 0; at + 4096 <= stream->avail_in &&
+                         zspyChunkBlockCount < 32; at += 4096) {
+                zspyChunkBlocks[zspyChunkBlockCount++] =
+                    z_crc32(1, stream->next_in + at, 4096);
+            }
+        }
         zspyLog("[zc] chunk=%u off=%lu len=%u crc=%08lx"
                 " head=%02x%02x%02x%02x%02x%02x%02x%02x\n",
                 zspyChunks++,
