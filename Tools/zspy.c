@@ -1,0 +1,218 @@
+/*
+ * zspy -- a transparent libz that reports what inflate() really consumes.
+ *
+ * The index data on the device is byte-identical to the CDN (verified by
+ * sha256), the reads are sequential and complete, and yet inflate() returns
+ * Z_DATA_ERROR (-3), which apk turns into "IO ERROR".  Either the bytes zlib
+ * consumes are not the bytes on disk, or inflate_state is damaged while the
+ * stream is being decoded.  This shim answers that with one device run.
+ *
+ * zlib is compiled with -DZ_PREFIX, so its entry points become z_inflate,
+ * z_inflateInit2_ and so on.  This file re-exports the normal names and, in
+ * inflate(), keeps a CRC32 over exactly the input bytes zlib consumed as well
+ * as the offset (total_in) at which it gave up.  Comparing that CRC with the
+ * same prefix of the file on the host separates the two cases:
+ *
+ *   CRC matches  -> the input was perfect, inflate_state was damaged
+ *   CRC differs  -> the input buffer was damaged, and total_in locates it
+ *
+ * Allocation is untouched (zlib's default zcalloc ends up in musl's mallocng),
+ * so the workload behaves exactly like the failing builds.
+ */
+
+#include <stddef.h>
+#include <stdint.h>
+#include <stdarg.h>
+#include <string.h>
+#include <unistd.h>
+#include <stdio.h>
+
+typedef unsigned char Bytef;
+typedef unsigned int uInt;
+typedef unsigned long uLong;
+
+/* zlib's z_stream, laid out for LP64 exactly as zlib.h declares it. */
+typedef struct {
+    const Bytef *next_in;
+    uInt avail_in;
+    uLong total_in;
+    Bytef *next_out;
+    uInt avail_out;
+    uLong total_out;
+    const char *msg;
+    void *state;
+    void *zalloc;
+    void *zfree;
+    void *opaque;
+    int data_type;
+    uLong adler;
+    uLong reserved;
+} zspy_stream;
+
+extern int z_inflate(zspy_stream *strm, int flush);
+extern int z_inflateInit_(zspy_stream *strm, const char *version,
+                          int stream_size);
+extern int z_inflateInit2_(zspy_stream *strm, int windowBits,
+                           const char *version, int stream_size);
+extern int z_inflateEnd(zspy_stream *strm);
+extern int z_inflateReset(zspy_stream *strm);
+extern int z_inflateReset2(zspy_stream *strm, int windowBits);
+extern uLong z_crc32(uLong crc, const Bytef *buf, uInt len);
+extern uLong z_adler32(uLong adler, const Bytef *buf, uInt len);
+extern const char *z_zlibVersion(void);
+extern unsigned long z_zlibCompileFlags(void);
+
+static char zspyBuffer[256];
+static unsigned int zspyCalls;
+static unsigned int zspyStreams;
+static uLong zspyConsumed;
+static uLong zspyInputCrc = 1; /* zlib starts crc32 at 0, but 0 is ambiguous */
+static uLong zspyLastOffset;
+
+static void zspyWrite(const char *text, size_t length)
+{
+    ssize_t ignored = write(STDERR_FILENO, text, length);
+    (void)ignored;
+}
+
+static void zspyLog(const char *format, ...)
+{
+    va_list arguments;
+    int length;
+
+    va_start(arguments, format);
+    length = vsnprintf(zspyBuffer, sizeof(zspyBuffer), format, arguments);
+    va_end(arguments);
+    if (length <= 0) {
+        return;
+    }
+    if ((size_t)length > sizeof(zspyBuffer) - 1) {
+        length = (int)sizeof(zspyBuffer) - 1;
+    }
+    zspyWrite(zspyBuffer, (size_t)length);
+}
+
+static void zspyReset(void)
+{
+    zspyCalls = 0;
+    zspyConsumed = 0;
+    zspyInputCrc = 1;
+    zspyLastOffset = 0;
+}
+
+/*
+ * Called for every completed inflate(), including the ones that only fill the
+ * output buffer.  A tick every 128 calls keeps the log readable while still
+ * showing forward progress; failures and stream ends are always printed.
+ */
+static void zspyReport(zspy_stream *stream, int result, uInt before)
+{
+    uInt consumed = before - stream->avail_in;
+
+    zspyCalls++;
+    if (consumed != 0) {
+        zspyInputCrc = z_crc32(zspyInputCrc,
+                               stream->next_in - consumed,
+                               consumed);
+        zspyConsumed += consumed;
+    }
+    zspyLastOffset = stream->total_in;
+
+    if (result < 0 || result == 2) {
+        zspyLog("[zspy] fail ret=%d total_in=%lu total_out=%lu"
+                " avail_in=%u avail_out=%u chunk=%u crc=%08lx calls=%u\n",
+                result,
+                (unsigned long)stream->total_in,
+                (unsigned long)stream->total_out,
+                (unsigned int)stream->avail_in,
+                (unsigned int)stream->avail_out,
+                (unsigned int)consumed,
+                (unsigned long)zspyInputCrc,
+                zspyCalls);
+        return;
+    }
+    if (result == 1) { /* Z_STREAM_END */
+        zspyLog("[zspy] end total_in=%lu total_out=%lu crc=%08lx calls=%u\n",
+                (unsigned long)stream->total_in,
+                (unsigned long)stream->total_out,
+                (unsigned long)zspyInputCrc,
+                zspyCalls);
+        return;
+    }
+    if ((zspyCalls & 127u) == 0) {
+        zspyLog("[zspy] tick calls=%u total_in=%lu total_out=%lu\n",
+                zspyCalls,
+                (unsigned long)stream->total_in,
+                (unsigned long)stream->total_out);
+    }
+}
+
+int inflateInit_(zspy_stream *stream, const char *version, int streamSize)
+{
+    zspyReset();
+    zspyStreams++;
+    zspyLog("[zspy] init streams=%u state=%p\n", zspyStreams, stream->state);
+    return z_inflateInit_(stream, version, streamSize);
+}
+
+int inflateInit2_(zspy_stream *stream, int windowBits, const char *version,
+                  int streamSize)
+{
+    int result;
+
+    zspyReset();
+    zspyStreams++;
+    result = z_inflateInit2_(stream, windowBits, version, streamSize);
+    zspyLog("[zspy] init2 wbits=%d ret=%d streams=%u state=%p\n",
+            windowBits, result, zspyStreams, stream->state);
+    return result;
+}
+
+int inflate(zspy_stream *stream, int flush)
+{
+    uInt before = stream->avail_in;
+    int result = z_inflate(stream, flush);
+    zspyReport(stream, result, before);
+    return result;
+}
+
+int inflateEnd(zspy_stream *stream)
+{
+    int result = z_inflateEnd(stream);
+    zspyLog("[zspy] end-of-stream state=%p ret=%d consumed=%lu crc=%08lx\n",
+            stream->state, result, (unsigned long)zspyConsumed,
+            (unsigned long)zspyInputCrc);
+    return result;
+}
+
+int inflateReset(zspy_stream *stream)
+{
+    zspyReset();
+    return z_inflateReset(stream);
+}
+
+int inflateReset2(zspy_stream *stream, int windowBits)
+{
+    zspyReset();
+    return z_inflateReset2(stream, windowBits);
+}
+
+uLong crc32(uLong crc, const Bytef *buffer, uInt length)
+{
+    return z_crc32(crc, buffer, length);
+}
+
+uLong adler32(uLong adler, const Bytef *buffer, uInt length)
+{
+    return z_adler32(adler, buffer, length);
+}
+
+const char *zlibVersion(void)
+{
+    return z_zlibVersion();
+}
+
+unsigned long zlibCompileFlags(void)
+{
+    return z_zlibCompileFlags();
+}

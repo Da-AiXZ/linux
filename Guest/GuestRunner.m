@@ -2763,6 +2763,22 @@ static uint64_t GuestSyscallDispatchInner(uint64_t *args,
             GuestLogFileError("openat", guestPath, hostPath, error);
             return (uint64_t)(-(int64_t)error);
         }
+        /*
+         * apk reads its repository indexes through the cache directory, and a
+         * failing index parse is indistinguishable from a failing open in the
+         * log.  Name the descriptors that matter so a read trace can be tied
+         * back to a file.
+         */
+        if (strstr(hostPath, "/var/cache/apk") != NULL ||
+            strstr(hostPath, "localrepo") != NULL) {
+            struct stat opened;
+            long long size = -1;
+            if (fstat(descriptor, &opened) == 0) {
+                size = (long long)opened.st_size;
+            }
+            GuestLog("[guest] openat fd=%d size=%lld %s\n",
+                     descriptor, size, hostPath);
+        }
         return (uint64_t)descriptor;
     }
     case 61: { /* getdents64 */

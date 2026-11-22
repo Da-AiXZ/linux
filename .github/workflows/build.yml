@@ -75,6 +75,42 @@ jobs:
           file /tmp/libz-guard.so.1
           ls -l /tmp/libz-guard.so.1
 
+      # zspy: same zlib, default allocator, but -DZ_PREFIX turns the entry
+      # points into z_inflate/z_inflateInit2_ and Tools/zspy.c re-exports the
+      # normal names, logging the exact input prefix zlib consumed.  This is
+      # the instrument that separates "input buffer damaged" from
+      # "inflate_state damaged", now that the cached data is known to be
+      # byte-identical to the CDN.
+      - name: Build instrumented libz (zspy)
+        continue-on-error: true
+        run: |
+          set -u
+          brew install zig >/dev/null 2>&1 || true
+          if ! command -v zig >/dev/null 2>&1; then
+            echo "zig unavailable, keeping Alpine libz"
+            exit 0
+          fi
+          curl -fsSL -o /tmp/zlib2.tar.gz \
+            https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz
+          rm -rf /tmp/zlib2
+          mkdir -p /tmp/zlib2
+          tar -xzf /tmp/zlib2.tar.gz -C /tmp/zlib2 --strip-components=1
+          mkdir -p /tmp/zspy
+          for f in /tmp/zlib2/*.c; do
+            zig cc -target aarch64-linux-musl -O2 -fPIC -DZ_PREFIX \
+              -D_LARGEFILE64_SOURCE=1 -c "$f" -o "/tmp/zspy/$(basename "$f" .c).o" \
+              || { echo "zlib prefix build failed"; exit 0; }
+          done
+          cp Tools/zspy.c /tmp/zspy/zspy.c
+          zig cc -target aarch64-linux-musl -O2 -fPIC -c /tmp/zspy/zspy.c \
+            -o /tmp/zspy/zspy.o || { echo "zspy build failed"; exit 0; }
+          ( cd /tmp/zspy && zig cc -target aarch64-linux-musl -shared \
+              -Wl,-soname,libz.so.1 -o /tmp/libz-spy.so.1 *.o ) \
+            || { echo "zspy link failed"; exit 0; }
+          file /tmp/libz-spy.so.1
+          ls -l /tmp/libz-spy.so.1
+          llvm-nm -D --defined-only /tmp/libz-spy.so.1 2>/dev/null | grep -E " T (inflate|crc32)" | head -5 || true
+
       - name: Package IPA
         run: |
           set -eux
@@ -108,7 +144,10 @@ jobs:
           # write into a hard fault during index parsing instead of a silent
           # EIO, but it does not catch the writer (the write is intra-page), so
           # it is off by default.  Set USE_GUARDED_ZLIB=1 to enable it.
-          if [ -f /tmp/libz-guard.so.1 ] && [ "${USE_GUARDED_ZLIB:-0}" = "1" ]; then
+          if [ -f /tmp/libz-spy.so.1 ] && [ "${USE_ZSPY_ZLIB:-1}" = "1" ]; then
+            cp /tmp/libz-spy.so.1 "$APP/Helpers/alpine/lib/libz.so.1"
+            echo "instrumented libz in use"
+          elif [ -f /tmp/libz-guard.so.1 ] && [ "${USE_GUARDED_ZLIB:-0}" = "1" ]; then
             cp /tmp/libz-guard.so.1 "$APP/Helpers/alpine/lib/libz.so.1"
             echo "guarded libz in use"
           else
