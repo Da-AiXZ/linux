@@ -109,7 +109,19 @@ jobs:
             || { echo "zspy link failed"; exit 0; }
           file /tmp/libz-spy.so.1
           ls -l /tmp/libz-spy.so.1
-          llvm-nm -D --defined-only /tmp/libz-spy.so.1 2>/dev/null | grep -E " T (inflate|crc32)" | head -5 || true
+          # A missing export is invisible until the device tries to relocate
+          # libapk, and that costs an install to find out.  Fail here and fall
+          # back to Alpine's libz instead of shipping a library that cannot
+          # resolve deflate/uncompress.
+          python3 Tools/check_exports.py /tmp/libz-spy.so.1 \
+            inflate inflateInit_ inflateInit2_ inflateEnd inflateReset \
+            inflateSync inflateCopy \
+            deflate deflateInit_ deflateInit2_ deflateEnd deflateReset \
+            deflateParams deflateBound \
+            compress compress2 compressBound uncompress uncompress2 \
+            crc32 crc32_z adler32 adler32_z zlibVersion zlibCompileFlags \
+            zError get_crc_table \
+            || { echo "zspy is missing exports, keeping Alpine libz"; rm -f /tmp/libz-spy.so.1; }
 
       - name: Package IPA
         run: |

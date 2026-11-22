@@ -61,6 +61,33 @@ extern uLong z_crc32(uLong crc, const Bytef *buf, uInt len);
 extern uLong z_adler32(uLong adler, const Bytef *buf, uInt len);
 extern const char *z_zlibVersion(void);
 extern unsigned long z_zlibCompileFlags(void);
+extern int z_deflate(zspy_stream *strm, int flush);
+extern int z_deflateInit_(zspy_stream *strm, int level, const char *version,
+                          int stream_size);
+extern int z_deflateInit2_(zspy_stream *strm, int level, int method,
+                           int windowBits, int memLevel, int strategy,
+                           const char *version, int stream_size);
+extern int z_deflateEnd(zspy_stream *strm);
+extern int z_deflateReset(zspy_stream *strm);
+extern int z_deflateParams(zspy_stream *strm, int level, int strategy);
+extern unsigned long z_deflateBound(zspy_stream *strm, unsigned long sourceLen);
+extern int z_compress(Bytef *dest, unsigned long *destLen,
+                      const Bytef *source, unsigned long sourceLen);
+extern int z_compress2(Bytef *dest, unsigned long *destLen,
+                       const Bytef *source, unsigned long sourceLen, int level);
+extern unsigned long z_compressBound(unsigned long sourceLen);
+extern int z_uncompress(Bytef *dest, unsigned long *destLen,
+                        const Bytef *source, unsigned long sourceLen);
+extern int z_uncompress2(Bytef *dest, unsigned long *destLen,
+                         const Bytef *source, unsigned long *sourceLen);
+extern const char *z_zError(int error);
+extern unsigned long z_crc32_z(unsigned long crc, const Bytef *buf,
+                               size_t len);
+extern unsigned long z_adler32_z(unsigned long adler, const Bytef *buf,
+                                 size_t len);
+extern void *z_get_crc_table(void);
+extern int z_inflateSync(zspy_stream *strm);
+extern int z_inflateCopy(zspy_stream *dest, zspy_stream *source);
 
 static char zspyBuffer[256];
 static unsigned int zspyCalls;
@@ -215,4 +242,108 @@ const char *zlibVersion(void)
 unsigned long zlibCompileFlags(void)
 {
     return z_zlibCompileFlags();
+}
+
+/*
+ * libapk links against the whole zlib surface, not just the inflate half:
+ * the first instrumented build died in the loader with
+ * "Error relocating /lib/libapk.so.2.14.0: deflate: symbol not found".
+ * Everything below forwards unchanged, so nothing here changes behaviour.
+ */
+int deflate(zspy_stream *stream, int flush)
+{
+    return z_deflate(stream, flush);
+}
+
+int deflateInit_(zspy_stream *stream, int level, const char *version,
+                 int streamSize)
+{
+    return z_deflateInit_(stream, level, version, streamSize);
+}
+
+int deflateInit2_(zspy_stream *stream, int level, int method, int windowBits,
+                  int memLevel, int strategy, const char *version,
+                  int streamSize)
+{
+    return z_deflateInit2_(stream, level, method, windowBits, memLevel,
+                           strategy, version, streamSize);
+}
+
+int deflateEnd(zspy_stream *stream)
+{
+    return z_deflateEnd(stream);
+}
+
+int deflateReset(zspy_stream *stream)
+{
+    return z_deflateReset(stream);
+}
+
+int deflateParams(zspy_stream *stream, int level, int strategy)
+{
+    return z_deflateParams(stream, level, strategy);
+}
+
+unsigned long deflateBound(zspy_stream *stream, unsigned long sourceLen)
+{
+    return z_deflateBound(stream, sourceLen);
+}
+
+int compress(Bytef *dest, unsigned long *destLen, const Bytef *source,
+             unsigned long sourceLen)
+{
+    return z_compress(dest, destLen, source, sourceLen);
+}
+
+int compress2(Bytef *dest, unsigned long *destLen, const Bytef *source,
+              unsigned long sourceLen, int level)
+{
+    return z_compress2(dest, destLen, source, sourceLen, level);
+}
+
+unsigned long compressBound(unsigned long sourceLen)
+{
+    return z_compressBound(sourceLen);
+}
+
+int uncompress(Bytef *dest, unsigned long *destLen, const Bytef *source,
+               unsigned long sourceLen)
+{
+    return z_uncompress(dest, destLen, source, sourceLen);
+}
+
+int uncompress2(Bytef *dest, unsigned long *destLen, const Bytef *source,
+                unsigned long *sourceLen)
+{
+    return z_uncompress2(dest, destLen, source, sourceLen);
+}
+
+const char *zError(int error)
+{
+    return z_zError(error);
+}
+
+unsigned long crc32_z(unsigned long crc, const Bytef *buffer, size_t length)
+{
+    return z_crc32_z(crc, buffer, length);
+}
+
+unsigned long adler32_z(unsigned long adler, const Bytef *buffer, size_t length)
+{
+    return z_adler32_z(adler, buffer, length);
+}
+
+void *get_crc_table(void)
+{
+    return z_get_crc_table();
+}
+
+int inflateSync(zspy_stream *stream)
+{
+    return z_inflateSync(stream);
+}
+
+int inflateCopy(zspy_stream *dest, zspy_stream *source)
+{
+    return z_inflateCopy(dest, source);
 }
