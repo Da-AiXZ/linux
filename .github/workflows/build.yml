@@ -101,6 +101,8 @@ jobs:
           grep -c "\[zl\]" /tmp/zlib2/inflate.c
           python3 Tools/patch_inffast_len.py /tmp/zlib2/inffast.c
           grep -c "\[zf3\]" /tmp/zlib2/inffast.c
+          python3 Tools/patch_updatewindow.py /tmp/zlib2/inflate.c
+          grep -c "\[zu\]" /tmp/zlib2/inflate.c
           mkdir -p /tmp/zspy
           for f in /tmp/zlib2/*.c; do
             zig cc -target aarch64-linux-musl -O2 -fPIC -DZ_PREFIX \
