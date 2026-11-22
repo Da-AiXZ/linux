@@ -184,15 +184,19 @@ jobs:
           set -u
           BIN="build/Build/Products/Release-iphoneos/Probe.app/Helpers/alpine-apk"
           test -f "$BIN"
+          file "$BIN"
           if command -v llvm-objdump >/dev/null 2>&1; then
             OBJDUMP=llvm-objdump
           else
             OBJDUMP=objdump
           fi
-          SVC=$($OBJDUMP -d "$BIN" 2>/dev/null | grep -cE '\bsvc\s+#0x0?\b' || true)
-          MRS=$($OBJDUMP -d "$BIN" 2>/dev/null | grep -cE 'mrs[[:space:]]+x[0-9]+, tpidr_el0' || true)
-          MSR=$($OBJDUMP -d "$BIN" 2>/dev/null | grep -cE 'msr[[:space:]]+tpidr_el0, x[0-9]+' || true)
-          echo "static svc=$SVC mrs=$MRS msr=$MSR (runtime expects 478/90/1)"
+          DIS="$("$OBJDUMP" -d "$BIN" 2>&1 || true)"
+          echo "$DIS" | head -5
+          SVC=$(printf '%s\n' "$DIS" | grep -cE '[[:space:]]svc[[:space:]]' || true)
+          TP=$(printf '%s\n' "$DIS" | grep -c 'tpidr_el0' || true)
+          MSR=$(printf '%s\n' "$DIS" | grep -cE '[[:space:]]msr[[:space:]]+tpidr_el0' || true)
+          MRS=$((TP - MSR))
+          echo "static svc=$SVC mrs=$MRS msr=$MSR tpidr=$TP (runtime says svc=478 mrs=90 msr=1)"
 
       - name: Upload IPAs
         uses: actions/upload-artifact@v4
