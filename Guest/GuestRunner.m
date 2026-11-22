@@ -575,6 +575,52 @@ static void GuestSignalHandler(int signalNumber,
                 }
             }
         }
+        /*
+         * 0.40.15: len is -1, so inflate_fast's do/while(len > 2) can never
+         * end.  len comes straight from state->length, which inflate() sets
+         * from here.val of the lencode table.  Read the state at fault time:
+         * a length outside 0..258 and a sane lencode/lenbits means the code
+         * table itself was corrupted, which names the next thing to chase.
+         */
+        {
+            kern_return_t stateStatus = KERN_FAILURE;
+            uint64_t stateAddress =
+                GuestSafeRead64(registers[0] + 0x38, &stateStatus);
+            if (stateStatus == KERN_SUCCESS && stateAddress != 0) {
+                uint64_t modeWord =
+                    GuestSafeRead64(stateAddress + 8, &stateStatus);
+                uint64_t lengthWord =
+                    GuestSafeRead64(stateAddress + 92, &stateStatus);
+                uint64_t wsizeWord =
+                    GuestSafeRead64(stateAddress + 60, &stateStatus);
+                uint64_t whaveWord =
+                    GuestSafeRead64(stateAddress + 64, &stateStatus);
+                uint64_t windowWord =
+                    GuestSafeRead64(stateAddress + 72, &stateStatus);
+                uint64_t lencodeWord =
+                    GuestSafeRead64(stateAddress + 104, &stateStatus);
+                uint64_t lenbitsWord =
+                    GuestSafeRead64(stateAddress + 120, &stateStatus);
+                if (stateStatus == KERN_SUCCESS) {
+                    length = snprintf(text,
+                                      sizeof(text),
+                                      "[guest] state=0x%llx mode=%u length=%u"
+                                      " wsize=%u whave=%u window=0x%llx"
+                                      " lencode=0x%llx lenbits=%u\n",
+                                      (unsigned long long)stateAddress,
+                                      (unsigned)(modeWord & 0xffffffffu),
+                                      (unsigned)(lengthWord & 0xffffffffu),
+                                      (unsigned)(wsizeWord & 0xffffffffu),
+                                      (unsigned)(whaveWord & 0xffffffffu),
+                                      (unsigned long long)windowWord,
+                                      (unsigned long long)lencodeWord,
+                                      (unsigned)(lenbitsWord & 0xffffffffu));
+                    if (length > 0) {
+                        GuestWriteAll(STDOUT_FILENO, text, (size_t)length);
+                    }
+                }
+            }
+        }
         GuestDumpMmapRecords();
     }
 
