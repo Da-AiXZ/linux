@@ -409,6 +409,20 @@ static void GuestSignalHandler(int signalNumber,
             GuestWriteAll(STDOUT_FILENO, text, (size_t)length);
         }
     }
+    /*
+     * The fault address matters as much as pc: if it lands inside a live
+     * mapping the writer aliased somebody else's memory, and if it lands in no
+     * mapping at all then a range we handed out was never mapped (or was
+     * released while still owned).
+     */
+    {
+        char faulted[128];
+        GuestDescribeAddress((uintptr_t)far, faulted, sizeof(faulted));
+        length = snprintf(text, sizeof(text), "[guest] far in %s\n", faulted);
+        if (length > 0) {
+            GuestWriteAll(STDOUT_FILENO, text, (size_t)length);
+        }
+    }
 
     length = snprintf(text,
                       sizeof(text),
