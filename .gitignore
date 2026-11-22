@@ -6,3 +6,5 @@ Payload/
 .DS_Store
 xcuserdata/
 *.xcworkspace/xcuserdata/
+.remote/
+.workbuddy/

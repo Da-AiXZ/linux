@@ -2003,6 +2003,46 @@ static unsigned int GuestReadTraceCount = 0;
  */
 #define GUEST_CANARY_SLOTS 64
 /*
+ * anonymous-mmap size histogram
+ *
+ * The 0.39.3 run showed 1426 mmaps and 1413 munmaps for one `apk update',
+ * with brk never growing past 0x10000 of the 64MB heap.  Everything therefore
+ * lives in mmap-backed mallocng groups, and the group geometry (slot count
+ * per mapping) depends on the page size musl was told: at 16KB, mallocng's
+ * "size*cnt + UNIT > pagesize/2" test packs two 7KB objects into one mapping,
+ * while at 4KB each of them gets its own.  That is exactly the neighbourhood
+ * of zlib's inflate_state, so the distribution is worth logging.
+ */
+#define GUEST_MMAP_HISTOGRAM_BUCKETS 8
+static unsigned int GuestMmapHistogram[GUEST_MMAP_HISTOGRAM_BUCKETS];
+static unsigned int GuestMmapFixedRejected;
+static unsigned int GuestMmapFixedBelowBrk;
+
+static void GuestRecordMmapSize(size_t requested)
+{
+    unsigned int bucket = 0;
+    size_t limit = 4096;
+    while (bucket + 1 < GUEST_MMAP_HISTOGRAM_BUCKETS && requested > limit) {
+        bucket++;
+        limit <<= 1;
+    }
+    GuestMmapHistogram[bucket]++;
+}
+
+static void GuestLogMmapHistogram(void)
+{
+    static const char *labels[GUEST_MMAP_HISTOGRAM_BUCKETS] = {
+        "<=4K", "<=8K", "<=16K", "<=32K", "<=64K", "<=128K", "<=256K", ">256K"
+    };
+    GuestLog("[guest] mmap hist:");
+    for (int index = 0; index < GUEST_MMAP_HISTOGRAM_BUCKETS; index++) {
+        GuestLog(" %s=%u", labels[index], GuestMmapHistogram[index]);
+    }
+    GuestLog("  fixed-rejected=%u fixed-below-brk=%u\n",
+             GuestMmapFixedRejected,
+             GuestMmapFixedBelowBrk);
+}
+/*
  * Page size reported to the guest in AT_PAGESZ.  Darwin behaves like a
  * 16KB-page kernel, and advertising 16KB makes musl/mallocng round every
  * mmap/munmap to the same granularity, which removes the 4KB/16KB mismatch
@@ -2046,7 +2086,14 @@ static uintptr_t GuestCanarySlot(uintptr_t address, size_t requested)
 
 static void GuestCanaryPlace(uintptr_t address, size_t requested, size_t mapLength)
 {
-    if (requested < 65536) {
+    /*
+     * 0.39.3 only armed this for mappings of 64KB or more, which excluded the
+     * two objects that actually matter: zlib's inflate_state (~7.2KB) and its
+     * 32KB window.  Arm every mapping that still has a 4K-aligned slot inside
+     * the host mapping; when `requested' is already 16KB-aligned the slot
+     * coincides with the guard page and is skipped by the check below.
+     */
+    if (requested < 4096) {
         return;
     }
     uintptr_t slot = GuestCanarySlot(address, requested);
@@ -2398,6 +2445,7 @@ static void GuestLogSyscallStats(void)
 {
     GuestCanaryCheckAll();
     GuestReadGuardVerifyAll();
+    GuestLogMmapHistogram();
     GuestLog("[guest] read guard checks=%u changed=%u jumps=%u verified=%u"
              " mismatch=%u\n",
              GuestReadGuardChecks,
@@ -5260,6 +5308,19 @@ static uint64_t GuestHandleFixedAnon(uintptr_t address,
     if (GuestEnsureWritable(address, length) != 0) {
         return GuestErrno();
     }
+    if (address >= GuestHeapBase && address < GuestBrkCurrent) {
+        /*
+         * The guest is replacing pages it already handed out to itself.  On
+         * Linux that is legal (MAP_FIXED replaces), but if this ever lands on
+         * live heap our memset below silently destroys it, so make it visible.
+         */
+        GuestMmapFixedBelowBrk++;
+        GuestLog("[guest] fixed anon below brk addr=0x%lx len=0x%lx"
+                 " brk=0x%lx\n",
+                 (unsigned long)address,
+                 (unsigned long)length,
+                 (unsigned long)GuestBrkCurrent);
+    }
     memset((void *)address, 0, length);
     if (GuestProtectRange(address, length, prot) != 0) {
         return GuestErrno();
@@ -5413,8 +5474,24 @@ static uint64_t GuestHandleMmap(uint64_t hint,
         uintptr_t target = (uintptr_t)hint;
         if (fixed) {
             if (GuestRangeOverlapsRuntime(target, mapLength)) {
-                GuestLog("[guest] mmap fixed overlaps runtime: 0x%lx\n",
-                         (unsigned long)target);
+                /*
+                 * Linux honours MAP_FIXED unconditionally; we refuse anything
+                 * that collides with the runtime image, island, heap or
+                 * stack.  musl asks for a 4KB PROT_NONE meta area at brk on
+                 * every run, so record the exact request plus the heap state
+                 * to tell "unused tail" from "already used heap".
+                 */
+                GuestMmapFixedRejected++;
+                GuestLog("[guest] mmap fixed overlaps runtime: 0x%lx"
+                         " len=0x%lx prot=0x%x flags=0x%llx"
+                         " brk=0x%lx heap=0x%lx..0x%lx\n",
+                         (unsigned long)target,
+                         (unsigned long)requested,
+                         prot,
+                         (unsigned long long)guestFlags,
+                         (unsigned long)GuestBrkCurrent,
+                         (unsigned long)GuestHeapBase,
+                         (unsigned long)GuestHeapEnd);
                 return (uint64_t)(-EINVAL);
             }
             result = GuestHandleFixedAnon(target, requested, prot);
@@ -5456,6 +5533,7 @@ static uint64_t GuestHandleMmap(uint64_t hint,
         }
         GuestRememberMmap(target, mapLength);
         GuestCanaryPlace(target, requested, mapLength);
+        GuestRecordMmapSize(requested);
         result = (uint64_t)target;
     } else {
         if (descriptor < 0) {
@@ -5463,8 +5541,15 @@ static uint64_t GuestHandleMmap(uint64_t hint,
         }
         if (fixed) {
             if (GuestRangeOverlapsRuntime((uintptr_t)hint, mapLength)) {
-                GuestLog("[guest] mmap fixed overlaps runtime: 0x%lx\n",
-                         (unsigned long)hint);
+                GuestMmapFixedRejected++;
+                GuestLog("[guest] mmap fixed overlaps runtime: 0x%lx"
+                         " len=0x%lx prot=0x%x flags=0x%llx fd=%d off=0x%llx\n",
+                         (unsigned long)hint,
+                         (unsigned long)requested,
+                         prot,
+                         (unsigned long long)guestFlags,
+                         descriptor,
+                         (unsigned long long)offset);
                 return (uint64_t)(-EINVAL);
             }
             result = GuestHandleFixedFileMap(descriptor,

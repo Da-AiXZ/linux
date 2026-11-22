@@ -1,6 +1,7 @@
 #import "ProbeViewController.h"
 #import "ProbeController.h"
 #import "GuestLauncher.h"
+#import "ProbeRemote.h"
 
 @interface ProbeViewController ()
 
@@ -10,6 +11,8 @@
 @property (nonatomic, strong) GuestLauncher *guestLauncher;
 @property (nonatomic, strong) NSDateFormatter *formatter;
 @property (nonatomic) BOOL running;
+@property (nonatomic, strong) NSTimer *remoteTimer;
+@property (nonatomic) BOOL pollingRemote;
 
 @end
 
@@ -57,6 +60,14 @@
     [self appendLog:[NSString stringWithFormat:@"build %@ (%@)", version, build]];
     [self appendLog:@"Tap ... in the top-right corner to choose an action."];
     [self appendLog:@"Target: iPad Pro 2021 (M1), iPadOS 16.6.1."];
+    [self appendLog:[NSString stringWithFormat:@"remote log server: %@",
+                                               [ProbeRemote baseURL]]];
+
+    self.remoteTimer = [NSTimer scheduledTimerWithTimeInterval:3.0
+                                                        target:self
+                                                      selector:@selector(pollRemote)
+                                                      userInfo:nil
+                                                       repeats:YES];
 
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(handleProbeURL:)
@@ -164,6 +175,20 @@
                                       handler:^(__kindof UIAction *action) {
         [weakSelf runBash];
     }];
+    UIAction *setRemote =
+        [UIAction actionWithTitle:@"Set Remote URL..."
+                            image:nil
+                       identifier:nil
+                          handler:^(__kindof UIAction *action) {
+        [weakSelf promptForRemoteURL];
+    }];
+    UIAction *uploadLog =
+        [UIAction actionWithTitle:@"Upload Log Now"
+                            image:nil
+                       identifier:nil
+                          handler:^(__kindof UIAction *action) {
+        [weakSelf uploadLogNow];
+    }];
 
     UIMenu *probeSection = [UIMenu menuWithTitle:@""
                                            image:nil
@@ -183,9 +208,15 @@
                                                     installedHello, apkUpdate,
                                                     apkUpdateLocal, gzipCheck,
                                                     apkAddBash, bash]];
+    UIMenu *remoteSection = [UIMenu menuWithTitle:@""
+                                            image:nil
+                                       identifier:nil
+                                          options:UIMenuOptionsDisplayInline
+                                         children:@[setRemote, uploadLog]];
 
     return [UIMenu menuWithTitle:@"Linux Probe"
-                       children:@[probeSection, staticSection, alpineSection]];
+                       children:@[probeSection, staticSection, alpineSection,
+                                  remoteSection]];
 }
 
 - (void)handleProbeURL:(NSNotification *)notification
@@ -213,6 +244,126 @@
 {
     self.running = NO;
     self.menuItem.enabled = YES;
+
+    /*
+     * Every action ends here, so this is the single place where the full log
+     * is pushed to the workstation.  Nothing is written to disk: the log only
+     * exists in the text view, and the server keeps the copy.
+     */
+    NSString *log = self.logView.text ?: @"";
+    if (log.length == 0 || ![ProbeRemote configured]) {
+        return;
+    }
+    __weak typeof(self) weakSelf = self;
+    [ProbeRemote uploadLog:log completion:^(NSString *status) {
+        if (status.length > 0) {
+            [weakSelf appendLog:status];
+        }
+    }];
+}
+
+- (void)promptForRemoteURL
+{
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:@"Remote log server"
+                         message:@"http://<host>:8765 (IP literal, same Wi-Fi)"
+                  preferredStyle:UIAlertControllerStyleAlert];
+
+    __weak typeof(self) weakSelf = self;
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
+        field.text = [ProbeRemote baseURL];
+        field.keyboardType = UIKeyboardTypeURL;
+        field.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        field.autocorrectionType = UITextAutocorrectionTypeNo;
+        field.clearButtonMode = UITextFieldViewModeWhileEditing;
+    }];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                              style:UIAlertActionStyleCancel
+                                            handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Save"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *action) {
+        [ProbeRemote setBaseURL:alert.textFields.firstObject.text ?: @""];
+        [weakSelf appendLog:[NSString stringWithFormat:@"remote set to %@",
+                                                       [ProbeRemote baseURL]]];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)uploadLogNow
+{
+    NSString *log = self.logView.text ?: @"";
+    __weak typeof(self) weakSelf = self;
+    [ProbeRemote uploadLog:log completion:^(NSString *status) {
+        if (status.length > 0) {
+            [weakSelf appendLog:status];
+        }
+    }];
+}
+
+/*
+ * Polling keeps the loop closed: the workstation drops a command line into
+ * its queue and the app runs the corresponding menu action by itself.  It is
+ * paused while an action runs and while no server is configured.
+ */
+- (void)pollRemote
+{
+    if (self.running || self.pollingRemote || ![ProbeRemote configured]) {
+        return;
+    }
+    self.pollingRemote = YES;
+    __weak typeof(self) weakSelf = self;
+    [ProbeRemote pollAction:^(NSString *action) {
+        weakSelf.pollingRemote = NO;
+        if (action.length == 0) {
+            return;
+        }
+        [weakSelf performRemoteAction:action];
+    }];
+}
+
+- (void)performRemoteAction:(NSString *)action
+{
+    if (self.running) {
+        return;
+    }
+    [self appendLog:[NSString stringWithFormat:@"remote command: %@", action]];
+
+    if ([action isEqualToString:@"probe"]) {
+        [self runProbe];
+    } else if ([action isEqualToString:@"forkTest"]) {
+        [self runForkTest];
+    } else if ([action isEqualToString:@"shell"]) {
+        [self runShell];
+    } else if ([action isEqualToString:@"list"]) {
+        [self runList];
+    } else if ([action isEqualToString:@"busybox"]) {
+        [self runBusyBox];
+    } else if ([action isEqualToString:@"pieHello"]) {
+        [self runPieHello];
+    } else if ([action isEqualToString:@"alpineBusybox"]) {
+        [self runAlpineBusyBox];
+    } else if ([action isEqualToString:@"apkVersion"]) {
+        [self runApk];
+    } else if ([action isEqualToString:@"apkAddHello"]) {
+        [self runApkAdd];
+    } else if ([action isEqualToString:@"installedHello"]) {
+        [self runInstalledHello];
+    } else if ([action isEqualToString:@"apkUpdate"]) {
+        [self runApkUpdate];
+    } else if ([action isEqualToString:@"apkUpdateLocal"]) {
+        [self runApkUpdateLocal];
+    } else if ([action isEqualToString:@"gzipCheck"]) {
+        [self runGzipCheck];
+    } else if ([action isEqualToString:@"installBash"]) {
+        [self runApkAddBash];
+    } else if ([action isEqualToString:@"bash"]) {
+        [self runBash];
+    } else if ([action isEqualToString:@"uploadLog"]) {
+        [self uploadLogNow];
+    } else {
+        [self appendLog:@"remote command not recognised"];
+    }
 }
 
 - (void)runProbe

@@ -33,6 +33,13 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Uploads probe logs to the workstation on the same Wi-Fi so the runtime can be debugged without copying text by hand.</string>
 	<key>MinimumOSVersion</key>
 	<string>16.0</string>
 	<key>UIDeviceFamily</key>

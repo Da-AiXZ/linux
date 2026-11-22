@@ -173,6 +173,27 @@ jobs:
 
           /usr/bin/zip -r -y LinuxProbe.ipa Payload
 
+      # Cross-check the runtime's patch count against the actual instruction
+      # stream.  GuestPatchCodeRange scans 4-byte words for three encodings, so
+      # a literal pool word that happens to equal `svc #0' would be rewritten
+      # too.  On device the loader reports patched=478 tls_mrs=90 tls_msr=1 for
+      # this exact binary; if the static counts differ, a false positive exists
+      # and the "code silently patched" hypothesis is back on the table.
+      - name: Verify patch sites against the disassembly
+        run: |
+          set -u
+          BIN="build/Build/Products/Release-iphoneos/Probe.app/Helpers/alpine-apk"
+          test -f "$BIN"
+          if command -v llvm-objdump >/dev/null 2>&1; then
+            OBJDUMP=llvm-objdump
+          else
+            OBJDUMP=objdump
+          fi
+          SVC=$($OBJDUMP -d "$BIN" 2>/dev/null | grep -cE '\bsvc\s+#0x0?\b' || true)
+          MRS=$($OBJDUMP -d "$BIN" 2>/dev/null | grep -cE 'mrs[[:space:]]+x[0-9]+, tpidr_el0' || true)
+          MSR=$($OBJDUMP -d "$BIN" 2>/dev/null | grep -cE 'msr[[:space:]]+tpidr_el0, x[0-9]+' || true)
+          echo "static svc=$SVC mrs=$MRS msr=$MSR (runtime expects 478/90/1)"
+
       - name: Upload IPAs
         uses: actions/upload-artifact@v4
         with:
