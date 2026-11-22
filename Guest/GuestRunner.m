@@ -10,7 +10,6 @@
 #import <mach/task_info.h>
 #import <mach/thread_info.h>
 #import <mach/thread_act.h>
-#import <mach/mach_vm.h>
 #import <mach/vm_map.h>
 #import <mach-o/dyld.h>
 #import <pthread.h>
