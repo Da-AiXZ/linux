@@ -402,14 +402,14 @@ static void GuestSignalHandler(int signalNumber,
     uint64_t sp = 0;
     uint64_t far = 0;
     uint32_t esr = 0;
-    uint64_t registers[8] = { 0 };
+    uint64_t registers[29] = { 0 };
     if (state != NULL && state->uc_mcontext != NULL) {
         pc = (uint64_t)state->uc_mcontext->__ss.__pc;
         lr = (uint64_t)state->uc_mcontext->__ss.__lr;
         sp = (uint64_t)state->uc_mcontext->__ss.__sp;
         far = (uint64_t)state->uc_mcontext->__es.__far;
         esr = (uint32_t)state->uc_mcontext->__es.__esr;
-        for (int index = 0; index < 8; index++) {
+        for (int index = 0; index < 29; index++) {
             registers[index] = (uint64_t)state->uc_mcontext->__ss.__x[index];
         }
     }
@@ -510,6 +510,69 @@ static void GuestSignalHandler(int signalNumber,
             }
             if (length > 0) {
                 GuestWriteAll(STDOUT_FILENO, text, (size_t)length);
+            }
+        }
+        /*
+         * 0.40.14: the crash is a byte store at the tail of a copy, so the
+         * registers name src/dst/bound, and x0 is zlib's z_stream.  Print
+         * both instead of inferring the buffer size from the mapping.
+         */
+        for (int base = 8; base <= 28; base += 7) {
+            int count = 28 - base + 1;
+            if (count > 7) {
+                count = 7;
+            }
+            int used = snprintf(text, sizeof(text), "[guest] regs");
+            for (int index = 0; index < count; index++) {
+                int room = (int)sizeof(text) - used;
+                if (room <= 1) {
+                    break;
+                }
+                int wrote = snprintf(text + used,
+                                     (size_t)room,
+                                     " x%d=0x%llx",
+                                     base + index,
+                                     (unsigned long long)registers[base + index]);
+                if (wrote <= 0) {
+                    break;
+                }
+                used += wrote;
+                if ((size_t)used >= sizeof(text)) {
+                    used = (int)sizeof(text) - 1;
+                    break;
+                }
+            }
+            if (used > 0) {
+                text[used++] = '\n';
+                GuestWriteAll(STDOUT_FILENO, text, (size_t)used);
+            }
+        }
+        {
+            uint64_t stream = registers[0];
+            kern_return_t readStatus = KERN_FAILURE;
+            uint64_t nextIn = GuestSafeRead64(stream + 0x00, &readStatus);
+            uint64_t availInWord = GuestSafeRead64(stream + 0x08, &readStatus);
+            uint64_t totalIn = GuestSafeRead64(stream + 0x10, &readStatus);
+            uint64_t nextOut = GuestSafeRead64(stream + 0x18, &readStatus);
+            uint64_t availOutWord = GuestSafeRead64(stream + 0x20, &readStatus);
+            uint64_t totalOut = GuestSafeRead64(stream + 0x28, &readStatus);
+            uint64_t stateField = GuestSafeRead64(stream + 0x38, &readStatus);
+            if (readStatus == KERN_SUCCESS) {
+                length = snprintf(text,
+                                  sizeof(text),
+                                  "[guest] strm in=0x%llx avail_in=%u"
+                                  " total_in=%llu out=0x%llx avail_out=%u"
+                                  " total_out=%llu state=0x%llx\n",
+                                  (unsigned long long)nextIn,
+                                  (unsigned)(availInWord & 0xffffffffu),
+                                  (unsigned long long)totalIn,
+                                  (unsigned long long)nextOut,
+                                  (unsigned)(availOutWord & 0xffffffffu),
+                                  (unsigned long long)totalOut,
+                                  (unsigned long long)stateField);
+                if (length > 0) {
+                    GuestWriteAll(STDOUT_FILENO, text, (size_t)length);
+                }
             }
         }
         GuestDumpMmapRecords();
