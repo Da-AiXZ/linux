@@ -5848,6 +5848,7 @@ static int GuestEnsureWritable(uintptr_t address, size_t length)
                 GuestLog("[guest] ensure-writable created page 0x%lx\n",
                          (unsigned long)page);
             }
+            GuestReadWatchCheck("ensure page", page, GUEST_HOST_PAGE_SIZE);
             continue;
         }
         if ((current & PROT_WRITE) == 0 &&
@@ -5973,6 +5974,7 @@ static uint64_t GuestHandleFileMap(int descriptor,
         GuestVerifyMapping(address, length, "file map");
         GuestRememberMmap(address, length);
     }
+    GuestReadWatchCheck("file map", address, length);
     return (uint64_t)address;
 }
 
