@@ -101,6 +101,8 @@ static const Bytef *zspyChunkPtr;
 static Bytef zspyCopy[132 * 1024];
 static Bytef *zspySavedIn;
 static uInt zspySavedAvail;
+static uLong zspyLastCheck;
+static unsigned zspyCheckReports;
 static uLong zspyChunkBlocks[32];
 static uInt zspyChunkBlockCount; /* gzip trailer uses crc32 starting at 0 */
 static uInt zspyPrevLeft;
@@ -141,6 +143,8 @@ static void zspyReset(void)
     zspyConsumed = 0;
     zspyInputCrc = 1;
     zspyLastOffset = 0;
+    zspyLastCheck = 0;
+    zspyCheckReports = 0;
     zspyChunkPtr = NULL;
     zspyChunkBlockCount = 0;
 }
@@ -171,6 +175,27 @@ static void zspyReport(zspy_stream *stream, int result, uInt before)
     zspyLastOffset = stream->total_in;
     zspyPrevLeft = stream->avail_in;
     zspyPrevIn = stream->next_in;
+
+    /*
+     * 0.40.32: zlib keeps its own running CRC of the decoded bytes in
+     * state->check (offset 0x20 on LP64).  Compare it with the CRC we compute
+     * from the produced output after every call: the first call where they
+     * differ says whether the damage hit the decoder's output (our CRC moved
+     * away from check) or the check field itself (check moved away from an
+     * unchanged output).
+     */
+    if (stream->state != NULL) {
+        uLong check = *(const unsigned long *)((const char *)stream->state + 0x20);
+        if (check != zspyOutCrc && zspyCheckReports < 8) {
+            zspyCheckReports++;
+            zspyLog("[zck] call=%u check=%08lx outcrc=%08lx total_out=%lu\n",
+                    zspyCalls,
+                    (unsigned long)check,
+                    (unsigned long)zspyOutCrc,
+                    (unsigned long)stream->total_out);
+        }
+        zspyLastCheck = check;
+    }
 
     if (zspyChunkPtr != NULL && zspyChunkBlockCount != 0) {
         uInt index;
