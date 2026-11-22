@@ -250,7 +250,7 @@
      * is pushed to the workstation.  Nothing is written to disk: the log only
      * exists in the text view, and the server keeps the copy.
      */
-    NSString *log = self.logView.text ?: @"";
+    NSString *log = [self logPayload];
     if (log.length == 0 || ![ProbeRemote configured]) {
         return;
     }
@@ -290,9 +290,24 @@
     [self presentViewController:alert animated:YES completion:nil];
 }
 
+/*
+ * Every upload starts with the build that produced it.  beginRunWithLabel clears
+ * the text view, so without this header the received log cannot be attributed
+ * to a version -- which already caused one test to be run against the previous
+ * build.
+ */
+- (NSString *)logPayload
+{
+    NSDictionary *info = NSBundle.mainBundle.infoDictionary;
+    NSString *header = [NSString stringWithFormat:@"===== build %@ (%@) =====\n",
+                        info[@"CFBundleShortVersionString"] ?: @"?",
+                        info[@"CFBundleVersion"] ?: @"?"];
+    return [header stringByAppendingString:self.logView.text ?: @""];
+}
+
 - (void)uploadLogNow
 {
-    NSString *log = self.logView.text ?: @"";
+    NSString *log = [self logPayload];
     __weak typeof(self) weakSelf = self;
     [ProbeRemote uploadLog:log completion:^(NSString *status) {
         if (status.length > 0) {
