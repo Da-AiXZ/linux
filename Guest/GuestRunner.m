@@ -2506,6 +2506,8 @@ static void GuestLogSyscallStats(void)
 {
     GuestCanaryCheckAll();
     GuestReadGuardVerifyAll();
+    GuestLog("[guest] munmap pages: released=%u kept-shared=%u\n",
+             GuestMunmapReleasedPages, GuestMunmapSharedPages);
     GuestLogMmapHistogram();
     GuestLog("[guest] read guard checks=%u changed=%u jumps=%u verified=%u"
              " mismatch=%u\n",
@@ -5866,41 +5868,87 @@ trace:
     return result;
 }
 
+static unsigned GuestMunmapSharedPages = 0;
+static unsigned GuestMunmapReleasedPages = 0;
+
+static BOOL GuestPageIsRuntime(uintptr_t page)
+{
+    uintptr_t pageEnd = page + GUEST_HOST_PAGE_SIZE;
+    struct {
+        uintptr_t start;
+        size_t length;
+    } ranges[] = {
+        { GuestImageBase, (size_t)GuestImageSize },
+        { GuestInterpBase, (size_t)GuestInterpSize },
+        { (uintptr_t)GuestStubPage, GUEST_STUB_PAGE_SIZE },
+        { GuestHeapBase, (size_t)(GuestHeapEnd - GuestHeapBase) },
+        { (uintptr_t)GuestStackBase, (size_t)GuestStackSize },
+    };
+    for (size_t index = 0; index < sizeof(ranges) / sizeof(ranges[0]);
+         index++) {
+        if (ranges[index].start == 0 || ranges[index].length == 0) {
+            continue;
+        }
+        if (pageEnd > ranges[index].start &&
+            page < ranges[index].start + ranges[index].length) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static BOOL GuestPageHasLiveRecord(uintptr_t page)
+{
+    uintptr_t pageEnd = page + GUEST_HOST_PAGE_SIZE;
+    for (int index = 0; index < GuestMmapRecordCount; index++) {
+        uintptr_t start = GuestMmapRecords[index].address;
+        uintptr_t end = start + GuestMmapRecords[index].length;
+        if (end > page && start < pageEnd) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+/*
+ * Sub-page munmap, done without collateral damage.
+ *
+ * Darwin has exactly one page size (16KB here) while musl asks in 4KB units,
+ * so a 4KB free normally sits inside a page shared with a *different* live
+ * allocation.  The old code called munmap() on the guest address and, on
+ * failure, rounded the range to whole pages and then forgot the whole page in
+ * the record table -- tearing down the neighbour's memory and handing its
+ * address range to the next allocation.  Nothing is out of bounds in that
+ * scenario, which is why guard pages and canaries never fired; the victim just
+ * silently becomes somebody else's buffer.
+ *
+ * Now each page is released only when no live record and no runtime region
+ * (image, interpreter, stub, heap, stack) still uses it.  A page that is still
+ * shared is left completely alone: leaking a page is recoverable, corrupting a
+ * neighbour is not.
+ */
 static uint64_t GuestHandleMunmap(uintptr_t address, size_t length)
 {
     if (length == 0) {
         return (uint64_t)(-EINVAL);
     }
     GuestCanaryCheck(address);
-    /*
-     * Darwin rounds munmap lengths up to 16KB, so the effective range ends
-     * on a host page boundary.  Forgetting exactly that range matters:
-     * mallocng asks for multiples of 4KB while we hand out whole 16KB
-     * pages, and forgetting only the requested length left a residual
-     * record behind on 3 of every 4 frees until the 4096-entry table
-     * overflowed ("mmap records full, leaking").
-     */
-    uintptr_t forgottenStart = GuestAlignDown(address);
-    uintptr_t forgottenEnd = GuestAlignUp(address + length);
-    if (munmap((void *)address, length) == 0) {
-        GuestForgetMmap(forgottenStart, forgottenEnd - forgottenStart);
-        return 0;
-    }
-    int error = errno;
-    if ((address & (GUEST_HOST_PAGE_SIZE - 1)) != 0) {
-        uintptr_t roundedStart = GuestAlignDown(address);
-        uintptr_t roundedEnd = GuestAlignUp(address + length);
-        if (munmap((void *)roundedStart,
-                   (size_t)(roundedEnd - roundedStart)) == 0) {
-            GuestLog("[guest] munmap 0x%lx..0x%lx rounded to 0x%lx\n",
-                     (unsigned long)address,
-                     (unsigned long)(address + length),
-                     (unsigned long)roundedStart);
-            GuestForgetMmap(roundedStart, roundedEnd - roundedStart);
-            return 0;
+
+    uintptr_t releaseStart = GuestAlignDown(address);
+    uintptr_t releaseEnd = GuestAlignUp(address + length);
+    GuestForgetMmap(releaseStart, releaseEnd - releaseStart);
+
+    for (uintptr_t page = releaseStart; page < releaseEnd;
+         page += GUEST_HOST_PAGE_SIZE) {
+        if (GuestPageHasLiveRecord(page) || GuestPageIsRuntime(page)) {
+            GuestMunmapSharedPages++;
+            continue;
+        }
+        if (munmap((void *)page, GUEST_HOST_PAGE_SIZE) == 0) {
+            GuestMunmapReleasedPages++;
         }
     }
-    return (uint64_t)(-error);
+    return 0;
 }
 
 /*
