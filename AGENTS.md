@@ -11,7 +11,7 @@
 guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建 syscall 层。
 不是虚拟机、不是模拟器、不是解释器。
 
-## 当前状态（2026-11-22，0.38.9 / build 84）
+## 当前状态（2026-11-22，0.39.0 / build 85）
 
 - **M0–M2.5 全部真机通过**。0.34.1：`Run Shell` 六条命令（`ls /`、`cat /etc/motd`、
   `uname`、`ls -l /`、`id`、`pwd`）全对，`status=0`；`Run Fork Test` 父子分别输出。
@@ -192,11 +192,23 @@ guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建
   ② 每次 ≥64KB 的 `read` 后按 4KB 页做 FNV 哈希，在下一次同缓冲 `read`、
   `close`、退出时重算并打印**发生变化的页号**（对应 apk 128KB istream 缓冲的偏移）。
   任一探针命中会打印 `mmap slack overwritten` / `read buffer check … changed= N+0x…`。
-- **下一步**：真机 0.38.9 跑 `Run APK Update (local index)`（可连跑两次）+
-  `Run Gzip Check (community index)`。若出现 `read buffer check` 且页号固定，
-  直接说明是谁在写 apk 的输入缓冲；若 canary 命中则说明有人越界写映射末尾；
-  若两者都干净，则破坏点在 zlib 自身的小块状态（下一步给 inflate_state/
-  32KB window 单独建映射并加 guards）。
+- **0.38.9 真机（关键）**：探针全部干净 —— 没有任何 `mmap slack overwritten`，
+  `read guard checks=… changed=0`（apk 的 128KB istream 输入缓冲在每次重填之间
+  逐页哈希都不变），`mmap records full` 也消失了（泄漏修复生效）；
+  `busybox gzip -t` 对 community（8.2MB 解压）`status=0`。但两个仓库照样随机 EIO：
+  两次运行分别解析到 9262 / 21459 个包，而且这次是 **main 先失败**。
+  结论：输入字节没问题、映射末尾没越界，破坏只可能落在 zlib 自己的
+  `inflate_state` / 32KB window，或 `gis`（z_stream）所在的那一小块堆上；
+  另一个系统性差异只剩 **4KB/16KB 页粒度**。
+- 0.39.0：把 `AT_PAGESZ` 从 4096 改成 **16384**，让 musl/mallocng 的
+  mmap/munmap/meta 区全部按 16KB 取整，与 Darwin 完全一致（Alpine 在 16KB 页的
+  Asahi Linux 上是受支持配置）。同时把 read-guard 的逐次日志降噪成退出时的
+  `read guard checks=N changed=M` 汇总，并在 `heap=` 行打印 `pagesz=`。
+- **下一步**：真机 0.39.0 先跑 `Run APK --version`（验证 16KB 页下动态链接仍正常），
+  再跑 `Run APK Update (local index)` 两次 + `Run Gzip Check (community index)`。
+  若 16KB 页下 EIO 消失，说明根因就是 4K/16K 不一致导致的堆布局差异；
+  若仍失败，下一步把 zlib 的 `inflate_state`/window 单独隔离（给 malloc 加 guard
+  或换 zlib 版本）继续定位。
 
 ## 两个仓库
 
@@ -264,8 +276,9 @@ CURRENT_PROJECT_VERSION: "N"
 ## Guest 运行时不变量（`Guest/GuestRunner.m`）
 
 1. guest 必须是 **ET_DYN / PIE**；iOS 不允许映射 4GB 以下。
-2. guest 是 4KB 页，host 是 16KB 页。固定映射地址必须 16KB 对齐；`mprotect` 的 guest
-   范围可能只覆盖 host 页的一部分，**不能**把范围取整后整体 `mprotect`：
+2. 0.39.0 起 guest 也按 **16KB 页**运行（`AT_PAGESZ=0x4000`），与 host 一致；
+   固定映射地址仍必须 16KB 对齐。库段来自 4KB 对齐的 ELF，所以 `mprotect` 的 guest
+   范围仍可能只覆盖 host 页的一部分：**不能**把范围取整后整体 `mprotect`，
    完整覆盖的 host 页用精确权限，边缘共享页取"当前权限 | 新权限"（`GuestProtectRange`）。
 3. guest 初始 `sp` 必须 16 字节对齐。
 4. 改写代码页后调用 `sys_icache_invalidate`。
@@ -273,7 +286,7 @@ CURRENT_PROJECT_VERSION: "N"
    `bl` 会把 `x30` 改成 `site+4`；glibc 的 leaf wrapper、musl 的 `__set_thread_area`
    都会因此 `ret` 回 `site+4` 自循环。
 6. 入口栈上的 argv/envp/auxv 必须完整：
-   `AT_PHDR/AT_PHENT/AT_PHNUM/AT_PAGESZ(4096)/AT_BASE/AT_ENTRY/AT_RANDOM/AT_HWCAP/AT_EXECFN`。
+   `AT_PHDR/AT_PHENT/AT_PHNUM/AT_PAGESZ(0x4000)/AT_BASE/AT_ENTRY/AT_RANDOM/AT_HWCAP/AT_EXECFN`。
    静态：`AT_BASE=0`、`AT_ENTRY`=主程序入口；动态：`AT_BASE`=动态链接器基址。
 7. `brk` 返回**当前 break**，初始为堆起始；堆是预映射的 64MB。
 8. syscall 返回必须保留 `x1–x17`、`TPIDR_EL0`、`NZCV`。
