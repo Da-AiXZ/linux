@@ -242,6 +242,8 @@ static void GuestRememberMmap(uintptr_t address, size_t length);
 static void GuestDescribeAddress(uintptr_t address,
                                  char *buffer,
                                  size_t size);
+static unsigned GuestMunmapSharedPages;
+static unsigned GuestMunmapReleasedPages;
 /*
  * Passing a file mapping straight to Darwin is only safe for data: iOS refuses
  * to mprotect a file-backed page to PROT_EXEC (that is exactly how the guarded
@@ -5867,9 +5869,6 @@ trace:
     }
     return result;
 }
-
-static unsigned GuestMunmapSharedPages = 0;
-static unsigned GuestMunmapReleasedPages = 0;
 
 static BOOL GuestPageIsRuntime(uintptr_t page)
 {
