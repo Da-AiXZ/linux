@@ -239,6 +239,26 @@ static uintptr_t GuestAllocateMmapAddress(size_t length,
                                           BOOL fixed);
 static BOOL GuestRangeOverlapsRuntime(uintptr_t address, size_t length);
 static void GuestRememberMmap(uintptr_t address, size_t length);
+/*
+ * Passing a file mapping straight to Darwin is only safe for data: iOS refuses
+ * to mprotect a file-backed page to PROT_EXEC (that is exactly how the guarded
+ * libz failed to load: "Permission denied (needed by apk)").  ld.so maps whole
+ * libraries PROT_READ first and only later marks segments executable, so any
+ * file that starts with the ELF magic must stay on the emulated path.
+ */
+static BOOL GuestFileIsElf(int descriptor)
+{
+    unsigned char magic[4];
+    if (descriptor < 0) {
+        return NO;
+    }
+    if (pread(descriptor, magic, sizeof(magic), 0) != (ssize_t)sizeof(magic)) {
+        return NO;
+    }
+    return magic[0] == 0x7f && magic[1] == 'E' &&
+           magic[2] == 'L' && magic[3] == 'F';
+}
+
 static uint64_t GuestHandleMmap(uint64_t hint,
                                 uint64_t length,
                                 int prot,
@@ -5699,7 +5719,8 @@ static uint64_t GuestHandleMmap(uint64_t hint,
                                              requested,
                                              prot);
         } else if ((prot & PROT_EXEC) == 0 &&
-                   (offset & (GUEST_HOST_PAGE_SIZE - 1)) == 0) {
+                   (offset & (GUEST_HOST_PAGE_SIZE - 1)) == 0 &&
+                   !GuestFileIsElf(descriptor)) {
             /*
              * apk extracts every file larger than 128KB by mapping the
              * *destination* file MAP_SHARED and writing straight into it
