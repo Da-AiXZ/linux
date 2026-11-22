@@ -3136,6 +3136,18 @@ static uint64_t GuestSyscallDispatchInner(uint64_t *args,
         store.fst_length = length;
         (void)fcntl(descriptor, F_PREALLOCATE, &store);
 #endif
+        /*
+         * Linux fallocate extends the file, and apk immediately mmaps the
+         * result MAP_SHARED for the full size.  Without the extension that
+         * mapping would run past EOF and the first write would SIGBUS.
+         */
+        struct stat status;
+        if (fstat(descriptor, &status) == 0 &&
+            status.st_size < start + length) {
+            if (ftruncate(descriptor, start + length) != 0) {
+                return GuestErrno();
+            }
+        }
         return 0;
     }
     case 48: { /* faccessat */
@@ -5686,7 +5698,35 @@ static uint64_t GuestHandleMmap(uint64_t hint,
                                              (uintptr_t)hint,
                                              requested,
                                              prot);
-        } else {
+        } else if ((prot & PROT_EXEC) == 0 &&
+                   (offset & (GUEST_HOST_PAGE_SIZE - 1)) == 0) {
+            /*
+             * apk extracts every file larger than 128KB by mapping the
+             * *destination* file MAP_SHARED and writing straight into it
+             * (src/io.c: apk_istream_splice).  Emulating that with an
+             * anonymous copy loses the writes, so data mappings with a
+             * host-page-aligned offset are passed to Darwin verbatim; the
+             * kernel then flushes them back to the file on munmap.
+             */
+            int hostProt = prot & (PROT_READ | PROT_WRITE);
+            int hostFlags = (guestFlags & 0x01) ? MAP_SHARED : MAP_PRIVATE;
+            void *direct = mmap(NULL,
+                                mapLength,
+                                hostProt,
+                                hostFlags,
+                                descriptor,
+                                (off_t)offset);
+            if (direct != MAP_FAILED) {
+                GuestRememberMmap((uintptr_t)direct, mapLength);
+                result = (uint64_t)(uintptr_t)direct;
+                goto trace;
+            }
+            GuestLog("[guest] direct file mmap failed fd=%d off=0x%llx"
+                     " len=0x%lx errno=%d\n",
+                     descriptor,
+                     (unsigned long long)offset,
+                     (unsigned long)mapLength,
+                     errno);
             uintptr_t target = GuestAllocateMmapAddress(mapLength,
                                                         (uintptr_t)hint,
                                                         NO);
@@ -5697,6 +5737,27 @@ static uint64_t GuestHandleMmap(uint64_t hint,
                  * them; anything that turns out to need patching is rejected
                  * by the range check inside GuestPatchCodeRange.
                  */
+                GuestLog("[guest] file map outside window len=0x%lx\n",
+                         (unsigned long)mapLength);
+                result = GuestHandleFileMap(descriptor,
+                                            offset,
+                                            0,
+                                            mapLength,
+                                            prot,
+                                            YES);
+            } else {
+                result = GuestHandleFileMap(descriptor,
+                                            offset,
+                                            target,
+                                            mapLength,
+                                            prot,
+                                            YES);
+            }
+        } else {
+            uintptr_t target = GuestAllocateMmapAddress(mapLength,
+                                                        (uintptr_t)hint,
+                                                        NO);
+            if (target == 0) {
                 GuestLog("[guest] file map outside window len=0x%lx\n",
                          (unsigned long)mapLength);
                 result = GuestHandleFileMap(descriptor,
