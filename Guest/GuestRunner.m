@@ -1987,6 +1987,18 @@ static unsigned int GuestReadTraceCount = 0;
  *    shows up with the offset of the first changed word.
  */
 #define GUEST_CANARY_SLOTS 64
+/*
+ * Page size reported to the guest in AT_PAGESZ.  Darwin behaves like a
+ * 16KB-page kernel, and advertising 16KB makes musl/mallocng round every
+ * mmap/munmap to the same granularity, which removes the 4KB/16KB mismatch
+ * that produced the record leak and (suspected) the stray-write corruption.
+ * Asahi Linux runs Alpine on 16KB pages, so this is a supported musl
+ * configuration.
+ */
+#ifndef GUEST_TARGET_PAGE_SIZE
+#define GUEST_TARGET_PAGE_SIZE 0x4000ULL
+#endif
+
 typedef struct {
     uintptr_t address;
     size_t requested;
@@ -2006,10 +2018,10 @@ static void GuestCanaryReport(const char *what, uintptr_t address, size_t reques
 }
 
 /*
- * mallocng only ever touches whole 4KB pages of the length it requested
- * (it keeps a 16-byte group header and a size byte at the ends), so the
- * first byte past align4k(requested) is safe to use as a canary even
- * though a host page is 16KB.
+ * mallocng tracks the size of an individually-mmapped block in 4KB units
+ * (`g->maplen = (needed+4095)/4096`, and `alloc_group` always rounds
+ * `needed` up to the page size), so `align4k(requested)` is exactly one
+ * byte past everything it can write even when the guest page size is 16KB.
  */
 static uintptr_t GuestCanarySlot(uintptr_t address, size_t requested)
 {
@@ -2117,8 +2129,11 @@ static int GuestReadGuardPages(size_t length)
     return pages > GUEST_READ_GUARD_PAGES ? GUEST_READ_GUARD_PAGES : (int)pages;
 }
 
+static unsigned int GuestReadGuardChecks = 0;
+static unsigned int GuestReadGuardChanges = 0;
+
 /*
- * Log every 4KB page whose contents changed while the buffer was idle.  The
+ * Log every page whose contents changed while the buffer was idle.  The
  * page index maps directly onto the offset inside the istream buffer, which
  * is enough to tell whether apk's own stale write or a stray runtime write
  * hit it.
@@ -2128,10 +2143,7 @@ static void GuestReadGuardReport(int fd, uintptr_t address, size_t length,
 {
     int pages = GuestReadGuardPages(length);
     int changed = 0;
-    GuestLog("[guest] read buffer check fd=%d addr=0x%lx len=0x%lx changed=",
-             fd,
-             (unsigned long)address,
-             (unsigned long)length);
+    GuestReadGuardChecks++;
     for (int index = 0; index < pages; index++) {
         size_t offset = (size_t)index * 4096;
         size_t size = length - offset;
@@ -2143,10 +2155,20 @@ static void GuestReadGuardReport(int fd, uintptr_t address, size_t length,
         if (current == expected[index]) {
             continue;
         }
+        if (changed == 0) {
+            GuestLog("[guest] read buffer changed fd=%d addr=0x%lx len=0x%lx"
+                     " pages=",
+                     fd,
+                     (unsigned long)address,
+                     (unsigned long)length);
+        }
         GuestLog(" %d+0x%lx", index, (unsigned long)offset);
         changed++;
     }
-    GuestLog(changed == 0 ? " none\n" : "\n");
+    if (changed != 0) {
+        GuestLog("\n");
+        GuestReadGuardChanges++;
+    }
 }
 
 static void GuestReadGuardPreRead(int fd, uintptr_t address, size_t length)
@@ -2280,6 +2302,9 @@ static void GuestLogSyscallStats(void)
 {
     GuestCanaryCheckAll();
     GuestReadGuardVerifyAll();
+    GuestLog("[guest] read guard checks=%u changed=%u\n",
+             GuestReadGuardChecks,
+             GuestReadGuardChanges);
     for (int index = 0; index < GuestSocketTableCount; index++) {
         GuestLog("[guest] sock fd=%d read=%llu write=%llu\n",
                  GuestSocketTable[index].fd,
@@ -4137,7 +4162,7 @@ static uint64_t GuestBuildStack(uint64_t stackTop,
         { GUEST_AT_PHDR, (uint64_t)(imageStart + header->e_phoff) },
         { GUEST_AT_PHENT, (uint64_t)header->e_phentsize },
         { GUEST_AT_PHNUM, (uint64_t)header->e_phnum },
-        { GUEST_AT_PAGESZ, 4096 },
+        { GUEST_AT_PAGESZ, (uint64_t)GUEST_TARGET_PAGE_SIZE },
         { GUEST_AT_BASE, atBase },
         { GUEST_AT_FLAGS, 0 },
         { GUEST_AT_ENTRY, atEntry },
@@ -6581,9 +6606,10 @@ static int GuestLoadAndRunInternal(const char *guestPath,
     GuestHeapEnd = GuestHeapBase + heapSize;
     GuestBrkCurrent = GuestHeapBase;
     GuestLog(
-            "[guest] heap=0x%lx..0x%lx\n",
+            "[guest] heap=0x%lx..0x%lx pagesz=0x%llx\n",
             (unsigned long)GuestHeapBase,
-            (unsigned long)GuestHeapEnd);
+            (unsigned long)GuestHeapEnd,
+            (unsigned long long)GUEST_TARGET_PAGE_SIZE);
 
     size_t stackSize = 8 * 1024 * 1024;
     /*
