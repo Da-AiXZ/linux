@@ -266,6 +266,8 @@ static const char *zspyHead(const Bytef *bytes, uInt available)
 int inflate(zspy_stream *stream, int flush)
 {
     uInt before = stream->avail_in;
+    Bytef *beforeOut = stream->next_out;
+    uInt beforeAvail = stream->avail_out;
     int result;
 
     /*
@@ -293,6 +295,34 @@ int inflate(zspy_stream *stream, int flush)
         }
     }
     result = z_inflate(stream, flush);
+    /*
+     * 0.40.21: the invariant zlib relies on is that the bytes it advanced
+     * next_out by are exactly the bytes it took out of avail_out.  Every
+     * downstream bug tonight (wrong byte count for apk, incorrect data check,
+     * database file format error) is consistent with this invariant breaking
+     * somewhere inside one call.  Check it on every return, before the
+     * counters are touched, and print the actual pointers.
+     */
+    {
+        static int invCount = 0;
+        long advanced = (long)(stream->next_out - beforeOut);
+        unsigned consumed = beforeAvail - stream->avail_out;
+        if (advanced != (long)consumed && invCount < 12) {
+            invCount++;
+            zspyLog("[zspy] INVARIANT #%d ret=%d advanced=%ld consumed=%u"
+                    " before_out=%p after_out=%p before_avail=%u"
+                    " after_avail=%u state=%p\n",
+                    invCount,
+                    result,
+                    advanced,
+                    consumed,
+                    (void *)beforeOut,
+                    (void *)stream->next_out,
+                    beforeAvail,
+                    stream->avail_out,
+                    stream->state);
+        }
+    }
     zspyReport(stream, result, before);
     return result;
 }
