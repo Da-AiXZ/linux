@@ -50,6 +50,31 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             build
 
+      # zlib isolation experiment: rebuild zlib with MY_ZCALLOC so every zlib
+      # allocation gets its own mapping with a trailing guard page.  Soft-fail:
+      # if zig or the source is unavailable we keep Alpine's libz.
+      - name: Build guarded libz (experiment)
+        continue-on-error: true
+        run: |
+          set -u
+          brew install zig >/dev/null 2>&1 || true
+          if ! command -v zig >/dev/null 2>&1; then
+            echo "zig unavailable, keeping Alpine libz"
+            exit 0
+          fi
+          curl -fsSL -o /tmp/zlib.tar.gz \
+            https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz
+          rm -rf /tmp/zlib
+          mkdir -p /tmp/zlib
+          tar -xzf /tmp/zlib.tar.gz -C /tmp/zlib --strip-components=1
+          cp Tools/zguard.c /tmp/zlib/zguard.c
+          ( cd /tmp/zlib && zig cc -target aarch64-linux-musl -O2 -fPIC -shared \
+              -DMY_ZCALLOC -D_LARGEFILE64_SOURCE=1 \
+              -Wl,-soname,libz.so.1 -o /tmp/libz-guard.so.1 *.c ) \
+            || { echo "guarded zlib build failed"; exit 0; }
+          file /tmp/libz-guard.so.1
+          ls -l /tmp/libz-guard.so.1
+
       - name: Package IPA
         run: |
           set -eux
@@ -79,8 +104,17 @@ jobs:
           # 0.39.2 A/B proved the inflate data errors are not zlib-version
           # specific (1.2.13 from v3.18 failed the same way), so go back to the
           # minirootfs build that apk was compiled against.
-          cp /tmp/alpine-rootfs/lib/libz.so.1.3.1 \
-             "$APP/Helpers/alpine/lib/libz.so.1"
+          if [ -f /tmp/libz-guard.so.1 ]; then
+            cp /tmp/libz-guard.so.1 "$APP/Helpers/alpine/lib/libz.so.1"
+            echo "guarded libz in use"
+          else
+            cp /tmp/alpine-rootfs/lib/libz.so.1.3.1 \
+               "$APP/Helpers/alpine/lib/libz.so.1"
+          fi
+          # A zig-built libz records NEEDED libc.so; musl ships it as the linker
+          # script name, so provide the same binary under both names.
+          cp /tmp/alpine-rootfs/lib/ld-musl-aarch64.so.1 \
+             "$APP/Helpers/alpine/lib/libc.so"
           shasum -a 256 "$APP/Helpers/alpine/lib/libz.so.1"
           # Repository signing keys and CA roots (both ship in the minirootfs)
           # so `apk update` can verify indexes over https.
