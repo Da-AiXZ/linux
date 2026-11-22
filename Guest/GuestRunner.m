@@ -302,6 +302,30 @@ static void GuestLog(const char *format, ...)
     GuestWriteAll(STDOUT_FILENO, buffer, size);
 }
 
+/*
+ * Path syscalls only logged the first few failures, which hid the EACCES that
+ * aborted `apk add'.  Record the guest path, the translated host path and the
+ * errno for the first 40 failures of any of them.
+ */
+static unsigned int GuestFileErrorCount = 0;
+
+static void GuestLogFileError(const char *operation,
+                              const char *guestPath,
+                              const char *hostPath,
+                              int error)
+{
+    if (GuestFileErrorCount >= 40) {
+        return;
+    }
+    GuestFileErrorCount++;
+    GuestLog("[guest] %s failed guest=%s host=%s errno=%d (%s)\n",
+             operation,
+             guestPath != NULL ? guestPath : "-",
+             hostPath != NULL ? hostPath : "-",
+             error,
+             strerror(error));
+}
+
 static void GuestSignalHandler(int signalNumber,
                                siginfo_t *information,
                                void *context)
@@ -2716,15 +2740,7 @@ static uint64_t GuestSyscallDispatchInner(uint64_t *args,
             error = errno;
         }
         if (descriptor < 0) {
-            static unsigned int openFailureLog = 0;
-            if (openFailureLog < 3) {
-                openFailureLog++;
-                GuestLog(
-                        "[guest] openat failed %s flags=0x%llx errno=%d\n",
-                        hostPath,
-                        (unsigned long long)args[2],
-                        error);
-            }
+            GuestLogFileError("openat", guestPath, hostPath, error);
             return (uint64_t)(-(int64_t)error);
         }
         return (uint64_t)descriptor;
@@ -2980,7 +2996,17 @@ static uint64_t GuestSyscallDispatchInner(uint64_t *args,
                                sizeof(hostPath)) == NULL) {
             return (uint64_t)(-ENOENT);
         }
-        return mkdir(hostPath, (mode_t)args[2]) == 0 ? 0 : GuestErrno();
+        if (mkdir(hostPath, (mode_t)args[2]) != 0) {
+            int error = errno;
+            if (error != EEXIST) {
+                GuestLogFileError("mkdirat",
+                                  (const char *)args[1],
+                                  hostPath,
+                                  error);
+            }
+            return (uint64_t)(-(int64_t)error);
+        }
+        return 0;
     }
     case 35: { /* unlinkat */
         char hostPath[GUEST_ROOT_MAX];
@@ -2991,17 +3017,51 @@ static uint64_t GuestSyscallDispatchInner(uint64_t *args,
             return (uint64_t)(-ENOENT);
         }
         int result = (args[2] & 0x200) ? rmdir(hostPath) : unlink(hostPath);
-        return result == 0 ? 0 : GuestErrno();
+        if (result != 0) {
+            int error = errno;
+            if (error != ENOENT) {
+                GuestLogFileError("unlinkat",
+                                  (const char *)args[1],
+                                  hostPath,
+                                  error);
+            }
+            return (uint64_t)(-(int64_t)error);
+        }
+        return 0;
     }
     case 36: { /* symlinkat */
         char hostPath[GUEST_ROOT_MAX];
+        char targetPath[GUEST_ROOT_MAX];
         if (GuestTranslatePath((int)args[1],
                                (const char *)args[2],
                                hostPath,
                                sizeof(hostPath)) == NULL) {
             return (uint64_t)(-ENOENT);
         }
-        return symlink((const char *)args[0], hostPath) == 0 ? 0 : GuestErrno();
+        /*
+         * An absolute target must be rewritten into the rootfs, otherwise the
+         * host resolves the link against the real "/" and every open through
+         * it fails (or, worse, hits a host file).  Relative targets already
+         * resolve inside the same directory and are left untouched.
+         */
+        const char *target = (const char *)args[0];
+        if (target != NULL && target[0] == '/') {
+            if (GuestTranslatePath(GUEST_AT_FDCWD,
+                                   target,
+                                   targetPath,
+                                   sizeof(targetPath)) != NULL) {
+                target = targetPath;
+            }
+        }
+        if (symlink(target, hostPath) != 0) {
+            int error = errno;
+            GuestLogFileError("symlinkat",
+                              (const char *)args[2],
+                              hostPath,
+                              error);
+            return (uint64_t)(-(int64_t)error);
+        }
+        return 0;
     }
     case 37: { /* linkat */
         char oldPath[GUEST_ROOT_MAX];
@@ -3016,7 +3076,15 @@ static uint64_t GuestSyscallDispatchInner(uint64_t *args,
                                sizeof(newPath)) == NULL) {
             return (uint64_t)(-ENOENT);
         }
-        return link(oldPath, newPath) == 0 ? 0 : GuestErrno();
+        if (link(oldPath, newPath) != 0) {
+            int error = errno;
+            GuestLogFileError("linkat",
+                              (const char *)args[3],
+                              newPath,
+                              error);
+            return (uint64_t)(-(int64_t)error);
+        }
+        return 0;
     }
     case 38: { /* renameat */
         char oldPath[GUEST_ROOT_MAX];
@@ -3031,7 +3099,44 @@ static uint64_t GuestSyscallDispatchInner(uint64_t *args,
                                sizeof(newPath)) == NULL) {
             return (uint64_t)(-ENOENT);
         }
-        return rename(oldPath, newPath) == 0 ? 0 : GuestErrno();
+        if (rename(oldPath, newPath) != 0) {
+            int error = errno;
+            GuestLogFileError("renameat",
+                              (const char *)args[3],
+                              newPath,
+                              error);
+            return (uint64_t)(-(int64_t)error);
+        }
+        return 0;
+    }
+    case 47: { /* fallocate */
+        int descriptor = (int)args[0];
+        int mode = (int)args[1];
+        off_t start = (off_t)args[2];
+        off_t length = (off_t)args[3];
+        if (mode != 0) {
+            /* PUNCH_HOLE / COLLAPSE_RANGE / ZERO_RANGE are not emulated. */
+            return GuestError(EOPNOTSUPP);
+        }
+        if (start < 0 || length <= 0) {
+            return GuestError(EINVAL);
+        }
+        /*
+         * apk reserves space for every file it is about to extract and treats
+         * a failure as a hard I/O error -- that is what aborted `apk add musl'
+         * with "Failed to create lib/ld-musl-aarch64.so.1: I/O error".
+         * Reservation is a hint, so report success even when the host refuses.
+         */
+#ifdef F_PREALLOCATE
+        struct fstore store;
+        memset(&store, 0, sizeof(store));
+        store.fst_flags = F_ALLOCATECONTIG;
+        store.fst_posmode = F_PEOFPOSMODE;
+        store.fst_offset = start;
+        store.fst_length = length;
+        (void)fcntl(descriptor, F_PREALLOCATE, &store);
+#endif
+        return 0;
     }
     case 48: { /* faccessat */
         char hostPath[GUEST_ROOT_MAX];
