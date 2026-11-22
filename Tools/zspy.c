@@ -197,6 +197,47 @@ int inflateInit2_(zspy_stream *stream, int windowBits, const char *version,
 
 static char zspyHex[24];
 
+static unsigned zspyU32(const void *base, unsigned offset)
+{
+    unsigned value;
+    memcpy(&value, (const unsigned char *)base + offset, sizeof(value));
+    return value;
+}
+
+static void *zspyPtr(const void *base, unsigned offset)
+{
+    void *value;
+    memcpy(&value, (const unsigned char *)base + offset, sizeof(value));
+    return value;
+}
+
+/*
+ * The crash is inside inflate_fast copying from a NULL window, which zlib only
+ * does when its bookkeeping is already wrong (a window copy is taken while
+ * whave claims history but window is NULL).  Print the fields that decide that
+ * branch at entry, so the next run says whether the state arrived broken or
+ * was broken during the call.  Offsets are zlib 1.3.1's inflate_state.
+ */
+static void zspyState(const void *state)
+{
+    if (state == NULL) {
+        zspyLog("[zspy] state is NULL\n");
+        return;
+    }
+    zspyLog("[zspy] state mode=%u last=%d wrap=%d wbits=%u wsize=%u"
+            " whave=%u wnext=%u window=%p length=%u offset=%u\n",
+            zspyU32(state, 8),
+            (int)zspyU32(state, 12),
+            (int)zspyU32(state, 16),
+            zspyU32(state, 56),
+            zspyU32(state, 60),
+            zspyU32(state, 64),
+            zspyU32(state, 68),
+            zspyPtr(state, 72),
+            zspyU32(state, 92),
+            zspyU32(state, 96));
+}
+
 static const char *zspyHead(const Bytef *bytes, uInt available)
 {
     static const char digits[] = "0123456789abcdef";
@@ -236,6 +277,9 @@ int inflate(zspy_stream *stream, int flush)
                 stream->next_in != NULL ? zspyHead(stream->next_in,
                                                    stream->avail_in)
                                         : "-");
+        if (zspyCalls == 0) {
+            zspyState(stream->state);
+        }
     }
     result = z_inflate(stream, flush);
     zspyReport(stream, result, before);
