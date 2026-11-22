@@ -2339,6 +2339,57 @@ typedef struct {
 } GuestCanary;
 
 static GuestCanary GuestCanaries[GUEST_CANARY_SLOTS];
+
+/*
+ * 0.40.29: the index input buffer is written while inflate() is decoding it,
+ * 4KB at a time, and the writes often undo themselves (see [zm] in the zspy
+ * log).  That is the signature of a page being remapped and then refilled,
+ * not of a wild pointer, so watch the large read buffers and shout whenever an
+ * mmap or a lazily-created page lands on one.
+ */
+typedef struct {
+    uintptr_t address;
+    size_t length;
+    unsigned generation;
+} GuestReadWatch;
+
+#define GUEST_READ_WATCHES 8
+static GuestReadWatch GuestReadWatches[GUEST_READ_WATCHES];
+static unsigned GuestReadWatchGeneration;
+static unsigned GuestReadWatchNext;
+
+static void GuestReadWatchAdd(uintptr_t address, size_t length)
+{
+    GuestReadWatches[GuestReadWatchNext].address = address;
+    GuestReadWatches[GuestReadWatchNext].length = length;
+    GuestReadWatches[GuestReadWatchNext].generation = ++GuestReadWatchGeneration;
+    GuestReadWatchNext = (GuestReadWatchNext + 1) % GUEST_READ_WATCHES;
+}
+
+static void GuestReadWatchCheck(const char *what, uintptr_t address, size_t length)
+{
+    uintptr_t end = address + length;
+    if (length == 0 || end < address) {
+        return;
+    }
+    for (int index = 0; index < GUEST_READ_WATCHES; index++) {
+        uintptr_t other = GuestReadWatches[index].address;
+        size_t otherLength = GuestReadWatches[index].length;
+        if (other == 0 || otherLength == 0) {
+            continue;
+        }
+        uintptr_t otherEnd = other + otherLength;
+        if (end <= other || address >= otherEnd) {
+            continue;
+        }
+        GuestLog("[ovl] %s 0x%lx..0x%lx hits read buffer 0x%lx..0x%lx\n",
+                 what,
+                 (unsigned long)address,
+                 (unsigned long)end,
+                 (unsigned long)other,
+                 (unsigned long)otherEnd);
+    }
+}
 static uint64_t GuestCanaryMagic = 0x4C50524F42454E43ULL; /* "LPROBENC" */
 
 static void GuestCanaryReport(const char *what, uintptr_t address, size_t requested)
@@ -2822,6 +2873,9 @@ static uint64_t GuestSyscallDispatchInner(uint64_t *args,
             return GuestErrno();
         }
         GuestAccountSocket((int)args[0], result, NO);
+        if (result >= 65536) {
+            GuestReadWatchAdd((uintptr_t)args[1], (size_t)result);
+        }
         GuestTraceRead((int)args[0], args[2], result, 0);
         GuestReadGuardPostRead((int)args[0],
                                (uintptr_t)args[1],
@@ -5810,6 +5864,7 @@ static uint64_t GuestHandleFixedAnon(uintptr_t address,
                                      size_t length,
                                      int prot)
 {
+    GuestReadWatchCheck("fixed anon", address, length);
     if (GuestEnsureWritable(address, length) != 0) {
         return GuestErrno();
     }
@@ -5927,6 +5982,7 @@ static uint64_t GuestHandleFixedFileMap(int descriptor,
                                         size_t length,
                                         int prot)
 {
+    GuestReadWatchCheck("fixed file map", address, length);
     /*
      * ld.so already mapped the whole file, so this MAP_FIXED only needs to
      * overlay the segment and make it writable.  The guest range can start
@@ -5980,6 +6036,9 @@ static uint64_t GuestHandleMmap(uint64_t hint,
 {
     static unsigned int mmapTrace = 0;
     size_t requested = (size_t)length;
+    if ((guestFlags & 0x10) != 0 && hint != 0) {
+        GuestReadWatchCheck("mmap fixed", (uintptr_t)hint, (size_t)length);
+    }
     size_t mapLength = GuestAlignUp(requested);
     if (requested == 0 || mapLength < requested) {
         return (uint64_t)(-EINVAL);
