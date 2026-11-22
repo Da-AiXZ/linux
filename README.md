@@ -7,7 +7,7 @@
 不是虚拟机，不是模拟器，不是解释器：guest 是 arm64 Linux ELF，指令由 M1 直接执行；
 只把 `svc #0` 改写成分支，跳进自建的 syscall 分发器。
 
-## 当前状态（0.39.0）
+## 当前状态（0.39.3）
 
 | 阶段 | 状态 |
 |---|---|
@@ -17,7 +17,7 @@
 | M2.5 文件系统 + shell | ✅ 0.34.1 真机：`Run Shell` 六条命令全部正确；外部命令走 checkpoint/restore fork + execve |
 | M3.1 动态链接器 | ✅ 0.35.5 真机：动态 Alpine busybox（`status=0`）与 `apk --version`（`apk-tools 2.14.4, compiled for aarch64.`，`status=0`）全部通过 |
 | M3.2 本地 apk | ✅ 0.37.1 真机：`apk add --initdb --allow-untrusted /tmp/hello.apk` → `(1/1) Installing hello (1.0-r0)`、`status=0`；`Run Installed Hello` 输出 `hello from linux elf` |
-| M3.3 网络 | 🚧 0.38.0 实现 socket 全家族、`pselect6/ppoll`、Linux↔Darwin errno 翻译；0.38.1 修 rootfs `/etc`；0.38.2 带 `cert.pem`；0.38.3 回收 mmap；0.38.4 匿名映射移出跳板窗口；0.38.5 真机 TLS 通过；0.38.6 加 `--no-cache`/mremap/缓存 dump；0.38.7 修 aarch64 open flag 常量并打印 syscall 统计；0.38.8 回到 apk 缓存路径（下载与 CDN **SHA-256 完全一致**）、离线本地索引 update；0.38.9 修掉 mmap 记录泄漏，canary 与 istream 缓冲完整性探针全部干净（输入字节未变、无越界）；0.39.0 把 guest `AT_PAGESZ` 改成 16KB（真机可用，main 索引已能完整解析）；0.39.1 真机证明每块大 read 与 `pread` 逐字节一致、偏移严格顺序（输入 100% 正确），0.39.2 证明 zlib 版本无关（1.2.13 同样失败），0.39.3 给每个匿名映射加 16KB guard page 抓越界写者。**当前判断**：索引解析失败是 guest 侧内存被破坏，破坏点落在 zlib 自身状态，且与 4K/16K 堆布局差异相关（Linux 上同 apk/同文件 `OK: 24049`） |
+| M3.3 网络 | 🚧 0.38.0 实现 socket 全家族、`pselect6/ppoll`、Linux↔Darwin errno 翻译；0.38.1 修 rootfs `/etc`；0.38.2 带 `cert.pem`；0.38.3 回收 mmap；0.38.4 匿名映射移出跳板窗口；0.38.5 真机 TLS 通过；0.38.6 加 `--no-cache`/mremap/缓存 dump；0.38.7 修 aarch64 open flag 常量并打印 syscall 统计；0.38.8 回到 apk 缓存路径（下载与 CDN **SHA-256 完全一致**）、离线本地索引 update；0.38.9 修掉 mmap 记录泄漏，canary 与 istream 缓冲完整性探针全部干净（输入字节未变、无越界）；0.39.0 把 guest `AT_PAGESZ` 改成 16KB（真机可用，main 索引已能完整解析）；0.39.1 真机证明每块大 read 与 `pread` 逐字节一致、偏移严格顺序（输入 100% 正确），0.39.2 证明 zlib 版本无关（1.2.13 同样失败），0.39.3 给每个匿名映射加 16KB guard page 抓越界写者。**剩余唯一问题**：`apk` 解析索引时随机 `IO ERROR`（`inflate` 返回 `Z_DATA_ERROR`）。已逐条证伪：下载/TLS、缓存文件 SHA-256、apk 版本（Linux 同版本同文件 `OK: 24049`）、输入缓冲被改写、映射末尾越界、4K/16K 页粒度、读到的字节与偏移（`pread` 逐字节一致）、zlib 版本（1.2.13/1.3.1 一致）→ 只剩 **zlib 自身堆状态被写坏**；0.39.3 用 guard page 抓写者 |
 
 最新版本 **0.39.3 (88)**。项目上下文、决策、真机日志和路线记录在
 [Da-AiXZ/linux-workspace](https://github.com/Da-AiXZ/linux-workspace)（私有）。

@@ -13,6 +13,29 @@ guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建
 
 ## 当前状态（2026-11-22，0.39.3 / build 88）
 
+## 当前卡点（M3.3 唯一阻塞项）
+
+`apk` 解析仓库索引时随机报 `WARNING: opening …: IO ERROR`：位置随机、通常只有一个
+仓库挂、同一次运行里另一个仓库常常完整解析（`OK: 24049` = 5543 + 18506）。
+
+排查结论（每条都有真机证据，详见 workspace 的 `docs/BUG-index-io-error.md`）：
+
+- ✅ 缓存索引 SHA-256 与 CDN 逐字节一致；busybox 自带 inflate 对同文件 `gzip -t` 成功
+- ✅ x86_64 Linux 上同版本 apk + 同两个文件 → `OK: 24049`、`status=0`
+- ✅ 0.38.9 探针：输入缓冲逐页哈希 `changed=0`、无映射末尾越界（canary 未命中）
+- ✅ 0.39.0：`AT_PAGESZ=0x4000`（guest 与 host 同为 16KB 页）后故障依旧
+- ✅ 0.39.1：每块 ≥64KB read 与同偏移 `pread` **逐字节相同**、`jumps=0`
+- ✅ 0.39.2：换 zlib 1.2.13（Alpine 3.18）同样失败
+
+→ `inflate()` 收到正确输入却返回 `Z_DATA_ERROR`，只剩 **zlib 自身堆状态
+（`inflate_state` / 32KB window）被某段代码写坏** 一种解释。
+0.39.3 给每个非 fixed 匿名映射（含 `mremap`）追加 16KB `PROT_NONE` guard page，
+越界写会当场 SIGSEGV 并打出 `pc`（写者）与 `far`（撞墙地址）。
+
+**注意**：不要把这条归因于网络、TLS、apk 或文件完整性——这些都已排除，改动它们
+只会浪费时间。复现只需菜单 `Run APK Update (local index)`，不需要联网。
+
+
 - **M0–M2.5 全部真机通过**。0.34.1：`Run Shell` 六条命令（`ls /`、`cat /etc/motd`、
   `uname`、`ls -l /`、`id`、`pwd`）全对，`status=0`；`Run Fork Test` 父子分别输出。
 - **M3.1 已完成（0.35.5 真机）**：
