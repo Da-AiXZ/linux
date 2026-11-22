@@ -244,6 +244,7 @@ static void GuestDescribeAddress(uintptr_t address,
                                  size_t size);
 static unsigned GuestMunmapSharedPages;
 static unsigned GuestMunmapReleasedPages;
+static unsigned GuestMunmapKeptPages;
 static unsigned GuestMappingChecks;
 static unsigned GuestMappingUnbacked;
 /*
@@ -2568,6 +2569,8 @@ static void GuestLogSyscallStats(void)
     GuestReadGuardVerifyAll();
     GuestLog("[guest] munmap pages: released=%u kept-shared=%u\n",
              GuestMunmapReleasedPages, GuestMunmapSharedPages);
+    GuestLog("[guest] munmap kept=%u (unowned, shared or sub-page)\n",
+             GuestMunmapKeptPages);
     GuestLog("[guest] mapping checks=%u unbacked=%u\n",
              GuestMappingChecks, GuestMappingUnbacked);
     GuestLogMmapHistogram();
@@ -5614,6 +5617,15 @@ static uint64_t GuestHandleFixedAnon(uintptr_t address,
     if (GuestEnsureWritable(address, length) != 0) {
         return GuestErrno();
     }
+    /*
+     * 0.40.12: this path used to change permissions and memset without ever
+     * telling the record table.  Everything downstream then treated the range
+     * as unowned -- GuestReleaseGuestPages() would unmap it on the next
+     * munmap, and the fault reporter printed "no guest mapping" for a range
+     * that was in active use.  Record it before touching the bytes.
+     */
+    GuestRememberMmap(address, length);
+    GuestVerifyMapping(address, length, "fixed anon");
     if (address >= GuestHeapBase && address < GuestBrkCurrent) {
         /*
          * The guest is replacing pages it already handed out to itself.  On
@@ -6006,58 +6018,86 @@ static BOOL GuestPageIsRuntime(uintptr_t page)
     return NO;
 }
 
-static BOOL GuestPageHasLiveRecord(uintptr_t page)
+/*
+ * A page may only be released when the guest's request covers it completely
+ * AND every record touching that page lies entirely inside the request.
+ *
+ * 0.40.12: the order used to be "forget the records first, then unmap every
+ * page that has no record left".  A 4KB free inside a 64KB allocation
+ * therefore trimmed the record down to the remaining 16KB pages, left the
+ * first page unowned by construction, and unmapped it -- while the rest of
+ * that allocation (zlib's inflate_state and its 32KB window) stayed live and
+ * kept writing.  The fault reporter then printed "no guest mapping" for a
+ * page that had been in active use.  Inspect the records against the request
+ * before touching either.
+ */
+static BOOL GuestPageRecordsFitRequest(uintptr_t page,
+                                       uintptr_t requestStart,
+                                       uintptr_t requestEnd)
 {
     uintptr_t pageEnd = page + GUEST_HOST_PAGE_SIZE;
+    BOOL found = NO;
+
     for (int index = 0; index < GuestMmapRecordCount; index++) {
         uintptr_t start = GuestMmapRecords[index].address;
         uintptr_t end = start + GuestMmapRecords[index].length;
-        if (end > page && start < pageEnd) {
-            return YES;
+        if (end <= page || start >= pageEnd) {
+            continue;
+        }
+        found = YES;
+        if (start < requestStart || end > requestEnd) {
+            return NO;
         }
     }
-    return NO;
+    /*
+     * No record at all means we cannot prove the page is ours.  Keeping it
+     * leaks one page; releasing it risks somebody else's live buffer, and the
+     * guard page appended to every anonymous mapping lands in exactly this
+     * category.
+     */
+    return found;
 }
 
-/*
- * Sub-page munmap, done without collateral damage.
- *
- * Darwin has exactly one page size (16KB here) while musl asks in 4KB units,
- * so a 4KB free normally sits inside a page shared with a *different* live
- * allocation.  The old code called munmap() on the guest address and, on
- * failure, rounded the range to whole pages and then forgot the whole page in
- * the record table -- tearing down the neighbour's memory and handing its
- * address range to the next allocation.  Nothing is out of bounds in that
- * scenario, which is why guard pages and canaries never fired; the victim just
- * silently becomes somebody else's buffer.
- *
- * Now each page is released only when no live record and no runtime region
- * (image, interpreter, stub, heap, stack) still uses it.  A page that is still
- * shared is left completely alone: leaking a page is recoverable, corrupting a
- * neighbour is not.
- */
+static void GuestReleaseGuestPages(uintptr_t address, size_t length)
+{
+    if (length == 0) {
+        return;
+    }
+    uintptr_t scanStart = GuestAlignDown(address);
+    uintptr_t scanEnd = GuestAlignUp(address + length);
+    uintptr_t requestStart = GuestAlignUp(address);
+    uintptr_t requestEnd = GuestAlignDown(address + length);
+
+    if (scanEnd <= scanStart) {
+        return;
+    }
+    GuestRememberFreed(scanStart, scanEnd - scanStart);
+
+    for (uintptr_t page = scanStart; page < scanEnd;
+         page += GUEST_HOST_PAGE_SIZE) {
+        BOOL covered = requestStart <= page &&
+                       page + GUEST_HOST_PAGE_SIZE <= requestEnd;
+        if (!covered || GuestPageIsRuntime(page) ||
+            !GuestPageRecordsFitRequest(page, requestStart, requestEnd)) {
+            GuestMunmapKeptPages++;
+            continue;
+        }
+        if (munmap((void *)page, GUEST_HOST_PAGE_SIZE) == 0) {
+            GuestMunmapReleasedPages++;
+            GuestForgetMmap(page, GUEST_HOST_PAGE_SIZE);
+        } else {
+            GuestMunmapKeptPages++;
+        }
+    }
+}
+
 static uint64_t GuestHandleMunmap(uintptr_t address, size_t length)
 {
     if (length == 0) {
         return (uint64_t)(-EINVAL);
     }
     GuestCanaryCheck(address);
-
-    uintptr_t releaseStart = GuestAlignDown(address);
-    uintptr_t releaseEnd = GuestAlignUp(address + length);
-    GuestRememberFreed(releaseStart, releaseEnd - releaseStart);
-    GuestForgetMmap(releaseStart, releaseEnd - releaseStart);
-
-    for (uintptr_t page = releaseStart; page < releaseEnd;
-         page += GUEST_HOST_PAGE_SIZE) {
-        if (GuestPageHasLiveRecord(page) || GuestPageIsRuntime(page)) {
-            GuestMunmapSharedPages++;
-            continue;
-        }
-        if (munmap((void *)page, GUEST_HOST_PAGE_SIZE) == 0) {
-            GuestMunmapReleasedPages++;
-        }
-    }
+    GuestReleaseGuestPages(address, length);
     return 0;
 }
 
@@ -6113,13 +6153,15 @@ static uint64_t GuestHandleMremap(uintptr_t oldAddress,
     size_t copyLength = oldLength < newLength ? oldLength : newLength;
     memcpy(map, (void *)oldAddress, copyLength);
     GuestCanaryCheck(oldAddress);
-    if (munmap((void *)oldAddress, oldMapLength) != 0) {
-        int error = errno;
-        munmap(map, newMapLength + GUEST_HOST_PAGE_SIZE);
-        return (uint64_t)(-error);
-    }
-    GuestRememberFreed(oldAddress, oldMapLength);
-    GuestForgetMmap(oldAddress, oldMapLength);
+    /*
+     * 0.40.12: this used to call the host munmap() directly with the rounded
+     * old length, bypassing the page-aware release that 0.40.6 added for
+     * munmap().  A mremap that moved a sub-page range could therefore tear
+     * down a 16KB host page another live allocation still shared.  The new
+     * mapping is already in place, so a page we decline to release only leaks
+     * address space.
+     */
+    GuestReleaseGuestPages(oldAddress, oldMapLength);
     GuestVerifyMapping((uintptr_t)map, newMapLength, "mremap");
     GuestRememberMmap((uintptr_t)map, newMapLength);
     GuestCanaryPlace((uintptr_t)map, newLength, newMapLength);
