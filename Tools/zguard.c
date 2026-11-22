@@ -16,7 +16,7 @@
  * usable mitigation.
  */
 
-#include "zconf.h"
+#include "zutil.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -33,9 +33,6 @@ typedef struct {
 } ZGEntry;
 
 static ZGEntry zg_entries[ZG_SLOTS];
-
-voidpf ZLIB_INTERNAL zcalloc(voidpf opaque, unsigned items, unsigned size);
-void ZLIB_INTERNAL zcfree(voidpf opaque, voidpf address);
 
 static void *zg_map(size_t items, size_t size)
 {
