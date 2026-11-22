@@ -26,12 +26,25 @@ def main():
     args = parser.parse_args()
 
     deadline = time.time() + args.timeout
+    try:
+        start_size = os.path.getsize(INBOX) if os.path.exists(INBOX) else 0
+        start_mtime = os.path.getmtime(INBOX) if os.path.exists(INBOX) else 0.0
+    except OSError:
+        start_size, start_mtime = 0, 0.0
+
     while time.time() < deadline:
         try:
-            if os.path.exists(INBOX) and os.path.getsize(INBOX) > 0:
-                with open(INBOX, "r", encoding="utf-8") as handle:
-                    print(handle.read().strip())
-                return 0
+            if os.path.exists(INBOX):
+                size = os.path.getsize(INBOX)
+                mtime = os.path.getmtime(INBOX)
+                # A log that was already in the inbox before this watcher started
+                # must not satisfy it, otherwise the job returns instantly and
+                # nothing actually wakes up when the device uploads.
+                if size > start_size or (mtime > start_mtime and size > 0):
+                    time.sleep(0.4)
+                    with open(INBOX, "r", encoding="utf-8") as handle:
+                        print(handle.read().strip())
+                    return 0
         except OSError:
             pass
         time.sleep(args.interval)

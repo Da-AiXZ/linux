@@ -224,6 +224,16 @@ jobs:
           cp /tmp/alpine-rootfs/sbin/apk "$APP/Helpers/alpine-apk"
           cp /tmp/alpine-rootfs/bin/busybox "$APP/Helpers/alpine-busybox"
 
+          # The offline index pair, so `Run APK Update (local index)` works on a
+          # rootfs that has never downloaded anything (the cache is device state
+          # and can vanish; the local repository used to depend on it).
+          mkdir -p "$APP/Helpers/localrepo"
+          curl -fsSL -o "$APP/Helpers/localrepo/APKINDEX.ee34dc71.tar.gz" \
+            https://dl-cdn.alpinelinux.org/alpine/v3.20/main/aarch64/APKINDEX.tar.gz
+          curl -fsSL -o "$APP/Helpers/localrepo/APKINDEX.7db31bb6.tar.gz" \
+            https://dl-cdn.alpinelinux.org/alpine/v3.20/community/aarch64/APKINDEX.tar.gz
+          ls -l "$APP/Helpers/localrepo"
+
           # Build a tiny unsigned Alpine package for `apk add` testing.  The
           # payload is one of our own minimal aarch64 ELF programs (without
           # the deliberate fault probe).

@@ -141,6 +141,23 @@ extern char **environ;
             @"APKINDEX.%@.tar.gz", repository[0]];
         NSString *tag = repository[1];
         NSString *source = [cache stringByAppendingPathComponent:name];
+        /*
+         * 0.40.23: the cache is device state, and device state disappears --
+         * a reinstall, an apk cache clean or a wiped rootfs leaves the local
+         * repository with nothing to copy from, which used to strand the
+         * whole offline test path (and push the run onto the network).
+         * The two indexes are small and fixed for a release, so they ship in
+         * the bundle as the fallback source.
+         */
+        if (![manager fileExistsAtPath:source]) {
+            NSString *bundled = [[[NSBundle mainBundle] bundlePath]
+                stringByAppendingPathComponent:
+                    [NSString stringWithFormat:@"Helpers/localrepo/%@", name]];
+            if ([manager fileExistsAtPath:bundled]) {
+                source = bundled;
+            }
+        }
+        BOOL fromBundle = ![source hasPrefix:cache];
         NSString *directory = [[rootPath stringByAppendingPathComponent:
             [NSString stringWithFormat:@"var/localrepo/%@/aarch64", tag]]
             copy];
@@ -157,9 +174,10 @@ extern char **environ;
         NSDictionary *attributes =
             [manager attributesOfItemAtPath:target error:NULL];
         [self log:[NSString stringWithFormat:
-            @"localrepo %@ %@ size=%@", tag,
+            @"localrepo %@ %@ size=%@ from=%@", tag,
             copied ? @"ready" : @"missing source",
-            attributes[NSFileSize] ?: @0]];
+            attributes[NSFileSize] ?: @0,
+            fromBundle ? @"bundle" : @"cache"]];
         if (!copied) {
             ready = NO;
         }
