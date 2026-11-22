@@ -98,6 +98,9 @@ static uLong zspyLastOffset;
 static unsigned int zspyChunks;
 static uLong zspyOutCrc;
 static const Bytef *zspyChunkPtr;
+static Bytef zspyCopy[132 * 1024];
+static Bytef *zspySavedIn;
+static uInt zspySavedAvail;
 static uLong zspyChunkBlocks[32];
 static uInt zspyChunkBlockCount; /* gzip trailer uses crc32 starting at 0 */
 static uInt zspyPrevLeft;
@@ -410,8 +413,34 @@ int inflate(zspy_stream *stream, int flush)
             zspyState(stream->state);
         }
     }
+    /*
+     * 0.40.31: decode from a private copy.
+     *
+     * [zm] proved that a 4KB block of apk's input buffer changes while inflate
+     * is running, and no mmap path touches that buffer, so something writes
+     * into it behind our back.  Rather than keep hunting the writer with the
+     * app unusable, hand zlib a copy: if the CRC failures disappear, the
+     * writer is confirmed and this is also the workaround.  next_in is put
+     * back afterwards so apk's own bookkeeping (and its digest callback) still
+     * see the pointer it expects.
+     */
+    if (freshChunk && stream->next_in != NULL && stream->avail_in != 0 &&
+        stream->avail_in <= sizeof(zspyCopy)) {
+        memcpy(zspyCopy, stream->next_in, stream->avail_in);
+        zspySavedIn = (Bytef *)stream->next_in;
+        zspySavedAvail = stream->avail_in;
+        stream->next_in = zspyCopy;
+    } else {
+        zspySavedIn = NULL;
+    }
+
     zspyOutStart = stream->next_out;
     result = z_inflate(stream, flush);
+    if (zspySavedIn != NULL) {
+        uInt taken = zspySavedAvail - stream->avail_in;
+        stream->next_in = zspySavedIn + taken;
+        zspySavedIn = NULL;
+    }
     /*
      * 0.40.21: the invariant zlib relies on is that the bytes it advanced
      * next_out by are exactly the bytes it took out of avail_out.  Every
