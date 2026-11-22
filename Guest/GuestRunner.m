@@ -2101,9 +2101,12 @@ typedef struct {
     int pageCount;
     uint64_t pageHash[GUEST_READ_GUARD_PAGES];
     int valid;
+    off_t nextOffset;
+    int offsetValid;
 } GuestReadGuard;
 
 static GuestReadGuard GuestReadGuards[GUEST_READ_GUARD_SLOTS];
+static unsigned char *GuestReadVerifyBuffer = NULL;
 
 static uint64_t GuestFastHash(const void *data, size_t length)
 {
@@ -2131,6 +2134,54 @@ static int GuestReadGuardPages(size_t length)
 
 static unsigned int GuestReadGuardChecks = 0;
 static unsigned int GuestReadGuardChanges = 0;
+static unsigned int GuestReadGuardJump = 0;
+static unsigned int GuestReadGuardVerified = 0;
+static unsigned int GuestReadGuardMismatch = 0;
+
+/*
+ * Re-read the same range straight from the file and compare it with what the
+ * guest just received.  This is the only check that proves the guest's
+ * compressed bytes are the file's bytes: a seek that silently rewinds the
+ * index fd, a wrong fd, or a host read that lands in the wrong place all show
+ * up here as a mismatch instead of as a mysterious zlib data error.
+ */
+static void GuestReadGuardVerifyBytes(int fd, uintptr_t address, size_t length,
+                                      off_t offset)
+{
+    if (length < 65536 || length > 131072) {
+        return;
+    }
+    if (GuestReadVerifyBuffer == NULL) {
+        GuestReadVerifyBuffer = malloc(131072);
+        if (GuestReadVerifyBuffer == NULL) {
+            return;
+        }
+    }
+    ssize_t got = pread(fd, GuestReadVerifyBuffer, length, offset);
+    if (got != (ssize_t)length) {
+        GuestLog("[guest] read verify short fd=%d off=%lld want=0x%lx got=%lld\n",
+                 fd,
+                 (long long)offset,
+                 (unsigned long)length,
+                 (long long)got);
+        GuestReadGuardMismatch++;
+        return;
+    }
+    GuestReadGuardVerified++;
+    if (memcmp(GuestReadVerifyBuffer, (const void *)address, length) == 0) {
+        return;
+    }
+    size_t index = 0;
+    while (index < length &&
+           GuestReadVerifyBuffer[index] == ((const uint8_t *)address)[index]) {
+        index++;
+    }
+    GuestLog("[guest] read verify MISMATCH fd=%d off=%lld first=0x%lx\n",
+             fd,
+             (long long)offset,
+             (unsigned long)index);
+    GuestReadGuardMismatch++;
+}
 
 /*
  * Log every page whose contents changed while the buffer was idle.  The
@@ -2193,13 +2244,20 @@ static void GuestReadGuardPostRead(int fd, uintptr_t address, size_t length)
         return;
     }
     GuestReadGuard *slot = NULL;
+    int reuse = 0;
     for (int index = 0; index < GUEST_READ_GUARD_SLOTS; index++) {
         GuestReadGuard *guard = &GuestReadGuards[index];
-        if (!guard->valid || guard->fd != fd) {
+        if (guard->fd != fd) {
             continue;
         }
         if (guard->address == address) {
+            /* Same fd and buffer: keep the offset continuity state, even
+             * when PreRead already dropped the hash snapshot. */
             slot = guard;
+            reuse = 1;
+            continue;
+        }
+        if (!guard->valid) {
             continue;
         }
         /* Switching to a different buffer: check the old one now. */
@@ -2208,6 +2266,7 @@ static void GuestReadGuardPostRead(int fd, uintptr_t address, size_t length)
                              guard->length,
                              guard->pageHash);
         guard->valid = 0;
+        guard->offsetValid = 0;
     }
     if (slot == NULL) {
         for (int index = 0; index < GUEST_READ_GUARD_SLOTS; index++) {
@@ -2219,6 +2278,9 @@ static void GuestReadGuardPostRead(int fd, uintptr_t address, size_t length)
     }
     if (slot == NULL) {
         return;
+    }
+    if (!reuse) {
+        slot->offsetValid = 0;
     }
     slot->fd = fd;
     slot->address = address;
@@ -2234,6 +2296,24 @@ static void GuestReadGuardPostRead(int fd, uintptr_t address, size_t length)
         slot->pageHash[index] =
             GuestFastHash((const void *)(address + offset), size);
     }
+
+    /* Sockets and pipes do not have file offsets; skip those. */
+    off_t current = lseek(fd, 0, SEEK_CUR);
+    if (current < 0) {
+        slot->offsetValid = 0;
+        return;
+    }
+    off_t start = current - (off_t)length;
+    if (slot->offsetValid && slot->nextOffset != start) {
+        GuestLog("[guest] read offset jump fd=%d expected=%lld actual=%lld\n",
+                 fd,
+                 (long long)slot->nextOffset,
+                 (long long)start);
+        GuestReadGuardJump++;
+    }
+    slot->nextOffset = current;
+    slot->offsetValid = 1;
+    GuestReadGuardVerifyBytes(fd, address, length, start);
 }
 
 static void GuestReadGuardVerifyAll(void)
@@ -2263,6 +2343,7 @@ static void GuestReadGuardDrop(int fd)
                              guard->length,
                              guard->pageHash);
         guard->valid = 0;
+        guard->offsetValid = 0;
     }
 }
 
@@ -2302,9 +2383,13 @@ static void GuestLogSyscallStats(void)
 {
     GuestCanaryCheckAll();
     GuestReadGuardVerifyAll();
-    GuestLog("[guest] read guard checks=%u changed=%u\n",
+    GuestLog("[guest] read guard checks=%u changed=%u jumps=%u verified=%u"
+             " mismatch=%u\n",
              GuestReadGuardChecks,
-             GuestReadGuardChanges);
+             GuestReadGuardChanges,
+             GuestReadGuardJump,
+             GuestReadGuardVerified,
+             GuestReadGuardMismatch);
     for (int index = 0; index < GuestSocketTableCount; index++) {
         GuestLog("[guest] sock fd=%d read=%llu write=%llu\n",
                  GuestSocketTable[index].fd,
