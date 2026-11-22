@@ -95,6 +95,7 @@ static unsigned int zspyStreams;
 static uLong zspyConsumed;
 static uLong zspyInputCrc = 1; /* zlib starts crc32 at 0, but 0 is ambiguous */
 static uLong zspyLastOffset;
+static unsigned int zspyChunks;
 
 static void zspyWrite(const char *text, size_t length)
 {
@@ -122,56 +123,13 @@ static void zspyLog(const char *format, ...)
 static void zspyReset(void)
 {
     zspyCalls = 0;
+    zspyChunks = 0;
     zspyConsumed = 0;
     zspyInputCrc = 1;
     zspyLastOffset = 0;
 }
 
 static void zspyState(const void *state);
-
-/*
- * 0.40.22: the CRC over all consumed input no longer matches the file on the
- * host, and not even a prefix of it, so some 64KB window of the buffer zlib
- * read from is wrong.  apk hands zlib the whole cached index in one blob
- * (apk_istream_get_all), i.e. a file mapping this runtime emulates itself, so
- * the bad window is a property of that mapping.  Slice the consumed range on
- * 64KB and print every slice: the first CRC that differs from the host names
- * the window, and head/head2 say whether it is zero-filled, duplicated or
- * shifted.  Only the failing path pays for this.
- */
-static void zspyInputSlices(zspy_stream *stream)
-{
-    const Bytef *base;
-    unsigned long long offset = 0;
-
-    if (stream->total_in < 64 || stream->next_in == NULL) {
-        return;
-    }
-    base = stream->next_in - stream->total_in;
-    while (offset < (unsigned long long)stream->total_in) {
-        size_t length = 65536;
-        uLong crc;
-
-        if (offset + length > (unsigned long long)stream->total_in) {
-            length = (size_t)((unsigned long long)stream->total_in - offset);
-        }
-        crc = z_crc32(1, base + offset, (uInt)length);
-        if (length >= 8) {
-            zspyLog("[zc] off=%llu len=%u crc=%08lx head=%02x%02x%02x%02x%02x%02x%02x%02x\n",
-                    offset,
-                    (unsigned)length,
-                    (unsigned long)crc,
-                    base[offset + 0], base[offset + 1],
-                    base[offset + 2], base[offset + 3],
-                    base[offset + 4], base[offset + 5],
-                    base[offset + 6], base[offset + 7]);
-        } else {
-            zspyLog("[zc] off=%llu len=%u crc=%08lx\n",
-                    offset, (unsigned)length, (unsigned long)crc);
-        }
-        offset += length;
-    }
-}
 
 /*
  * Called for every completed inflate(), including the ones that only fill the
@@ -210,7 +168,6 @@ static void zspyReport(zspy_stream *stream, int result, uInt before)
          * the state was fine; "invalid distance" / "invalid code" means the
          * state or the code table was damaged.  Print the state fields too.
          */
-        zspyInputSlices(stream);
         zspyState(stream->state);
         return;
     }
@@ -314,6 +271,29 @@ int inflate(zspy_stream *stream, int flush)
     Bytef *beforeOut = stream->next_out;
     uInt beforeAvail = stream->avail_out;
     int result;
+
+    /*
+     * 0.40.24: apk refills gzi's input buffer one read() at a time and points
+     * next_in at the *start* of that buffer again, so next_in - total_in is
+     * only the file start while the first chunk is being decoded -- 0.40.22
+     * assumed otherwise and walked below the buffer into unmapped memory.
+     * Hash each fresh chunk where it actually is, before zlib consumes it, and
+     * print its own offset: comparing these with the file on the host names
+     * the first window that is not what apk read from disk.
+     */
+    if (before == 0 && stream->avail_in >= 512 && stream->next_in != NULL) {
+        uLong chunkCrc = z_crc32(1, stream->next_in, stream->avail_in);
+        zspyLog("[zc] chunk=%u off=%lu len=%u crc=%08lx"
+                " head=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+                zspyChunks++,
+                (unsigned long)zspyConsumed,
+                (unsigned)stream->avail_in,
+                (unsigned long)chunkCrc,
+                stream->next_in[0], stream->next_in[1],
+                stream->next_in[2], stream->next_in[3],
+                stream->next_in[4], stream->next_in[5],
+                stream->next_in[6], stream->next_in[7]);
+    }
 
     /*
      * The first few calls of every stream get their arguments printed.  This
