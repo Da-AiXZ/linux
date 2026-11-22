@@ -104,7 +104,11 @@ jobs:
           # 0.39.2 A/B proved the inflate data errors are not zlib-version
           # specific (1.2.13 from v3.18 failed the same way), so go back to the
           # minirootfs build that apk was compiled against.
-          if [ -f /tmp/libz-guard.so.1 ]; then
+          # The guarded zlib is kept as an experiment: it turns the stray heap
+          # write into a hard fault during index parsing instead of a silent
+          # EIO, but it does not catch the writer (the write is intra-page), so
+          # it is off by default.  Set USE_GUARDED_ZLIB=1 to enable it.
+          if [ -f /tmp/libz-guard.so.1 ] && [ "${USE_GUARDED_ZLIB:-0}" = "1" ]; then
             cp /tmp/libz-guard.so.1 "$APP/Helpers/alpine/lib/libz.so.1"
             echo "guarded libz in use"
           else
