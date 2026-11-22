@@ -11,7 +11,7 @@
 guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建 syscall 层。
 不是虚拟机、不是模拟器、不是解释器。
 
-## 当前状态（2026-11-22，0.39.0 / build 85）
+## 当前状态（2026-11-22，0.39.1 / build 86）
 
 - **M0–M2.5 全部真机通过**。0.34.1：`Run Shell` 六条命令（`ls /`、`cat /etc/motd`、
   `uname`、`ls -l /`、`id`、`pwd`）全对，`status=0`；`Run Fork Test` 父子分别输出。
@@ -204,11 +204,20 @@ guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建
   mmap/munmap/meta 区全部按 16KB 取整，与 Darwin 完全一致（Alpine 在 16KB 页的
   Asahi Linux 上是受支持配置）。同时把 read-guard 的逐次日志降噪成退出时的
   `read guard checks=N changed=M` 汇总，并在 `heap=` 行打印 `pagesz=`。
-- **下一步**：真机 0.39.0 先跑 `Run APK --version`（验证 16KB 页下动态链接仍正常），
-  再跑 `Run APK Update (local index)` 两次 + `Run Gzip Check (community index)`。
-  若 16KB 页下 EIO 消失，说明根因就是 4K/16K 不一致导致的堆布局差异；
-  若仍失败，下一步把 zlib 的 `inflate_state`/window 单独隔离（给 malloc 加 guard
-  或换 zlib 版本）继续定位。
+- **0.39.0 真机**：16KB 页可用 —— `apk --version` 正常（`status=0`，M3.1/M3.2 不受影响），
+  `heap=… pagesz=0x4000`；`apk update (local index)` 里 **main 完整解析**（5543 包），
+  community 读了 3 个 128KB 块（393216/1831492）后照样 EIO，共 9105 包。
+  `read guard checks=7 changed=0`（输入缓冲仍然逐页不变）。→ 16KB 页没有消除故障，
+  说明不是 4K/16K 布局差异，而是解析过程中一个与工作量成正比的概率事件。
+- 0.39.1：补齐最后一条未验证的假设 —— **大块 read 的字节与偏移是否正确**：
+  ① 每次 ≥64KB 的 `read` 后 `lseek(CUR)` 记下文件偏移，下一块必须紧接上一块结束
+  （否则打印 `read offset jump fd=… expected=… actual=…`）；
+  ② 用 `pread` 把同一区间再读一遍与 guest 缓冲 `memcmp`（否则打印
+  `read verify MISMATCH fd=… off=… first=0x…`）。
+  退出时汇总 `read guard checks=… changed=… jumps=… verified=… mismatch=…`。
+  若 `jumps>0` → 有人把索引 fd 倒回去了（症状完全吻合：数据是合法文件字节但位置错）；
+  若 `mismatch>0` → guest 拿到的字节与文件不一致；
+  若都干净 → 压缩字节可证明正确，破坏只剩 zlib 自身堆状态，下一步隔离其分配。
 
 ## 两个仓库
 
