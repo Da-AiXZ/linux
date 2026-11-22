@@ -179,24 +179,13 @@ jobs:
       # too.  On device the loader reports patched=478 tls_mrs=90 tls_msr=1 for
       # this exact binary; if the static counts differ, a false positive exists
       # and the "code silently patched" hypothesis is back on the table.
-      - name: Verify patch sites against the disassembly
+      - name: Verify patch sites against the static scan
         run: |
           set -u
           BIN="build/Build/Products/Release-iphoneos/Probe.app/Helpers/alpine-apk"
           test -f "$BIN"
-          file "$BIN"
-          if command -v llvm-objdump >/dev/null 2>&1; then
-            OBJDUMP=llvm-objdump
-          else
-            OBJDUMP=objdump
-          fi
-          DIS="$("$OBJDUMP" -d "$BIN" 2>&1 || true)"
-          echo "$DIS" | head -5
-          SVC=$(printf '%s\n' "$DIS" | grep -cE '[[:space:]]svc[[:space:]]' || true)
-          TP=$(printf '%s\n' "$DIS" | grep -c 'tpidr_el0' || true)
-          MSR=$(printf '%s\n' "$DIS" | grep -cE '[[:space:]]msr[[:space:]]+tpidr_el0' || true)
-          MRS=$((TP - MSR))
-          echo "static svc=$SVC mrs=$MRS msr=$MSR tpidr=$TP (runtime says svc=478 mrs=90 msr=1)"
+          python3 Tools/verify_patch_sites.py "$BIN" --expect=478,90,1 \
+            || echo "::warning::static patch-site count differs from the device log"
 
       - name: Upload IPAs
         uses: actions/upload-artifact@v4
