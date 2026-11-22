@@ -239,6 +239,9 @@ static uintptr_t GuestAllocateMmapAddress(size_t length,
                                           BOOL fixed);
 static BOOL GuestRangeOverlapsRuntime(uintptr_t address, size_t length);
 static void GuestRememberMmap(uintptr_t address, size_t length);
+static void GuestDescribeAddress(uintptr_t address,
+                                 char *buffer,
+                                 size_t size);
 /*
  * Passing a file mapping straight to Darwin is only safe for data: iOS refuses
  * to mprotect a file-backed page to PROT_EXEC (that is exactly how the guarded
@@ -389,6 +392,20 @@ static void GuestSignalHandler(int signalNumber,
                           (unsigned long)GuestImageBase);
     if (length > 0) {
         GuestWriteAll(STDOUT_FILENO, text, (size_t)length);
+    }
+
+    /*
+     * "pc=0x..." alone says nothing once libraries are loaded: the number has
+     * to be tied to a module before it can be disassembled.  Name the record
+     * that contains pc, so the offset is relative to a known base.
+     */
+    {
+        char module[128];
+        GuestDescribeAddress((uintptr_t)pc, module, sizeof(module));
+        length = snprintf(text, sizeof(text), "[guest] pc in %s\n", module);
+        if (length > 0) {
+            GuestWriteAll(STDOUT_FILENO, text, (size_t)length);
+        }
     }
 
     length = snprintf(text,
@@ -2769,15 +2786,14 @@ static uint64_t GuestSyscallDispatchInner(uint64_t *args,
          * log.  Name the descriptors that matter so a read trace can be tied
          * back to a file.
          */
-        if (strstr(hostPath, "/var/cache/apk") != NULL ||
-            strstr(hostPath, "localrepo") != NULL) {
+        {
             struct stat opened;
             long long size = -1;
             if (fstat(descriptor, &opened) == 0) {
                 size = (long long)opened.st_size;
             }
             GuestLog("[guest] openat fd=%d size=%lld %s\n",
-                     descriptor, size, hostPath);
+                     descriptor, size, guestPath);
         }
         return (uint64_t)descriptor;
     }
@@ -5084,6 +5100,26 @@ static void GuestReleaseMmaps(void)
  * mmap/munmap cycle burned a fresh 16KB slot out of the 112MB window and a
  * long-running program (apk reading an index over TLS) ran out of space.
  */
+static void GuestDescribeAddress(uintptr_t address,
+                                 char *buffer,
+                                 size_t size)
+{
+    for (int index = 0; index < GuestMmapRecordCount; index++) {
+        uintptr_t start = GuestMmapRecords[index].address;
+        uintptr_t end = start + GuestMmapRecords[index].length;
+        if (address >= start && address < end) {
+            snprintf(buffer, size, "0x%lx+0x%lx (len 0x%lx records=%d)",
+                     (unsigned long)start,
+                     (unsigned long)(address - start),
+                     (unsigned long)GuestMmapRecords[index].length,
+                     GuestMmapRecordCount);
+            return;
+        }
+    }
+    snprintf(buffer, size, "no guest mapping (records=%d)",
+             GuestMmapRecordCount);
+}
+
 static void GuestForgetMmap(uintptr_t address, size_t length)
 {
     uintptr_t end = address + length;

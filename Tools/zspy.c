@@ -195,10 +195,49 @@ int inflateInit2_(zspy_stream *stream, int windowBits, const char *version,
     return result;
 }
 
+static char zspyHex[24];
+
+static const char *zspyHead(const Bytef *bytes, uInt available)
+{
+    static const char digits[] = "0123456789abcdef";
+    uInt limit = available < 8 ? available : 8;
+    uInt index;
+
+    for (index = 0; index < limit; index++) {
+        zspyHex[index * 2] = digits[bytes[index] >> 4];
+        zspyHex[index * 2 + 1] = digits[bytes[index] & 0x0f];
+    }
+    zspyHex[index * 2] = 0;
+    return zspyHex;
+}
+
 int inflate(zspy_stream *stream, int flush)
 {
     uInt before = stream->avail_in;
-    int result = z_inflate(stream, flush);
+    int result;
+
+    /*
+     * The first few calls of every stream get their arguments printed.  This
+     * is what separates "the caller's z_stream was already broken" from "zlib
+     * broke it while decoding": the previous build crashed inside inflate with
+     * far=0x2d, a value far too small to be a real pointer, on the second
+     * stream of the run.
+     */
+    if (zspyCalls < 4) {
+        zspyLog("[zspy] pre #%u strm=%p state=%p in=%p avail=%u"
+                " out=%p avail_out=%u head=%s\n",
+                zspyCalls,
+                (void *)stream,
+                stream->state,
+                (const void *)stream->next_in,
+                (unsigned int)stream->avail_in,
+                (void *)stream->next_out,
+                (unsigned int)stream->avail_out,
+                stream->next_in != NULL ? zspyHead(stream->next_in,
+                                                   stream->avail_in)
+                                        : "-");
+    }
+    result = z_inflate(stream, flush);
     zspyReport(stream, result, before);
     return result;
 }
