@@ -182,10 +182,18 @@ jobs:
       - name: Verify patch sites against the static scan
         run: |
           set -u
-          BIN="build/Build/Products/Release-iphoneos/Probe.app/Helpers/alpine-apk"
-          test -f "$BIN"
-          python3 Tools/verify_patch_sites.py "$BIN" --expect=478,90,1 \
-            || echo "::warning::static patch-site count differs from the device log"
+          APP="build/Build/Products/Release-iphoneos/Probe.app"
+          # The 478/90/1 that `loaded ... patched=478 tls_mrs=90 tls_msr=1'
+          # reports belong to the dynamic linker, not to apk: apk is a dynamic
+          # musl program and issues no svc itself (its own count is 0).
+          INTERP="$APP/Helpers/alpine/lib/ld-musl-aarch64.so.1"
+          APKBIN="$APP/Helpers/alpine-apk"
+          test -f "$INTERP"
+          test -f "$APKBIN"
+          python3 Tools/verify_patch_sites.py "$INTERP" --expect=478,90,1 \
+            || echo "::warning::interp patch-site count differs from the device log"
+          python3 Tools/verify_patch_sites.py "$APKBIN" --expect=0,0,0 \
+            || echo "::warning::apk unexpectedly contains patch sites"
 
       - name: Upload IPAs
         uses: actions/upload-artifact@v4
