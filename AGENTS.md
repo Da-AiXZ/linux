@@ -11,18 +11,26 @@
 guest arm64 指令由 M1 直接跑，只把 `svc #0` 改写成分支，进自建 syscall 层。
 不是虚拟机、不是模拟器、不是解释器。
 
-## 当前状态（2026-11-23，0.40.12 / build 107）
+## 当前状态（2026-11-23，0.40.13 / build 108）
 
 ## 当前卡点（M3.3 唯一阻塞项）
 
-**0.40.12 的判断：故障不在 zlib，而在运行时的映射记账不闭合**——分配侧有三条路径
-可以不记账，释放侧却把"查不到记录"当成"可以释放"。0.40.11 真机现场里
-`far=0x104fa8000`、`state1=0x104fac250`、`state2=0x104fb4260` 三者同属一个 64KB 块，
-块首页（`far`）被拆掉、后 48KB 仍可读写，正是该模型的直接后果。
-0.40.12 同时修三处：`GuestHandleFixedAnon` 补 `GuestRememberMmap`；
-`GuestReleaseGuestPages` 改为"请求完整覆盖 **且** 记录完整落在请求内"才释放；
-`GuestHandleMremap` 不再直调宿主 `munmap`。下面 0.38.x–0.39.x 的取证仍然有效，
-用于排除网络、TLS、文件与读取路径。
+**0.40.12 的假设已被真机否定。** 那一版把 `GuestHandleFixedAnon` 纳入记账、把
+`munmap`/`mremap` 改成"请求完整覆盖且记录完整落在请求内"才释放；0.40.12 真机
+（build 107）崩溃**逐字节相同**：`pc=libz+0x21a24`、`far=0x105c90000`、
+`state1=0x105c94250`、`state2=0x105c9c260`，三个地址的相对偏移（`-0x4250`/`+0x3260`）
+与 0.40.11 完全一致，只有记录数从 22 变成 26。→ 释放路径没有碰那块内存。
+
+0.40.13 改为直接问内核，不再从外面推：
+
+- 崩溃时对 `far` 调 `vm_region_64`，打印 `far host region: 0x…..0x… prot=N max=M`
+  或 `none (kr=N)`。`prot=0` → 被 `mprotect(PROT_NONE)` 过；`none` → 从未映射。
+  两者在 `esr=0x92000047` 上是同一个 translation fault，此前无法区分。
+- 崩溃时 dump 全部映射记录（`rec[i] 0x…..0x… len=0x…`），看 64KB 块到底有没有记过。
+- `GuestEnsureWritable` 新建页时打印 `ensure-writable created page 0x…`（前 20 次）。
+  它是唯一绕过 `GuestHandleMmap` 建映射的地方。
+
+下面 0.38.x–0.39.x 的取证仍然有效，用于排除网络、TLS、文件与读取路径。
 
 `apk` 解析仓库索引时随机报 `WARNING: opening …: IO ERROR`：位置随机、通常只有一个
 仓库挂、同一次运行里另一个仓库常常完整解析（`OK: 24049` = 5543 + 18506）。

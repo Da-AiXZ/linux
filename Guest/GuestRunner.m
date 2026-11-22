@@ -239,6 +239,7 @@ static uintptr_t GuestAllocateMmapAddress(size_t length,
                                           BOOL fixed);
 static BOOL GuestRangeOverlapsRuntime(uintptr_t address, size_t length);
 static void GuestRememberMmap(uintptr_t address, size_t length);
+static void GuestDumpMmapRecords(void);
 static void GuestDescribeAddress(uintptr_t address,
                                  char *buffer,
                                  size_t size);
@@ -467,6 +468,51 @@ static void GuestSignalHandler(int signalNumber,
         if (length > 0) {
             GuestWriteAll(STDOUT_FILENO, text, (size_t)length);
         }
+        /*
+         * 0.40.13: "no guest mapping" cannot distinguish "never mapped" from
+         * "mapped PROT_NONE" -- Darwin reports both as a translation fault.
+         * Ask the kernel about the fault address itself and print its host
+         * region and protection, then dump the whole record table: the answer
+         * is which of the two worlds far belongs to.
+         */
+        {
+            vm_address_t faultRegion = (vm_address_t)far;
+            vm_size_t faultRegionSize = 0;
+            vm_region_basic_info_data_64_t faultInfo;
+            mach_msg_type_number_t faultCount = VM_REGION_BASIC_INFO_COUNT_64;
+            mach_port_t faultObject = MACH_PORT_NULL;
+            memset(&faultInfo, 0, sizeof(faultInfo));
+            kern_return_t faultKr = vm_region_64(mach_task_self(),
+                                                 &faultRegion,
+                                                 &faultRegionSize,
+                                                 VM_REGION_BASIC_INFO_64,
+                                                 (vm_region_info_t)&faultInfo,
+                                                 &faultCount,
+                                                 &faultObject);
+            if (faultObject != MACH_PORT_NULL) {
+                mach_port_deallocate(mach_task_self(), faultObject);
+            }
+            if (faultKr == KERN_SUCCESS) {
+                length = snprintf(text,
+                                  sizeof(text),
+                                  "[guest] far host region: 0x%lx..0x%lx"
+                                  " prot=%d max=%d\n",
+                                  (unsigned long)faultRegion,
+                                  (unsigned long)(faultRegion +
+                                                  faultRegionSize),
+                                  (int)faultInfo.protection,
+                                  (int)faultInfo.max_protection);
+            } else {
+                length = snprintf(text,
+                                  sizeof(text),
+                                  "[guest] far host region: none (kr=%d)\n",
+                                  (int)faultKr);
+            }
+            if (length > 0) {
+                GuestWriteAll(STDOUT_FILENO, text, (size_t)length);
+            }
+        }
+        GuestDumpMmapRecords();
     }
 
     length = snprintf(text,
@@ -5273,6 +5319,36 @@ static void GuestForgetMmap(uintptr_t address, size_t length)
     }
 }
 
+/*
+ * 0.40.13: print the record table at fault time.  "no guest mapping" only
+ * says the address is not in the table; the table itself says whether the
+ * 64KB block around the fault address was ever recorded, and at what
+ * granularity.
+ */
+static void GuestDumpMmapRecords(void)
+{
+    char line[192];
+    int total = GuestMmapRecordCount;
+    int written = snprintf(line, sizeof(line),
+                           "[guest] records=%d\n", total);
+    if (written > 0) {
+        GuestWriteAll(STDOUT_FILENO, line, (size_t)written);
+    }
+    for (int index = 0; index < total && index < 48; index++) {
+        uintptr_t start = GuestMmapRecords[index].address;
+        uintptr_t length = GuestMmapRecords[index].length;
+        written = snprintf(line, sizeof(line),
+                           "[guest] rec[%d] 0x%lx..0x%lx len=0x%lx\n",
+                           index,
+                           (unsigned long)start,
+                           (unsigned long)(start + length),
+                           (unsigned long)length);
+        if (written > 0) {
+            GuestWriteAll(STDOUT_FILENO, line, (size_t)written);
+        }
+    }
+}
+
 static uintptr_t GuestMmapConflictEnd(uintptr_t address, size_t length)
 {
     uintptr_t end = address + length;
@@ -5583,6 +5659,7 @@ static int GuestPatchMappedElf(int descriptor,
  */
 static int GuestEnsureWritable(uintptr_t address, size_t length)
 {
+    static unsigned createdPages = 0;
     uintptr_t end = address + length;
     for (uintptr_t page = GuestAlignDown(address);
          page < end;
@@ -5597,6 +5674,16 @@ static int GuestEnsureWritable(uintptr_t address, size_t length)
                              0);
             if (map == MAP_FAILED) {
                 return -1;
+            }
+            /*
+             * 0.40.13: this is the only place that creates a mapping without
+             * going through GuestHandleMmap, so it is the only candidate for
+             * a range that exists in the kernel but in no record.
+             */
+            if (createdPages < 20) {
+                createdPages++;
+                GuestLog("[guest] ensure-writable created page 0x%lx\n",
+                         (unsigned long)page);
             }
             continue;
         }
