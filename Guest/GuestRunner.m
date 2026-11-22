@@ -247,6 +247,40 @@ static unsigned GuestMunmapReleasedPages;
 static unsigned GuestMappingChecks;
 static unsigned GuestMappingUnbacked;
 /*
+ * The fault address is in no record and in no runtime range, so the most
+ * likely story is "it was released while still owned".  Keep the last freed
+ * ranges and check them when a fault happens: that names the release instead
+ * of inferring it.
+ */
+#define GUEST_FREED_SLOTS 64
+static uintptr_t GuestFreedStart[GUEST_FREED_SLOTS];
+static uintptr_t GuestFreedEnd[GUEST_FREED_SLOTS];
+static unsigned GuestFreedCount;
+
+static void GuestRememberFreed(uintptr_t address, size_t length)
+{
+    unsigned slot = GuestFreedCount % GUEST_FREED_SLOTS;
+    GuestFreedStart[slot] = address;
+    GuestFreedEnd[slot] = address + length;
+    GuestFreedCount++;
+}
+
+static BOOL GuestAddressWasFreed(uintptr_t address, uintptr_t *start,
+                                 uintptr_t *end)
+{
+    unsigned limit = GuestFreedCount < GUEST_FREED_SLOTS
+        ? GuestFreedCount : GUEST_FREED_SLOTS;
+    for (unsigned index = 0; index < limit; index++) {
+        if (address >= GuestFreedStart[index] &&
+            address < GuestFreedEnd[index]) {
+            *start = GuestFreedStart[index];
+            *end = GuestFreedEnd[index];
+            return YES;
+        }
+    }
+    return NO;
+}
+/*
  * Passing a file mapping straight to Darwin is only safe for data: iOS refuses
  * to mprotect a file-backed page to PROT_EXEC (that is exactly how the guarded
  * libz failed to load: "Permission denied (needed by apk)").  ld.so maps whole
@@ -421,6 +455,14 @@ static void GuestSignalHandler(int signalNumber,
         char faulted[128];
         GuestDescribeAddress((uintptr_t)far, faulted, sizeof(faulted));
         length = snprintf(text, sizeof(text), "[guest] far in %s\n", faulted);
+        uintptr_t freedStart = 0;
+        uintptr_t freedEnd = 0;
+        if (GuestAddressWasFreed((uintptr_t)far, &freedStart, &freedEnd)) {
+            snprintf(faulted, sizeof(faulted),
+                     "[guest] far was released earlier: 0x%lx..0x%lx\n",
+                     (unsigned long)freedStart, (unsigned long)freedEnd);
+            GuestWriteAll(STDOUT_FILENO, faulted, strlen(faulted));
+        }
         if (length > 0) {
             GuestWriteAll(STDOUT_FILENO, text, (size_t)length);
         }
@@ -6003,6 +6045,7 @@ static uint64_t GuestHandleMunmap(uintptr_t address, size_t length)
 
     uintptr_t releaseStart = GuestAlignDown(address);
     uintptr_t releaseEnd = GuestAlignUp(address + length);
+    GuestRememberFreed(releaseStart, releaseEnd - releaseStart);
     GuestForgetMmap(releaseStart, releaseEnd - releaseStart);
 
     for (uintptr_t page = releaseStart; page < releaseEnd;
@@ -6075,6 +6118,7 @@ static uint64_t GuestHandleMremap(uintptr_t oldAddress,
         munmap(map, newMapLength + GUEST_HOST_PAGE_SIZE);
         return (uint64_t)(-error);
     }
+    GuestRememberFreed(oldAddress, oldMapLength);
     GuestForgetMmap(oldAddress, oldMapLength);
     GuestVerifyMapping((uintptr_t)map, newMapLength, "mremap");
     GuestRememberMmap((uintptr_t)map, newMapLength);
