@@ -11,6 +11,7 @@ Usage:
 import json
 import os
 import sys
+import urllib.parse
 import urllib.request
 import uuid
 
@@ -83,32 +84,19 @@ class Session:
 
 
 def upload(path, device_path=None):
-    """POST /upload_file with multipart/form-data."""
+    """POST /upload_file as raw bytes; the server rejects multipart."""
     name = os.path.basename(path)
-    boundary = "----wb" + uuid.uuid4().hex
     with open(path, "rb") as handle:
         payload = handle.read()
-    parts = []
+    query = "?filename=" + urllib.parse.quote(name)
     if device_path:
-        parts.append(
-            (
-                "--%s\r\nContent-Disposition: form-data; name=\"path\"\r\n\r\n%s\r\n"
-                % (boundary, device_path)
-            ).encode()
-        )
-    parts.append(
-        (
-            "--%s\r\nContent-Disposition: form-data; name=\"file\"; filename=\"%s\"\r\n"
-            "Content-Type: application/octet-stream\r\n\r\n" % (boundary, name)
-        ).encode()
-    )
-    body = b"".join(parts) + payload + ("\r\n--%s--\r\n" % boundary).encode()
+        query += "&path=" + urllib.parse.quote(device_path)
     request = urllib.request.Request(
-        BASE + "/upload_file",
-        data=body,
-        headers={"Content-Type": "multipart/form-data; boundary=" + boundary},
+        BASE + "/upload_file" + query,
+        data=payload,
+        headers={"Content-Type": "application/octet-stream"},
     )
-    with urllib.request.urlopen(request, timeout=180) as response:
+    with urllib.request.urlopen(request, timeout=300) as response:
         return json.loads(response.read().decode())
 
 
