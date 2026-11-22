@@ -97,6 +97,8 @@ jobs:
           tar -xzf /tmp/zlib2.tar.gz -C /tmp/zlib2 --strip-components=1
           python3 Tools/patch_inffast.py /tmp/zlib2/inffast.c
           grep -c "\[zf\]" /tmp/zlib2/inffast.c
+          python3 Tools/patch_inflate.py /tmp/zlib2/inflate.c
+          grep -c "\[zl\]" /tmp/zlib2/inflate.c
           mkdir -p /tmp/zspy
           for f in /tmp/zlib2/*.c; do
             zig cc -target aarch64-linux-musl -O2 -fPIC -DZ_PREFIX \
