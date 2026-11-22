@@ -72,6 +72,24 @@ def main(argv):
               file=sys.stderr)
         return 2
     path = argv[1]
+    if argv[2] == "loads":
+        data = open(path, "rb").read()
+        print(f"{'p_offset':>10} {'p_vaddr':>10} {'p_filesz':>10}"
+              f" {'p_memsz':>10} flags")
+        program_offset = struct.unpack_from("<Q", data, 0x20)[0]
+        entry_size = struct.unpack_from("<H", data, 0x36)[0]
+        count = struct.unpack_from("<H", data, 0x38)[0]
+        for index in range(count):
+            base = program_offset + index * entry_size
+            kind = struct.unpack_from("<I", data, base)[0]
+            if kind != PT_LOAD:
+                continue
+            flags, offset, vaddr, _, filesz = struct.unpack_from(
+                "<IIQQQ", data, base + 4)
+            memsz = struct.unpack_from("<Q", data, base + 0x28)[0]
+            print(f"0x{offset:08x} 0x{vaddr:08x} 0x{filesz:08x}"
+                  f" 0x{memsz:08x} {flags}")
+        return 0
     target = int(argv[2], 16)
     before = int(argv[3], 16) if len(argv) > 3 else 0x10
     after = int(argv[4], 16) if len(argv) > 4 else 0x40

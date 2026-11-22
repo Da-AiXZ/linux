@@ -135,7 +135,11 @@ jobs:
           set -u
           SO=/tmp/libz-spy.so.1
           test -f "$SO" || { echo "no instrumented libz"; exit 0; }
+          python3 Tools/elf_peek.py "$SO" loads || true
+          echo "--- runtime offset 0x21d5c ---"
           python3 Tools/elf_peek.py "$SO" 0x21d5c 0x20 0x40 || true
+          echo "--- runtime offset 0x21d5c minus 0x10000 ---"
+          python3 Tools/elf_peek.py "$SO" 0x11d5c 0x20 0x40 || true
 
       - name: Package IPA
         run: |
