@@ -96,6 +96,8 @@ static uLong zspyConsumed;
 static uLong zspyInputCrc = 1; /* zlib starts crc32 at 0, but 0 is ambiguous */
 static uLong zspyLastOffset;
 static unsigned int zspyChunks;
+static uInt zspyPrevLeft;
+static const Bytef *zspyPrevIn;
 
 static void zspyWrite(const char *text, size_t length)
 {
@@ -124,6 +126,8 @@ static void zspyReset(void)
 {
     zspyCalls = 0;
     zspyChunks = 0;
+    zspyPrevLeft = 0;
+    zspyPrevIn = NULL;
     zspyConsumed = 0;
     zspyInputCrc = 1;
     zspyLastOffset = 0;
@@ -148,6 +152,8 @@ static void zspyReport(zspy_stream *stream, int result, uInt before)
         zspyConsumed += consumed;
     }
     zspyLastOffset = stream->total_in;
+    zspyPrevLeft = stream->avail_in;
+    zspyPrevIn = stream->next_in;
 
     if (result < 0 || result == 2) {
         zspyLog("[zspy] fail ret=%d total_in=%lu total_out=%lu"
@@ -281,7 +287,9 @@ int inflate(zspy_stream *stream, int flush)
      * print its own offset: comparing these with the file on the host names
      * the first window that is not what apk read from disk.
      */
-    if (before == 0 && stream->avail_in >= 512 && stream->next_in != NULL) {
+    int freshChunk = (zspyPrevLeft == 0 ||
+                       stream->next_in != zspyPrevIn);
+    if (freshChunk && stream->avail_in >= 512 && stream->next_in != NULL) {
         uLong chunkCrc = z_crc32(1, stream->next_in, stream->avail_in);
         zspyLog("[zc] chunk=%u off=%lu len=%u crc=%08lx"
                 " head=%02x%02x%02x%02x%02x%02x%02x%02x\n",
