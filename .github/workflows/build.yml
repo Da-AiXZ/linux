@@ -99,6 +99,8 @@ jobs:
           grep -c "\[zf\]" /tmp/zlib2/inffast.c
           python3 Tools/patch_inflate.py /tmp/zlib2/inflate.c
           grep -c "\[zl\]" /tmp/zlib2/inflate.c
+          python3 Tools/patch_inffast_len.py /tmp/zlib2/inffast.c
+          grep -c "\[zf3\]" /tmp/zlib2/inffast.c
           mkdir -p /tmp/zspy
           for f in /tmp/zlib2/*.c; do
             zig cc -target aarch64-linux-musl -O2 -fPIC -DZ_PREFIX \
