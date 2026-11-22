@@ -950,6 +950,21 @@ static void GuestInstallAlpineRuntime(NSString *directory)
         }
     }
     GuestLog("[guest] alpine runtime files=%lu\n", (unsigned long)copied);
+    {
+        /* Which zlib actually made it into the rootfs: the inflate failures
+         * are version-specific suspects, so log the size we ended up with. */
+        char zlibPath[GUEST_ROOT_MAX];
+        struct stat zlibInfo;
+        snprintf(zlibPath,
+                 sizeof(zlibPath),
+                 "%s/lib/libz.so.1",
+                 GuestRootPath);
+        if (stat(zlibPath, &zlibInfo) == 0) {
+            GuestLog("[guest] libz size=%lld\n", (long long)zlibInfo.st_size);
+        } else {
+            GuestLog("[guest] libz missing at %s\n", zlibPath);
+        }
+    }
 
     char certificatePath[GUEST_ROOT_MAX];
     snprintf(certificatePath,
