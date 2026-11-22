@@ -106,12 +106,20 @@ jobs:
           mkdir -p /tmp/zspy
           for f in /tmp/zlib2/*.c; do
             zig cc -target aarch64-linux-musl -O2 -fPIC -DZ_PREFIX \
-              -D_LARGEFILE64_SOURCE=1 -c "$f" -o "/tmp/zspy/$(basename "$f" .c).o" \
+              -DMY_ZCALLOC -D_LARGEFILE64_SOURCE=1 -c "$f" -o "/tmp/zspy/$(basename "$f" .c).o" \
               || { echo "zlib prefix build failed"; exit 0; }
           done
           cp Tools/zspy.c /tmp/zspy/zspy.c
+          cp Tools/zguard.c /tmp/zspy/zguard.c
           zig cc -target aarch64-linux-musl -O2 -fPIC -c /tmp/zspy/zspy.c \
             -o /tmp/zspy/zspy.o || { echo "zspy build failed"; exit 0; }
+          # 0.40.20: zlib's own allocations (inflate_state ~7KB, the 32KB
+          # window) each get their own mapping with a trailing PROT_NONE page,
+          # so a neighbour's overrun faults on the writer instead of silently
+          # changing the bytes the window will later replay.
+          zig cc -target aarch64-linux-musl -O2 -fPIC -DZ_PREFIX -DMY_ZCALLOC \
+            -I/tmp/zlib2 -c /tmp/zspy/zguard.c -o /tmp/zspy/zguard.o \
+            || { echo "zguard build failed"; exit 0; }
           ( cd /tmp/zspy && zig cc -target aarch64-linux-musl -shared \
               -Wl,-soname,libz.so.1 -o /tmp/libz-spy.so.1 *.o ) \
             || { echo "zspy link failed"; exit 0; }
