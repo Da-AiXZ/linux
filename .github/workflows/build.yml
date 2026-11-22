@@ -126,20 +126,16 @@ jobs:
       # The device crashes inside libz at a fixed offset on the second gzip
       # member ("pc in 0x...+0x21d5c", far=0x18).  Print the code and the source
       # line there so the faulting statement is known without guessing.
-      - name: Disassemble the crash site
+      # The device crashes inside libz at a fixed offset on the second gzip
+      # member ("pc in 0x...+0x21d5c", far=0x18).  Dump the words and the
+      # bracketing symbols there; the runner has no llvm-objdump on PATH.
+      - name: Inspect the crash site
         continue-on-error: true
         run: |
           set -u
           SO=/tmp/libz-spy.so.1
           test -f "$SO" || { echo "no instrumented libz"; exit 0; }
-          echo "=== symbol containing 0x21d5c ==="
-          llvm-nm -n --defined-only "$SO" 2>/dev/null | awk '
-            {addr=strtonum("0x" $1); if (addr <= 0x21d5c) last=$0}
-            END{print last}' || true
-          echo "=== addr2line 0x21d5c ==="
-          llvm-addr2line -e "$SO" -f -C -i 0x21d5c 2>&1 | head -8 || true
-          echo "=== disassembly 0x21d30..0x21d90 ==="
-          llvm-objdump -d --start-address=0x21d30 --stop-address=0x21d90 "$SO" 2>&1 | tail -25 || true
+          python3 Tools/elf_peek.py "$SO" 0x21d5c 0x20 0x40 || true
 
       - name: Package IPA
         run: |
