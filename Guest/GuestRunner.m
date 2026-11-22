@@ -10,6 +10,7 @@
 #import <mach/task_info.h>
 #import <mach/thread_info.h>
 #import <mach/thread_act.h>
+#import <mach/mach_vm.h>
 #import <mach/vm_map.h>
 #import <mach-o/dyld.h>
 #import <pthread.h>
@@ -2524,6 +2525,8 @@ static void GuestLogSyscallStats(void)
     GuestReadGuardVerifyAll();
     GuestLog("[guest] munmap pages: released=%u kept-shared=%u\n",
              GuestMunmapReleasedPages, GuestMunmapSharedPages);
+    GuestLog("[guest] mapping checks=%u unbacked=%u\n",
+             GuestMappingChecks, GuestMappingUnbacked);
     GuestLogMmapHistogram();
     GuestLog("[guest] read guard checks=%u changed=%u jumps=%u verified=%u"
              " mismatch=%u\n",
@@ -5091,6 +5094,57 @@ static BOOL GuestRangeOverlapsRuntime(uintptr_t address, size_t length)
     return NO;
 }
 
+static unsigned GuestMappingChecks = 0;
+static unsigned GuestMappingUnbacked = 0;
+
+/*
+ * Ask the kernel whether a range we are about to hand to the guest is really
+ * mapped.  A fault landing in "no guest mapping" (0.40.9) means either the
+ * address was never backed or it was released while still owned, and both are
+ * invisible from our own record table.  Checking at birth turns that into a
+ * line in the log naming the size and the caller.
+ */
+static BOOL GuestRangeIsMapped(uintptr_t address, size_t length)
+{
+    mach_vm_address_t cursor = (mach_vm_address_t)address;
+    mach_vm_address_t end = cursor + (mach_vm_address_t)length;
+
+    while (cursor < end) {
+        mach_vm_size_t size = 0;
+        vm_region_basic_info_data_64_t info;
+        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t object = MACH_PORT_NULL;
+        kern_return_t result = mach_vm_region(mach_task_self(),
+                                              &cursor,
+                                              &size,
+                                              VM_REGION_BASIC_INFO_64,
+                                              (vm_region_info_t)&info,
+                                              &count,
+                                              &object);
+        if (result != KERN_SUCCESS || size == 0) {
+            return NO;
+        }
+        cursor += size;
+    }
+    return YES;
+}
+
+static void GuestVerifyMapping(uintptr_t address, size_t length,
+                               const char *what)
+{
+    if (address == 0 || length == 0) {
+        return;
+    }
+    GuestMappingChecks++;
+    if (!GuestRangeIsMapped(address, length)) {
+        GuestMappingUnbacked++;
+        GuestLog("[guest] mapping not backed: 0x%lx len=0x%lx (%s)\n",
+                 (unsigned long)address,
+                 (unsigned long)length,
+                 what);
+    }
+}
+
 static void GuestRememberMmap(uintptr_t address, size_t length)
 {
     if (GuestMmapRecordCount >= GUEST_MMAP_RECORDS) {
@@ -5613,6 +5667,7 @@ static uint64_t GuestHandleFileMap(int descriptor,
         return (uint64_t)(-error);
     }
     if (remember) {
+        GuestVerifyMapping(address, length, "file map");
         GuestRememberMmap(address, length);
     }
     return (uint64_t)address;
@@ -5762,6 +5817,7 @@ static uint64_t GuestHandleMmap(uint64_t hint,
             munmap(map, mapLength + GUEST_HOST_PAGE_SIZE);
             return (uint64_t)(-error);
         }
+        GuestVerifyMapping(target, mapLength, "anon map");
         GuestRememberMmap(target, mapLength);
         GuestCanaryPlace(target, requested, mapLength);
         GuestRecordMmapSize(requested);
@@ -6022,6 +6078,7 @@ static uint64_t GuestHandleMremap(uintptr_t oldAddress,
         return (uint64_t)(-error);
     }
     GuestForgetMmap(oldAddress, oldMapLength);
+    GuestVerifyMapping((uintptr_t)map, newMapLength, "mremap");
     GuestRememberMmap((uintptr_t)map, newMapLength);
     GuestCanaryPlace((uintptr_t)map, newLength, newMapLength);
     return (uint64_t)(uintptr_t)map;
