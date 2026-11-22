@@ -96,7 +96,9 @@ static uLong zspyConsumed;
 static uLong zspyInputCrc = 1; /* zlib starts crc32 at 0, but 0 is ambiguous */
 static uLong zspyLastOffset;
 static unsigned int zspyChunks;
+static uLong zspyOutCrc; /* gzip trailer uses crc32 starting at 0 */
 static uInt zspyPrevLeft;
+static Bytef *zspyOutStart;
 static const Bytef *zspyPrevIn;
 
 static void zspyWrite(const char *text, size_t length)
@@ -126,7 +128,9 @@ static void zspyReset(void)
 {
     zspyCalls = 0;
     zspyChunks = 0;
+    zspyOutCrc = 0;
     zspyPrevLeft = 0;
+    zspyOutStart = NULL;
     zspyPrevIn = NULL;
     zspyConsumed = 0;
     zspyInputCrc = 1;
@@ -145,6 +149,11 @@ static void zspyReport(zspy_stream *stream, int result, uInt before)
     uInt consumed = before - stream->avail_in;
 
     zspyCalls++;
+    if (stream->next_out != NULL && zspyOutStart != NULL &&
+        stream->next_out > zspyOutStart) {
+        uLong produced = (uLong)(stream->next_out - zspyOutStart);
+        zspyOutCrc = z_crc32(zspyOutCrc, zspyOutStart, (uInt)produced);
+    }
     if (consumed != 0) {
         zspyInputCrc = z_crc32(zspyInputCrc,
                                stream->next_in - consumed,
@@ -168,6 +177,18 @@ static void zspyReport(zspy_stream *stream, int result, uInt before)
                 (unsigned long)zspyInputCrc,
                 zspyCalls,
                 stream->msg != NULL ? stream->msg : "-");
+        {
+            uLong trailer = 0;
+            if (stream->avail_in == 4 && stream->next_in != NULL) {
+                const Bytef *at = stream->next_in - 4;
+                trailer = ((uLong)at[0] << 24) | ((uLong)at[1] << 16) |
+                          ((uLong)at[2] << 8) | (uLong)at[3];
+            }
+            zspyLog("[zout] outcrc=%08lx trailer=%08lx total_out=%lu\n",
+                    (unsigned long)zspyOutCrc,
+                    (unsigned long)trailer,
+                    (unsigned long)stream->total_out);
+        }
         /*
          * 0.40.18: the message is the cheapest possible discriminator.
          * "incorrect data check" means the bytes inflated were wrong while
@@ -178,6 +199,9 @@ static void zspyReport(zspy_stream *stream, int result, uInt before)
         return;
     }
     if (result == 1) { /* Z_STREAM_END */
+        zspyLog("[zout] outcrc=%08lx total_out=%lu\n",
+                (unsigned long)zspyOutCrc,
+                (unsigned long)stream->total_out);
         zspyLog("[zspy] end total_in=%lu total_out=%lu crc=%08lx calls=%u\n",
                 (unsigned long)stream->total_in,
                 (unsigned long)stream->total_out,
@@ -347,6 +371,7 @@ int inflate(zspy_stream *stream, int flush)
             zspyState(stream->state);
         }
     }
+    zspyOutStart = stream->next_out;
     result = z_inflate(stream, flush);
     /*
      * 0.40.21: the invariant zlib relies on is that the bytes it advanced
