@@ -245,6 +245,8 @@ static void GuestDescribeAddress(uintptr_t address,
                                  size_t size);
 static unsigned GuestMunmapSharedPages;
 static unsigned GuestMunmapReleasedPages;
+static unsigned GuestMappingChecks;
+static unsigned GuestMappingUnbacked;
 /*
  * Passing a file mapping straight to Darwin is only safe for data: iOS refuses
  * to mprotect a file-backed page to PROT_EXEC (that is exactly how the guarded
@@ -5094,9 +5096,6 @@ static BOOL GuestRangeOverlapsRuntime(uintptr_t address, size_t length)
     return NO;
 }
 
-static unsigned GuestMappingChecks = 0;
-static unsigned GuestMappingUnbacked = 0;
-
 /*
  * Ask the kernel whether a range we are about to hand to the guest is really
  * mapped.  A fault landing in "no guest mapping" (0.40.9) means either the
@@ -5106,21 +5105,21 @@ static unsigned GuestMappingUnbacked = 0;
  */
 static BOOL GuestRangeIsMapped(uintptr_t address, size_t length)
 {
-    mach_vm_address_t cursor = (mach_vm_address_t)address;
-    mach_vm_address_t end = cursor + (mach_vm_address_t)length;
+    vm_address_t cursor = (vm_address_t)address;
+    vm_address_t end = cursor + (vm_address_t)length;
 
     while (cursor < end) {
-        mach_vm_size_t size = 0;
+        vm_size_t size = 0;
         vm_region_basic_info_data_64_t info;
         mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
         mach_port_t object = MACH_PORT_NULL;
-        kern_return_t result = mach_vm_region(mach_task_self(),
-                                              &cursor,
-                                              &size,
-                                              VM_REGION_BASIC_INFO_64,
-                                              (vm_region_info_t)&info,
-                                              &count,
-                                              &object);
+        kern_return_t result = vm_region_64(mach_task_self(),
+                                            &cursor,
+                                            &size,
+                                            VM_REGION_BASIC_INFO_64,
+                                            (vm_region_info_t)&info,
+                                            &count,
+                                            &object);
         if (result != KERN_SUCCESS || size == 0) {
             return NO;
         }
