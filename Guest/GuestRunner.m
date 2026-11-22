@@ -5189,8 +5189,13 @@ static uintptr_t GuestAllocateMmapAddress(size_t length,
         candidate = GuestFindMmapGap(windowStart, start + length, length);
     }
     if (candidate == 0) {
-        GuestLog("[guest] mmap: no free guest address near stub (len=0x%lx)\n",
-                 (unsigned long)length);
+        GuestLog("[guest] mmap: no free guest address near stub"
+                 " (len=0x%lx cursor=0x%lx window=0x%lx..0x%lx records=%d)\n",
+                 (unsigned long)length,
+                 (unsigned long)GuestMmapCursor,
+                 (unsigned long)windowStart,
+                 (unsigned long)limit,
+                 GuestMmapRecordCount);
         return 0;
     }
     GuestMmapCursor = candidate + length;
@@ -5444,12 +5449,31 @@ static uint64_t GuestHandleFileMap(int descriptor,
                                    int prot,
                                    BOOL remember)
 {
-    void *map = mmap((void *)address,
-                     length,
-                     PROT_READ | PROT_WRITE,
-                     MAP_PRIVATE | MAP_ANON | MAP_FIXED,
-                     -1,
-                     0);
+    /*
+     * address == 0 means "the island window is full, let the host choose".
+     * Such a mapping can still hold data files (they contain no svc sites);
+     * if the file does need patching, GuestPatchCodeRange rejects it because
+     * the island is out of branch range, and we report -ENOEXEC as before.
+     */
+    void *map = NULL;
+    if (address == 0) {
+        map = mmap(NULL,
+                   length,
+                   PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANON,
+                   -1,
+                   0);
+        if (map != MAP_FAILED) {
+            address = (uintptr_t)map;
+        }
+    } else {
+        map = mmap((void *)address,
+                   length,
+                   PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANON | MAP_FIXED,
+                   -1,
+                   0);
+    }
     if (map == MAP_FAILED) {
         return GuestErrno();
     }
@@ -5667,14 +5691,28 @@ static uint64_t GuestHandleMmap(uint64_t hint,
                                                         (uintptr_t)hint,
                                                         NO);
             if (target == 0) {
-                return (uint64_t)(-ENOMEM);
+                /*
+                 * The window is fragmented.  Data files do not need to be
+                 * within branch range of the island, so let the host place
+                 * them; anything that turns out to need patching is rejected
+                 * by the range check inside GuestPatchCodeRange.
+                 */
+                GuestLog("[guest] file map outside window len=0x%lx\n",
+                         (unsigned long)mapLength);
+                result = GuestHandleFileMap(descriptor,
+                                            offset,
+                                            0,
+                                            mapLength,
+                                            prot,
+                                            YES);
+            } else {
+                result = GuestHandleFileMap(descriptor,
+                                            offset,
+                                            target,
+                                            mapLength,
+                                            prot,
+                                            YES);
             }
-            result = GuestHandleFileMap(descriptor,
-                                        offset,
-                                        target,
-                                        mapLength,
-                                        prot,
-                                        YES);
         }
     }
 
