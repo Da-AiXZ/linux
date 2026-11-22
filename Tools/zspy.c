@@ -301,6 +301,26 @@ int inflate(zspy_stream *stream, int flush)
                 stream->next_in[2], stream->next_in[3],
                 stream->next_in[4], stream->next_in[5],
                 stream->next_in[6], stream->next_in[7]);
+        /*
+         * 0.40.26: the community index fails in exactly one 128KB chunk
+         * (chunk 9) while its neighbours match the file byte for byte, so the
+         * remaining question is where inside that chunk the bytes diverge.
+         * Print 4KB sub-block CRCs around that chunk: a run that starts at an
+         * offset and continues to the end of the chunk means a partial
+         * overwrite, a single bad block means one page was written.
+         */
+        if (zspyChunks - 1 >= 8 && zspyChunks - 1 <= 10 &&
+            stream->avail_in >= 4096) {
+            uInt offset;
+            for (offset = 0; offset + 4096 <= stream->avail_in; offset += 4096) {
+                zspyLog("[zc4] c=%u o=%lu crc=%08lx\n",
+                        zspyChunks - 1,
+                        (unsigned long)(zspyConsumed + offset),
+                        (unsigned long)z_crc32(1,
+                                               stream->next_in + offset,
+                                               4096));
+            }
+        }
     }
 
     /*
