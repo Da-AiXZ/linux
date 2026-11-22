@@ -5426,9 +5426,18 @@ static uint64_t GuestHandleMmap(uint64_t hint,
          * choose the address instead: apk keeps tens of megabytes of index
          * data live at once and the 112MB island window also has to hold the
          * 64MB heap, the 8MB stack and the dynamic linker.
+         *
+         * One extra PROT_NONE host page is appended after every mapping.  The
+         * remaining inflate() data errors happen with byte-exact input and on
+         * both zlib versions, so the working theory is a write just past some
+         * heap mapping; the guard turns that into an immediate SIGSEGV with a
+         * precise pc instead of silently corrupting a neighbour.  The guard is
+         * intentionally not recorded: munmap() releases only the guest's
+         * pages and the guard page stays behind (16KB of leaked address space
+         * per mapping, acceptable for one apk run).
          */
         void *map = mmap(NULL,
-                         mapLength,
+                         mapLength + GUEST_HOST_PAGE_SIZE,
                          PROT_READ | PROT_WRITE,
                          flags,
                          -1,
@@ -5437,9 +5446,12 @@ static uint64_t GuestHandleMmap(uint64_t hint,
             return GuestErrno();
         }
         target = (uintptr_t)map;
-        if (GuestProtectRange(target, mapLength, prot) != 0) {
+        if (GuestProtectRange(target, mapLength, prot) != 0 ||
+            mprotect((void *)(target + mapLength),
+                     (size_t)GUEST_HOST_PAGE_SIZE,
+                     PROT_NONE) != 0) {
             int error = errno;
-            munmap(map, mapLength);
+            munmap(map, mapLength + GUEST_HOST_PAGE_SIZE);
             return (uint64_t)(-error);
         }
         GuestRememberMmap(target, mapLength);
@@ -5563,7 +5575,7 @@ static uint64_t GuestHandleMremap(uintptr_t oldAddress,
     }
 
     void *map = mmap(NULL,
-                     newMapLength,
+                     newMapLength + GUEST_HOST_PAGE_SIZE,
                      PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANON,
                      -1,
@@ -5571,12 +5583,19 @@ static uint64_t GuestHandleMremap(uintptr_t oldAddress,
     if (map == MAP_FAILED) {
         return GuestErrno();
     }
+    if (mprotect((void *)((uintptr_t)map + newMapLength),
+                 (size_t)GUEST_HOST_PAGE_SIZE,
+                 PROT_NONE) != 0) {
+        int error = errno;
+        munmap(map, newMapLength + GUEST_HOST_PAGE_SIZE);
+        return (uint64_t)(-error);
+    }
     size_t copyLength = oldLength < newLength ? oldLength : newLength;
     memcpy(map, (void *)oldAddress, copyLength);
     GuestCanaryCheck(oldAddress);
     if (munmap((void *)oldAddress, oldMapLength) != 0) {
         int error = errno;
-        munmap(map, newMapLength);
+        munmap(map, newMapLength + GUEST_HOST_PAGE_SIZE);
         return (uint64_t)(-error);
     }
     GuestForgetMmap(oldAddress, oldMapLength);
