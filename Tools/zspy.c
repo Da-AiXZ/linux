@@ -130,6 +130,50 @@ static void zspyReset(void)
 static void zspyState(const void *state);
 
 /*
+ * 0.40.22: the CRC over all consumed input no longer matches the file on the
+ * host, and not even a prefix of it, so some 64KB window of the buffer zlib
+ * read from is wrong.  apk hands zlib the whole cached index in one blob
+ * (apk_istream_get_all), i.e. a file mapping this runtime emulates itself, so
+ * the bad window is a property of that mapping.  Slice the consumed range on
+ * 64KB and print every slice: the first CRC that differs from the host names
+ * the window, and head/head2 say whether it is zero-filled, duplicated or
+ * shifted.  Only the failing path pays for this.
+ */
+static void zspyInputSlices(zspy_stream *stream)
+{
+    const Bytef *base;
+    unsigned long long offset = 0;
+
+    if (stream->total_in < 64 || stream->next_in == NULL) {
+        return;
+    }
+    base = stream->next_in - stream->total_in;
+    while (offset < (unsigned long long)stream->total_in) {
+        size_t length = 65536;
+        uLong crc;
+
+        if (offset + length > (unsigned long long)stream->total_in) {
+            length = (size_t)((unsigned long long)stream->total_in - offset);
+        }
+        crc = z_crc32(1, base + offset, (uInt)length);
+        if (length >= 8) {
+            zspyLog("[zc] off=%llu len=%u crc=%08lx head=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+                    offset,
+                    (unsigned)length,
+                    (unsigned long)crc,
+                    base[offset + 0], base[offset + 1],
+                    base[offset + 2], base[offset + 3],
+                    base[offset + 4], base[offset + 5],
+                    base[offset + 6], base[offset + 7]);
+        } else {
+            zspyLog("[zc] off=%llu len=%u crc=%08lx\n",
+                    offset, (unsigned)length, (unsigned long)crc);
+        }
+        offset += length;
+    }
+}
+
+/*
  * Called for every completed inflate(), including the ones that only fill the
  * output buffer.  A tick every 128 calls keeps the log readable while still
  * showing forward progress; failures and stream ends are always printed.
@@ -166,6 +210,7 @@ static void zspyReport(zspy_stream *stream, int result, uInt before)
          * the state was fine; "invalid distance" / "invalid code" means the
          * state or the code table was damaged.  Print the state fields too.
          */
+        zspyInputSlices(stream);
         zspyState(stream->state);
         return;
     }
