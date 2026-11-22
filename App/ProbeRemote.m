@@ -54,13 +54,25 @@ static NSString *const ProbeRemoteDefaultURL = @"http://192.168.190.180:8765";
     return session;
 }
 
++ (NSString *)buildNumber
+{
+    NSString *build = NSBundle.mainBundle.infoDictionary[@"CFBundleVersion"];
+    return build.length > 0 ? build : @"0";
+}
+
 + (NSURL *)endpointWithPath:(NSString *)path
 {
     NSString *base = [self baseURL];
     if (base.length == 0) {
         return nil;
     }
-    return [NSURL URLWithString:[base stringByAppendingString:path]];
+    /*
+     * The server refuses commands that require a newer build, so an older app
+     * still installed on the device cannot consume work meant for the next one.
+     */
+    NSString *query = [NSString stringWithFormat:@"?build=%@", [self buildNumber]];
+    return [NSURL URLWithString:
+        [[base stringByAppendingString:path] stringByAppendingString:query]];
 }
 
 + (void)uploadLog:(NSString *)text

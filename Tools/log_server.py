@@ -23,12 +23,14 @@ import datetime
 import json
 import os
 import threading
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE = os.path.join(ROOT, ".remote")
 LOGS = os.path.join(STATE, "logs")
 COMMANDS = os.path.join(STATE, "commands.txt")
+INBOX = os.path.join(STATE, "inbox.txt")
 
 INTERESTING = (
     "IO ERROR",
@@ -53,18 +55,45 @@ def ensure_state():
     if not os.path.exists(COMMANDS):
         with open(COMMANDS, "w", encoding="utf-8") as handle:
             handle.write("")
+    if not os.path.exists(INBOX):
+        with open(INBOX, "w", encoding="utf-8") as handle:
+            handle.write("")
 
 
-def pop_command():
+def pop_command(build):
+    """Return the first command this build may run.
+
+    A command may carry a minimum build: `installBash@94'.  Commands that
+    require a newer build stay in the queue, so an older app that is still
+    installed cannot swallow work meant for the next build.
+    """
     with lock:
         with open(COMMANDS, "r", encoding="utf-8") as handle:
             lines = [line.strip() for line in handle if line.strip()]
-        if not lines:
-            return None
-        head, rest = lines[0], lines[1:]
-        with open(COMMANDS, "w", encoding="utf-8") as handle:
-            handle.write("".join(line + "\n" for line in rest))
-    return head
+        for index, line in enumerate(lines):
+            name, _, requirement = line.partition("@")
+            name = name.strip()
+            if not name:
+                continue
+            if requirement.strip().isdigit() and build < int(requirement):
+                continue
+            rest = lines[:index] + lines[index + 1:]
+            with open(COMMANDS, "w", encoding="utf-8") as handle:
+                handle.write("".join(item + "\n" for item in rest))
+            return name
+    return None
+
+
+def request_build(handler):
+    query = urllib.parse.urlparse(handler.path).query
+    value = urllib.parse.parse_qs(query).get("build", ["0"])[0]
+    return int(value) if value.isdigit() else 0
+
+
+def note_inbox(path, build, size):
+    with lock:
+        with open(INBOX, "a", encoding="utf-8") as handle:
+            handle.write(f"{path}|{build}|{size}\n")
 
 
 def save_log(payload):
@@ -107,12 +136,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.startswith("/next"):
-            action = pop_command()
+            build = request_build(self)
+            action = pop_command(build)
             if action is None:
                 self._send(204)
                 return
             body = json.dumps({"action": action}).encode()
-            print(f"[next] -> {action}")
+            print(f"[next] build={build} -> {action}")
             self._send(200, body, "application/json")
             return
         if self.path in ("/", "/status"):
@@ -122,7 +152,13 @@ class Handler(BaseHTTPRequestHandler):
                     with open(COMMANDS, "r", encoding="utf-8") as handle:
                         pending = sum(1 for line in handle if line.strip())
             count = len([name for name in os.listdir(LOGS) if name.endswith(".log")])
-            body = f"linux-probe log server\nlogs={count}\npending={pending}\n".encode()
+            inbox = 0
+            with lock:
+                if os.path.exists(INBOX):
+                    with open(INBOX, "r", encoding="utf-8") as handle:
+                        inbox = sum(1 for line in handle if line.strip())
+            body = (f"linux-probe log server\nlogs={count}\npending={pending}\n"
+                    f"inbox={inbox}\n").encode()
             self._send(200, body)
             return
         self._send(404, b"not found\n")
@@ -131,9 +167,14 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         payload = self.rfile.read(length) if length else b""
         if self.path.startswith("/log"):
+            build = request_build(self)
             text = payload.decode("utf-8", "replace")
             path = save_log(text)
-            print(f"[log] {len(payload)} bytes -> {os.path.relpath(path, ROOT)}")
+            note_inbox(path, build, len(payload))
+            print(f"[log] build={build} {len(payload)} bytes"
+                  f" -> {os.path.relpath(path, ROOT)}")
+            if build == 0:
+                print("   ! log carries no build number (app older than 0.39.6)")
             highlight(path)
             self._send(200, b"ok\n")
             return
@@ -160,6 +201,7 @@ def main():
     print(f"linux-probe log server on http://{args.bind}:{args.port}")
     print(f"state: {STATE}")
     print("queue a command:  echo apkUpdateLocal >> .remote/commands.txt")
+    print("version-gated:     echo installBash@94 >> .remote/commands.txt")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
