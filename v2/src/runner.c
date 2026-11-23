@@ -33,7 +33,7 @@
  * v1 used and the one every jailbreak tool uses.  Request 0 is PT_TRACE_ME.
  */
 #if TARGET_OS_IPHONE
-extern int ptrace(int request, pid_t pid, caddr_t address, int data);
+extern int ptrace(int request, int pid, void *address, int data);
 #define V2_PT_TRACE_ME 0
 #endif
 
