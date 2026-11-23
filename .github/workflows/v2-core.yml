@@ -182,14 +182,14 @@ jobs:
         run: |
           set -eu
           ./build/guest-runner --root /tmp/g5root /tmp/g5root/sbin/apk \
-            add --allow-untrusted --no-progress hello-tool \
+            add --allow-untrusted --no-progress zlib \
             2>&1 | tee /tmp/g5_add
-          test -f /tmp/g5root/usr/bin/hello-tool
-          grep -q "hello-tool" /tmp/g5root/usr/bin/hello-tool
-          # The dependency came with it, which is what the D: line is for.
-          test -f /tmp/g5root/usr/share/hello/data.txt
+          # zlib's real dependency is so:libc.musl-aarch64.so.1, so musl comes
+          # with it: one file plus one dependency, both from upstream bytes.
+          test -f /tmp/g5root/usr/lib/libz.so.1.4
           test -f /tmp/g5root/lib/apk/db/installed
-          grep -q "P:hello-tool" /tmp/g5root/lib/apk/db/installed
+          grep -q "P:zlib" /tmp/g5root/lib/apk/db/installed
+          grep -q "P:musl" /tmp/g5root/lib/apk/db/installed
           echo "--- database ---"
           grep -E "^(P|V):" /tmp/g5root/lib/apk/db/installed
           echo "G5 ok: package installed, dependency resolved, database written"
