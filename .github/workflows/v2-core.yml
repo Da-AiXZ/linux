@@ -161,3 +161,23 @@ jobs:
           grep -q "distinct packages available" /tmp/g5_update
           grep -q "2 distinct packages" /tmp/g5_update
           echo "G5 groundwork ok: index fetched and parsed"
+
+      # The other half of G5: unpack a package.  This is the first time the
+      # guest creates files, writes a database and renames temp files over
+      # their targets -- mkdirat, renameat, fchmod, utimensat, fsync.
+      - name: apk add from the local repository
+        working-directory: v2
+        run: |
+          set -eu
+          ./build/guest-runner --root /tmp/g5root /tmp/g5root/sbin/apk \
+            add --allow-untrusted --no-progress hello-tool \
+            2>&1 | tee /tmp/g5_add
+          test -f /tmp/g5root/usr/bin/hello-tool
+          grep -q "hello-tool" /tmp/g5root/usr/bin/hello-tool
+          # The dependency came with it, which is what the D: line is for.
+          test -f /tmp/g5root/usr/share/hello/data.txt
+          test -f /tmp/g5root/lib/apk/db/installed
+          grep -q "P:hello-tool" /tmp/g5root/lib/apk/db/installed
+          echo "--- database ---"
+          grep -E "^(P|V):" /tmp/g5root/lib/apk/db/installed
+          echo "G5 ok: package installed, dependency resolved, database written"
