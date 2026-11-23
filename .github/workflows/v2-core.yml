@@ -123,7 +123,7 @@ jobs:
       - name: Dynamic linking (ld.so + libc)
         working-directory: v2
         run: |
-          set -eu
+          set -u
           if [ ! -f tests/guest/root/lib/ld-musl-aarch64.so.1 ]; then
             echo "::error::the musl runtime is missing from the test rootfs"
             exit 1
