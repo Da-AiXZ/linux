@@ -250,17 +250,33 @@ int v2_elf_load(v2_space *space, int fd, const struct v2_elf_image *image,
         if (segment->filesz == 0) {
             continue;
         }
-        while (done < segment->filesz) {
-            long got = v2_space_host(space)->read_at(v2_space_host(space)->ctx, fd, buffer + done,
-                                           (size_t)segment->filesz - done,
-                                           (long long)segment->offset +
-                                               (long long)done);
-            if (got <= 0) {
-                free(buffer);
-                v2_error(error, error_size, "short read on a segment");
-                return -V2_EIO;
+        {
+            int stalls = 0;
+
+            while (done < segment->filesz) {
+                long got = v2_space_host(space)->read_at(
+                    v2_space_host(space)->ctx, fd, buffer + done,
+                    (size_t)segment->filesz - done,
+                    (long long)segment->offset + (long long)done);
+
+                if (got < 0) {
+                    free(buffer);
+                    v2_error(error, error_size, "short read on a segment");
+                    return -V2_EIO;
+                }
+                if (got == 0) {
+                    /* Same reasoning as in vspace.c: zero is EOF, and a
+                     * spurious zero would leave the segment half copied. */
+                    if (++stalls > 3) {
+                        free(buffer);
+                        v2_error(error, error_size, "short read on a segment");
+                        return -V2_EIO;
+                    }
+                    continue;
+                }
+                stalls = 0;
+                done += (size_t)got;
             }
-            done += (size_t)got;
         }
 
         if ((segment->flags & V2_PROT_EXEC) != 0 && patcher != NULL) {

@@ -330,18 +330,35 @@ long long v2_space_map(v2_space *space, void *hint, size_t length, int prot,
          * an error -- an actual read error is.  (v1 treated short reads as
          * fatal and could never map libc.)
          */
-        while (done < total) {
-            long got = space->host.read_at(space->host.ctx, fd,
-                                           destination + done, total - done,
-                                           offset + (long long)done);
-            if (got < 0) {
-                failed = 1;
-                break;
+        {
+            int stalls = 0;
+
+            while (done < total) {
+                long got = space->host.read_at(space->host.ctx, fd,
+                                               destination + done,
+                                               total - done,
+                                               offset + (long long)done);
+                if (got < 0) {
+                    failed = 1;
+                    break;
+                }
+                if (got == 0) {
+                    /*
+                     * Zero means EOF -- but a library whose tail is silently
+                     * zero instead of file data does not fail here, it fails
+                     * twenty steps later inside ld.so's symbol lookup, with a
+                     * message naming whichever symbol the damage happened to
+                     * hit.  Three attempts cost nothing; a wrong zero costs a
+                     * day.
+                     */
+                    if (++stalls > 3) {
+                        break;
+                    }
+                    continue;
+                }
+                stalls = 0;
+                done += (size_t)got;
             }
-            if (got == 0) {
-                break;
-            }
-            done += (size_t)got;
         }
         if (failed) {
             space->host.decommit(space->host.ctx, destination, total);
