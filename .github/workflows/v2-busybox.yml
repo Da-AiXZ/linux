@@ -58,22 +58,30 @@ jobs:
       - name: Build
         working-directory: /tmp
         env:
-          # A per-job cache: zig's shared cache is safe in principle, but this
-          # build starts a thousand compilers that all write dep files, and a
-          # shared tmp directory turned one of them into "FileNotFound".
           ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}/zig-cache
           ZIG_LOCAL_CACHE_DIR: ${{ runner.temp }}/zig-cache/local
         run: |
           set -eu
+          # kbuild asks the compiler for dependency files with
+          # `-Wp,-MD,<dir>/.<file>.o.d`, and zig's driver chokes on that form
+          # ("failed to delete ...applets.o.d: FileNotFound", then the whole
+          # compile fails).  The fix is to hand zig only the flags it
+          # understands; kbuild does not need the .d files for a clean build.
+          cat > /tmp/zigcc <<'WRAP'
+          #!/bin/bash
+          out=()
+          for a in "$@"; do
+            case "$a" in
+              -Wp,-MD,*|-Wp,-MMD,*|-Wp,-MT,*) continue ;;
+            esac
+            out+=("$a")
+          done
+          exec "$ZIG" cc -target aarch64-linux-musl -fPIE -pie -O2 "${out[@]}"
+          WRAP
+          chmod +x /tmp/zigcc
+          export ZIG="$(command -v zig)"
           cd "busybox-${{ inputs.version }}"
-          # -j1 on purpose: kbuild generates include/applets.h while the
-          # applets are being compiled, and the parallel order is the one
-          # thing that failed.  A slow green build beats a fast red one.
-          make -j1 \
-            CC="zig cc -target aarch64-linux-musl -fPIE -pie -O2" \
-            HOSTCC="gcc" \
-            SKIP_STRIP=y \
-            V=0 2>&1 | tail -40
+          make -j"$(nproc)" CC=/tmp/zigcc HOSTCC=gcc SKIP_STRIP=y V=0 2>&1 | tail -40
           ls -lh busybox
 
       - name: Check the result is a static PIE

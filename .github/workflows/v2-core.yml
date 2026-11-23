@@ -81,3 +81,37 @@ jobs:
           ./build/guest-runner --root . tests/guest/hello | tee /tmp/guest.out
           grep -q "hello from guest" /tmp/guest.out
           echo "guest exit status: $?"
+
+      # G3: a real, third-party program.  busybox is static PIE (see
+      # v2-busybox.yml) and each applet exercises a different corner of the
+      # syscall table: getdents64 for ls, openat+read for cat, uname, stat for
+      # ls -l, getuid and /etc/passwd for id, getcwd for pwd.
+      - name: Static busybox through the loader
+        working-directory: v2
+        run: |
+          set -eu
+          if [ ! -x tests/guest/busybox ]; then
+            echo "tests/guest/busybox not present; skipping G3"
+            exit 0
+          fi
+          run() {
+            echo "--- busybox $*"
+            ./build/guest-runner --root tests/guest/root tests/guest/busybox "$@"
+          }
+          run ls /          | tee /tmp/g3_ls
+          run cat /etc/motd | tee /tmp/g3_cat
+          run uname -a      | tee /tmp/g3_uname
+          run ls -l /hello.txt | tee /tmp/g3_lsl
+          run id            | tee /tmp/g3_id
+          run pwd           | tee /tmp/g3_pwd
+
+          grep -q "etc"                 /tmp/g3_ls
+          grep -q "hello.txt"           /tmp/g3_ls
+          grep -q "v2 guest rootfs"     /tmp/g3_cat
+          grep -q "Linux"               /tmp/g3_uname
+          grep -q "aarch64"             /tmp/g3_uname
+          grep -q "hello.txt"           /tmp/g3_lsl
+          grep -q "^-rw"                /tmp/g3_lsl
+          grep -q "uid=0"               /tmp/g3_id
+          test "$(cat /tmp/g3_pwd)" = "/"
+          echo "G3 ok: six applets ran"

@@ -189,6 +189,38 @@
     [self presentViewController:share animated:YES completion:nil];
 }
 
+/*
+ * The guest sees Documents/root as "/".  It gets a handful of files so the
+ * applets have something real to list, read and stat -- the same fixture CI
+ * uses in v2/tests/guest/root.
+ */
+- (void)prepareRoot:(NSString *)root
+{
+    NSFileManager *files = [NSFileManager defaultManager];
+    NSDictionary<NSString *, NSString *> *fixture = @{
+        @"etc/motd": @"v2 guest rootfs\n",
+        @"etc/passwd": @"root:x:0:0:root:/root:/bin/sh\n",
+        @"etc/group": @"root:x:0:\n",
+        @"hello.txt": @"hello from the guest root\n",
+        @"sub/note.txt": @"nested file\n",
+    };
+
+    for (NSString *relative in fixture) {
+        NSString *path = [root stringByAppendingPathComponent:relative];
+
+        [files createDirectoryAtPath:[path stringByDeletingLastPathComponent]
+        withIntermediateDirectories:YES
+                         attributes:nil
+                              error:nil];
+        if (![files fileExistsAtPath:path]) {
+            [fixture[relative] writeToFile:path
+                                atomically:YES
+                                  encoding:NSUTF8StringEncoding
+                                     error:nil];
+        }
+    }
+}
+
 #pragma mark - run
 
 - (void)runTapped
@@ -233,11 +265,40 @@
         stringByAppendingPathComponent:@"Helpers/hello"];
     [text appendFormat:@"[app] guest=%@\n", elf];
 
+    [self prepareRoot:root];
+
     NSDate *started = [NSDate date];
     int status = [V2Runner runGuest:elf root:root timeout:20 output:text];
     [text appendFormat:@"[app] elapsed=%.2fs status=%d\n",
                        -[started timeIntervalSinceNow], status];
     [self append:text];
+
+    /*
+     * G3: the same six applets CI runs, on the device.  Each one is its own
+     * helper process -- the guest has no fork yet -- so the loop is six
+     * spawns, each with the ptrace handshake.
+     */
+    NSString *busybox = [[[NSBundle mainBundle] bundlePath]
+        stringByAppendingPathComponent:@"Helpers/busybox"];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:busybox]) {
+        NSArray<NSArray<NSString *> *> *commands = @[
+            @[@"ls", @"/"],
+            @[@"cat", @"/etc/motd"],
+            @[@"uname", @"-a"],
+            @[@"ls", @"-l", @"/hello.txt"],
+            @[@"id"],
+            @[@"pwd"],
+        ];
+        [self append:@"\n=== busybox ===\n"];
+        for (NSArray<NSString *> *command in commands) {
+            [self append:[NSString stringWithFormat:@"\n$ busybox %@\n",
+                          [command componentsJoinedByString:@" "]]];
+            NSMutableString *piece = [NSMutableString string];
+            [V2Runner runGuest:busybox root:root args:command timeout:20
+                        output:piece];
+            [self append:piece];
+        }
+    }
 
     // Upload with the retry ladder from the doc: 2s, 5s, 10s.
     NSArray<NSNumber *> *delays = @[@2, @5, @10];

@@ -17,6 +17,13 @@ NS_ASSUME_NONNULL_BEGIN
         timeout:(NSTimeInterval)timeout
          output:(NSMutableString *)output;
 
+/// Same, with guest argv (busybox picks its applet from it).
++ (int)runGuest:(NSString *)elfPath
+           root:(NSString *)root
+           args:(NSArray<NSString *> *)args
+        timeout:(NSTimeInterval)timeout
+         output:(NSMutableString *)output;
+
 @end
 
 NS_ASSUME_NONNULL_END

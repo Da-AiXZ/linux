@@ -26,6 +26,15 @@ extern int ptrace(int request, int pid, void *address, int data);
         timeout:(NSTimeInterval)timeout
          output:(NSMutableString *)output
 {
+    return [self runGuest:elfPath root:root args:@[] timeout:timeout output:output];
+}
+
++ (int)runGuest:(NSString *)elfPath
+           root:(NSString *)root
+           args:(NSArray<NSString *> *)args
+        timeout:(NSTimeInterval)timeout
+         output:(NSMutableString *)output
+{
     NSString *helper = [[[NSBundle mainBundle] bundlePath]
         stringByAppendingPathComponent:@"Helpers/guest-runner"];
     if (![[NSFileManager defaultManager] isExecutableFileAtPath:helper]) {
@@ -46,12 +55,20 @@ extern int ptrace(int request, int pid, void *address, int data);
     posix_spawn_file_actions_addclose(&actions, fds[0]);
     posix_spawn_file_actions_addclose(&actions, fds[1]);
 
-    char *argv[] = {
-        (char *)helper.UTF8String,
-        (char *)"--root", (char *)root.UTF8String,
-        (char *)elfPath.UTF8String,
-        NULL,
-    };
+    char *argv[24];
+    int argument_count = 0;
+
+    argv[argument_count++] = (char *)helper.UTF8String;
+    argv[argument_count++] = (char *)"--root";
+    argv[argument_count++] = (char *)root.UTF8String;
+    argv[argument_count++] = (char *)elfPath.UTF8String;
+    for (NSString *argument in args) {
+        if (argument_count >= (int)(sizeof(argv) / sizeof(argv[0])) - 1) {
+            break;
+        }
+        argv[argument_count++] = (char *)argument.UTF8String;
+    }
+    argv[argument_count] = NULL;
     pid_t child = 0;
     int status = posix_spawn(&child, helper.UTF8String, &actions, NULL, argv, environ);
     posix_spawn_file_actions_destroy(&actions);
