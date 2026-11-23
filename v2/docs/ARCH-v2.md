@@ -292,8 +292,8 @@ v2/
 | **G2a** | ELF 解析/装载 + 站点扫描 + per-site stub + 段权限归并 | ✅ 2026-11-23（合成 ELF，93 条断言；stub 机器码与汇编器逐字相同） |
 | **G2b** | 寄存器框架 + 入口跳板 + 最小 syscall + 初始栈 + runner | ✅ 2026-11-23（本机栈测试 156 条断言；真机执行待 CI） |
 | **G2c** | 第一个真程序：`tests/guest/hello`（aarch64 Linux ET_DYN） | ✅ 2026-11-23，CI 上真实执行 |
-| **G3** | 静态 busybox 六条命令（桌面先绿，再上真机） | |
-| **G4** | PT_INTERP + musl `ld.so` + `apk --version` | |
+| **G3** | 静态 busybox 六条命令（桌面先绿，再上真机） | ✅ 2026-11-24，macOS arm64 + iPad（0.1.4） |
+| **G4** | PT_INTERP + musl `ld.so` + `apk --version` | ✅ 2026-11-24，macOS arm64；真机 0.1.5 |
 | **G5** | rootfs + `apk add` 本地 + `apk update` 本地 index ×200 | |
 | **G6** | socket/TLS + 网络 `apk update` + `apk add bash` + `bash` | |
 | **G7** | fork/exec/线程 | |
@@ -393,3 +393,29 @@ v2 的做法是让影子页表**退化成恒等映射**：guest 页大小 = 宿�
 
 **已知缺口**：`sendfile`（71）。busybox 的 `cat` 会先试它，失败自动回落 `read`/`write`，
 输出正确。补它的收益要等有人真的依赖零拷贝，届时一并做 `splice`。
+
+### 14.7 动态链接：我们只做内核那一半
+
+`apk` 不含 libc。它的 `PT_INTERP` 写着 `/lib/ld-musl-aarch64.so.1`，
+内核的职责只有三件事，v2 也只做这三件：
+
+1. 把解释器装到某个基址（我们让分配器选，iOS 不允许固定低地址）；
+2. `AT_BASE` 指向它，`AT_PHDR`/`AT_PHENT`/`AT_PHNUM`/`AT_ENTRY` 仍然描述**主程序**
+   （ld.so 要靠它们读主程序的 `.dynamic` 并给它重定位）；
+3. 跳到**解释器的**入口。
+
+之后的一切都在 guest 里发生：ld.so 用 `openat` 找 `libc.musl-aarch64.so.1`，
+用 `pread64` 读程序头，用 `mmap` 把每个 `PT_LOAD` 映射进来，解析符号，写重定位。
+这三个系统调用因此是 G4 的硬需求，缺一个就停在第一条指令。
+
+**一个反直觉的点**：动态程序自身**不含任何 `svc`**，所以启动时补丁扫描
+（`patch svc=478`）全部来自解释器——而 `ld-musl-aarch64.so.1` 就是整个 musl，
+478 个站点、90 个 `mrs tpidr_el0`、1 个 `msr`。等 ld.so 再把同一个文件映射成
+`libc.musl-aarch64.so.1` 时，那一份是**新的副本**，必须重新打补丁，
+于是有了 `v2_patch_runtime`：文件映射 + `PROT_EXEC` 就是库的代码段，
+把它短暂改成 RW、扫描改写、再改回 RX。全程没有 RWX 页。
+
+**为什么文件映射要容忍短读**：ld.so 第一次映射用的是"整库长度"，
+它自己注释写着 "we map too much, possibly even more than the length of the file"。
+最后一个 `PT_LOAD` 的尾页还带着 `.bss`。把 EOF 当错误（v1 的做法）就永远装不进 libc。
+EOF 之后保持零，正是 Linux 的行为。

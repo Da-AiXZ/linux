@@ -218,18 +218,23 @@
         NSString *from = [source stringByAppendingPathComponent:relative];
         NSString *to = [root stringByAppendingPathComponent:relative];
         BOOL directory = NO;
-        NSDictionary *info;
+        unsigned long long source_size;
+        unsigned long long target_size = 0;
+        BOOL exists;
 
         if (![files fileExistsAtPath:from isDirectory:&directory] || directory) {
             [files createDirectoryAtPath:to withIntermediateDirectories:YES
                               attributes:nil error:nil];
             continue;
         }
-        info = [files attributesOfItemAtPath:from error:nil];
-        if ([files fileExistsAtPath:to] &&
-            [[[files attributesOfItemAtPath:to error:nil] fileSize]
-                unsignedLongLongValue] ==
-                [[info fileSize] unsignedLongLongValue]) {
+        /* -fileSize on NSDictionary returns unsigned long long, not an
+         * NSNumber, so this compares numbers rather than objects. */
+        source_size = [[files attributesOfItemAtPath:from error:nil] fileSize];
+        exists = [files fileExistsAtPath:to];
+        if (exists) {
+            target_size = [[files attributesOfItemAtPath:to error:nil] fileSize];
+        }
+        if (exists && target_size == source_size) {
             kept++;
             continue;
         }
