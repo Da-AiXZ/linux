@@ -87,6 +87,9 @@ jobs:
               # and zig turns the unknown flag into a hard error.
               -Wl,--warn-common|-Wl,-warn-common) continue ;;
               -Wl,-Map,*|-Wl,--Map,*) continue ;;
+              # busybox adds -Wl,--verbose at the end of its link line; lld
+              # has no --verbose and zig refuses the whole link.
+              -Wl,--verbose|-Wl,-verbose) continue ;;
               *) out+=("$a") ;;
             esac
           done
