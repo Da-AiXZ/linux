@@ -135,26 +135,40 @@ jobs:
           cat /tmp/g4_echo
           grep -q "dynamic-busybox-ok" /tmp/g4_echo
 
-          # Two hundred times, because this failed once in five runs with
-          # "apk_blob_cstr: symbol not found" on identical code.  A flake in
-          # the loader is not a flake to work around: it has to be explained.
-          # `--version` is the control: it relocates the same five libraries
-          # and then does nothing, so a failure here is the loader, and a
-          # failure only in `apk update` is the write path.
-          echo "--- apk --version x200"
-          for run in $(seq 1 200); do
+          # A census, not a pass/fail: the flake is "symbol not found" during
+          # relocation, roughly one run in thirty, and it depends on the
+          # address layout.  Collecting the layout of each failure is worth
+          # more than a single red X, so this keeps going and summarises.
+          echo "--- apk --version, census of up to 2000 runs"
+          failures=0
+          runs=0
+          : > /tmp/flake.txt
+          for run in $(seq 1 2000); do
+            runs=$run
             ./build/guest-runner --root tests/guest/root \
-              tests/guest/root/sbin/apk --version > /tmp/g4_apk.$run 2>&1
+              tests/guest/root/sbin/apk --version > /tmp/g4_apk.log 2>&1
             status=$?
             if [ "$status" -ne 0 ]; then
-              echo "::error::run $run failed; full output follows"
-              cat /tmp/g4_apk.$run
-              exit 1
+              failures=$((failures + 1))
+              base=$(sed -n 's/.*\[v2\] space \(0x[0-9a-f]*\)\.\..*/\1/p' \
+                     /tmp/g4_apk.log | head -1)
+              message=$(grep -m1 -E "Error relocating|FAULT" /tmp/g4_apk.log)
+              echo "run $run exit=$status base=$base | $message" >> /tmp/flake.txt
+              cp /tmp/g4_apk.log "/tmp/flake.$failures.log"
+              if [ "$failures" -ge 6 ]; then
+                break
+              fi
             fi
-            grep -q "apk-tools" /tmp/g4_apk.$run
           done
-          rm -f /tmp/g4_apk.*
-          echo "G4 ok: ld.so loaded, libc relocated, apk ran 200 times"
+          echo "runs=$runs failures=$failures"
+          cat /tmp/flake.txt || true
+          if [ "$failures" -ne 0 ]; then
+            echo "--- first failing run in full ---"
+            cat /tmp/flake.1.log
+            echo "::error::$failures of $runs runs failed to relocate"
+            exit 1
+          fi
+          echo "G4 ok: ld.so loaded, libc relocated, apk ran $runs times"
 
       # G5 groundwork: apk's index path, against a repo that lives inside the
       # guest root (no network, no signature: --allow-untrusted).  This is the
