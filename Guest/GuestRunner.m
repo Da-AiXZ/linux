@@ -2339,6 +2339,7 @@ typedef struct {
 } GuestCanary;
 
 static GuestCanary GuestCanaries[GUEST_CANARY_SLOTS];
+static unsigned GuestCanaryLogs;
 
 /*
  * 0.40.29: the index input buffer is written while inflate() is decoding it,
@@ -2438,6 +2439,23 @@ static void GuestCanaryPlace(uintptr_t address, size_t requested, size_t mapLeng
         if (GuestCanaries[index].valid) {
             continue;
         }
+        /*
+         * 0.40.34: the 8-byte canary is a real runtime write at a 4KB-aligned
+         * slot, and [zm] only narrows a change to a 4KB block.  Record the
+         * exact slot (and whether it lands in a large read buffer) so the two
+         * can be compared offline instead of argued about.
+         */
+        if (GuestCanaryLogs < 80) {
+            GuestCanaryLogs++;
+            GuestLog("[guest] canary addr=0x%lx req=0x%lx map=0x%lx"
+                     " slot=0x%lx n=%u\n",
+                     (unsigned long)address,
+                     (unsigned long)requested,
+                     (unsigned long)mapLength,
+                     (unsigned long)slot,
+                     GuestCanaryLogs);
+        }
+        GuestReadWatchCheck("canary slot", slot, 8);
         *(uint64_t *)slot = GuestCanaryMagic;
         GuestCanaries[index].address = address;
         GuestCanaries[index].requested = requested;

@@ -96,16 +96,12 @@ static uLong zspyConsumed;
 static uLong zspyInputCrc = 1; /* zlib starts crc32 at 0, but 0 is ambiguous */
 static uLong zspyLastOffset;
 static unsigned int zspyChunks;
-static uLong zspyOutCrc;
+static uLong zspyOutCrc; /* gzip trailer uses crc32 starting at 0 */
 static const Bytef *zspyChunkPtr;
-static Bytef zspyCopy[132 * 1024];
-static Bytef *zspySavedIn;
-static uInt zspySavedAvail;
 static uLong zspyLastCheck;
 static unsigned zspyCheckReports;
-static unsigned zspyCheckFixes;
-static uLong zspyChunkBlocks[32];
-static uInt zspyChunkBlockCount; /* gzip trailer uses crc32 starting at 0 */
+static Bytef zspyShadow[132 * 1024];
+static uInt zspyShadowLen;
 static uInt zspyPrevLeft;
 static Bytef *zspyOutStart;
 static const Bytef *zspyPrevIn;
@@ -146,9 +142,8 @@ static void zspyReset(void)
     zspyLastOffset = 0;
     zspyLastCheck = 0;
     zspyCheckReports = 0;
-    zspyCheckFixes = 0;
     zspyChunkPtr = NULL;
-    zspyChunkBlockCount = 0;
+    zspyShadowLen = 0;
 }
 
 static void zspyState(const void *state);
@@ -189,46 +184,68 @@ static void zspyReport(zspy_stream *stream, int result, uInt before)
     if (stream->state != NULL) {
         unsigned long *checkField =
             (unsigned long *)((char *)stream->state + 0x20);
+        const unsigned long *totalField =
+            (const unsigned long *)((char *)stream->state + 0x28);
         uLong check = *checkField;
-        /* 0.40.33: only gzip streams keep a crc32 here; zlib streams keep
-         * adler32, which is not what we compute, so never touch those. */
         int gzipWrapped = (*(const int *)((const char *)stream->state + 16)) & 2;
         if (gzipWrapped && check != zspyOutCrc) {
-            if (zspyCheckReports < 8) {
+            /* Observation only: never write zlib's state back. */
+            if (zspyCheckReports < 12) {
                 zspyCheckReports++;
-                zspyLog("[zck] call=%u check=%08lx outcrc=%08lx total_out=%lu\n",
+                zspyLog("[zck] call=%u check=%08lx outcrc=%08lx"
+                        " this_out=%lu total_out=%lu state_total=%lu\n",
                         zspyCalls,
                         (unsigned long)check,
                         (unsigned long)zspyOutCrc,
-                        (unsigned long)stream->total_out);
+                        (unsigned long)(stream->next_out - zspyOutStart),
+                        (unsigned long)stream->total_out,
+                        (unsigned long)*totalField);
             }
-            /*
-             * The decoded bytes and the gzip trailer both verify (outcrc is the
-             * file's real CRC), only zlib's shadow of that CRC is wrong --
-             * something writes four bytes at inflate_state +0x20.  Put the
-             * right value back and keep decoding; the counter reports how often
-             * the writer hits this field.
-             */
-            *checkField = (unsigned long)zspyOutCrc;
-            check = zspyOutCrc;
-            zspyCheckFixes++;
         }
         zspyLastCheck = (uLong)*checkField;
     }
 
-    if (zspyChunkPtr != NULL && zspyChunkBlockCount != 0) {
+    /*
+     * 0.40.34: compare the live chunk with a copy taken when it arrived.
+     * A CRC only says "this 4KB block changed"; memcmp gives the first byte
+     * that differs, how many differ, and both sides of 32 bytes around it --
+     * enough to tell an 8-byte canary from a page reuse from a 4KB overwrite.
+     * Observation only: the copy is never written back.
+     */
+    if (zspyChunkPtr != NULL && zspyShadowLen != 0) {
+        uInt length = zspyShadowLen;
+        const Bytef *live = zspyChunkPtr;
         uInt index;
-        for (index = 0; index < zspyChunkBlockCount; index++) {
-            size_t at = (size_t)index * 4096;
-            uLong now = z_crc32(1, zspyChunkPtr + at, 4096);
-            if (now != zspyChunkBlocks[index]) {
-                zspyLog("[zm] block changed at +%lu of 0x%lx old=%08lx new=%08lx\n",
-                        (unsigned long)at,
-                        (unsigned long)(uintptr_t)zspyChunkPtr,
-                        (unsigned long)zspyChunkBlocks[index],
-                        (unsigned long)now);
-                zspyChunkBlocks[index] = now;
+        uInt first = length;
+        uInt diffs = 0;
+        for (index = 0; index < length; index++) {
+            if (live[index] != zspyShadow[index]) {
+                if (first == length) {
+                    first = index;
+                }
+                diffs++;
             }
+        }
+        if (diffs != 0) {
+            uInt from = first >= 32 ? first - 32 : 0;
+            uInt to = first + 32 < length ? first + 32 : length;
+            uInt at;
+            zspyLog("[zmd] first=+%u diffs=%u len=%u base=0x%lx"
+                    " block=+%u call=%u\n",
+                    first, diffs, length,
+                    (unsigned long)(uintptr_t)zspyChunkPtr,
+                    first & ~4095u, zspyCalls);
+            zspyLog("[zmd] old=");
+            for (at = from; at < to; at++) {
+                zspyLog("%02x", zspyShadow[at]);
+            }
+            zspyLog("\n");
+            zspyLog("[zmd] new=");
+            for (at = from; at < to; at++) {
+                zspyLog("%02x", live[at]);
+            }
+            zspyLog("\n");
+            memcpy(zspyShadow, live, length);
         }
     }
 
@@ -252,8 +269,7 @@ static void zspyReport(zspy_stream *stream, int result, uInt before)
                 trailer = ((uLong)at[0] << 24) | ((uLong)at[1] << 16) |
                           ((uLong)at[2] << 8) | (uLong)at[3];
             }
-            zspyLog("[zfix] repaired=%u\n", zspyCheckFixes);
-        zspyLog("[zout] outcrc=%08lx trailer=%08lx total_out=%lu\n",
+            zspyLog("[zout] outcrc=%08lx trailer=%08lx total_out=%lu\n",
                     (unsigned long)zspyOutCrc,
                     (unsigned long)trailer,
                     (unsigned long)stream->total_out);
@@ -268,7 +284,6 @@ static void zspyReport(zspy_stream *stream, int result, uInt before)
         return;
     }
     if (result == 1) { /* Z_STREAM_END */
-        zspyLog("[zfix] repaired=%u\n", zspyCheckFixes);
         zspyLog("[zout] outcrc=%08lx total_out=%lu\n",
                 (unsigned long)zspyOutCrc,
                 (unsigned long)stream->total_out);
@@ -394,14 +409,10 @@ int inflate(zspy_stream *stream, int flush)
          * fails).  That is exactly the split the six-run batch showed.
          */
         zspyChunkPtr = stream->next_in;
-        zspyChunkBlockCount = 0;
-        {
-            uInt at;
-            for (at = 0; at + 4096 <= stream->avail_in &&
-                         zspyChunkBlockCount < 32; at += 4096) {
-                zspyChunkBlocks[zspyChunkBlockCount++] =
-                    z_crc32(1, stream->next_in + at, 4096);
-            }
+        zspyShadowLen = stream->avail_in <= sizeof(zspyShadow)
+            ? stream->avail_in : 0;
+        if (zspyShadowLen != 0) {
+            memcpy(zspyShadow, stream->next_in, zspyShadowLen);
         }
         zspyLog("[zc] chunk=%u off=%lu len=%u crc=%08lx"
                 " head=%02x%02x%02x%02x%02x%02x%02x%02x\n",
@@ -459,34 +470,8 @@ int inflate(zspy_stream *stream, int flush)
             zspyState(stream->state);
         }
     }
-    /*
-     * 0.40.31: decode from a private copy.
-     *
-     * [zm] proved that a 4KB block of apk's input buffer changes while inflate
-     * is running, and no mmap path touches that buffer, so something writes
-     * into it behind our back.  Rather than keep hunting the writer with the
-     * app unusable, hand zlib a copy: if the CRC failures disappear, the
-     * writer is confirmed and this is also the workaround.  next_in is put
-     * back afterwards so apk's own bookkeeping (and its digest callback) still
-     * see the pointer it expects.
-     */
-    if (freshChunk && stream->next_in != NULL && stream->avail_in != 0 &&
-        stream->avail_in <= sizeof(zspyCopy)) {
-        memcpy(zspyCopy, stream->next_in, stream->avail_in);
-        zspySavedIn = (Bytef *)stream->next_in;
-        zspySavedAvail = stream->avail_in;
-        stream->next_in = zspyCopy;
-    } else {
-        zspySavedIn = NULL;
-    }
-
     zspyOutStart = stream->next_out;
     result = z_inflate(stream, flush);
-    if (zspySavedIn != NULL) {
-        uInt taken = zspySavedAvail - stream->avail_in;
-        stream->next_in = zspySavedIn + taken;
-        zspySavedIn = NULL;
-    }
     /*
      * 0.40.21: the invariant zlib relies on is that the bytes it advanced
      * next_out by are exactly the bytes it took out of avail_out.  Every
