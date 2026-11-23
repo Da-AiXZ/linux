@@ -8,17 +8,31 @@
  */
 #include "v2/stack.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "v2/vspace.h"
+
+static int stack_fail(const char *what, uint64_t where, size_t length,
+                      int status)
+{
+    fprintf(stderr, "[v2] stack: %s at 0x%llx len=0x%zx status=%d\n", what,
+            (unsigned long long)where, length, status);
+    return -1;
+}
 
 static int push_bytes(v2_space *space, uint64_t *cursor, const void *source,
                       size_t length)
 {
     *cursor -= length;
     *cursor &= ~7ULL;
-    if (v2_space_write(space, (void *)(uintptr_t)*cursor, source, length) != 0) {
-        return -V2_EFAULT;
+    {
+        int status = v2_space_write(space, (void *)(uintptr_t)*cursor, source,
+                                    length);
+
+        if (status != 0) {
+            return stack_fail("write", *cursor, length, status);
+        }
     }
     return 0;
 }
@@ -45,8 +59,12 @@ uint64_t v2_stack_build(v2_space *space, uint64_t top, int argc,
 
     if (argc < 0 || argc > V2_STACK_MAX_ARGS ||
         envc < 0 || envc > V2_STACK_MAX_ARGS) {
+        stack_fail("argc/envc", (uint64_t)argc, (size_t)envc, 0);
         return 0;
     }
+
+    fprintf(stderr, "[v2] stack: top=0x%llx argc=%d envc=%d\n",
+            (unsigned long long)top, argc, envc);
 
     /* execfn goes highest: AT_EXECFN points at it and nothing moves it. */
     if (push_bytes(space, &cursor, aux->execfn, strlen(aux->execfn) + 1) != 0) {
@@ -157,16 +175,28 @@ uint64_t v2_stack_build(v2_space *space, uint64_t top, int argc,
     block_length = top - cursor;
     if ((cursor & 15ULL) != 0) {
         if (block_length > sizeof(backup)) {
+            stack_fail("block too large", block_start, (size_t)block_length, 0);
             return 0;
         }
-        if (v2_space_read(space, backup, (const void *)(uintptr_t)block_start,
-                          (size_t)block_length) != 0) {
-            return 0;
+        {
+            int status = v2_space_read(space, backup,
+                                       (const void *)(uintptr_t)block_start,
+                                       (size_t)block_length);
+
+            if (status != 0) {
+                stack_fail("read", block_start, (size_t)block_length, status);
+                return 0;
+            }
         }
         aligned = (cursor & ~15ULL) - 16;
-        if (v2_space_write(space, (void *)(uintptr_t)aligned, backup,
-                           (size_t)block_length) != 0) {
-            return 0;
+        {
+            int status = v2_space_write(space, (void *)(uintptr_t)aligned,
+                                        backup, (size_t)block_length);
+
+            if (status != 0) {
+                stack_fail("shift", aligned, (size_t)block_length, status);
+                return 0;
+            }
         }
         return aligned;
     }
