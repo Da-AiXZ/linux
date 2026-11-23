@@ -36,6 +36,12 @@ struct v2_proc {
 
     int fds[V2_MAX_FDS];
     char fd_path[V2_MAX_FDS][V2_PATH_MAX];
+    /*
+     * Directory streams, one per guest fd that has been read with getdents64.
+     * Linux keeps a directory cursor in the descriptor; Darwin needs a DIR*
+     * to iterate, so the cursor lives here instead of in the kernel.
+     */
+    void *dirs[V2_MAX_FDS];
 };
 
 int v2_proc_init(struct v2_proc *proc, v2_space *space, const char *root);
@@ -47,6 +53,16 @@ int v2_proc_init(struct v2_proc *proc, v2_space *space, const char *root);
  */
 int v2_proc_translate(struct v2_proc *proc, int dirfd, const char *guest,
                       char *out, size_t size);
+
+/* The same normalisation, but the result stays in guest coordinates. */
+int v2_proc_normalize(struct v2_proc *proc, int dirfd, const char *guest,
+                      char *out, size_t size);
+
+/* chdir, lexically: the host's working directory is never touched. */
+int v2_proc_chdir(struct v2_proc *proc, int dirfd, const char *guest);
+
+/* Drop a guest fd: closes the host fd and any directory stream on it. */
+void v2_proc_fd_release(struct v2_proc *proc, int guest_fd);
 
 int v2_proc_fd_alloc(struct v2_proc *proc, int host_fd, const char *path);
 int v2_proc_fd_get(const struct v2_proc *proc, int guest_fd);

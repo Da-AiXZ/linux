@@ -1,0 +1,93 @@
+name: v2-busybox
+
+# Builds a static-PIE aarch64 busybox.
+#
+# Why this exists: Alpine's busybox-static is ET_EXEC at 0x400000, and neither
+# iOS nor macOS lets a process map that low, so it cannot be loaded by the v2
+# loader at all.  A PIE build has no fixed address, which is exactly what the
+# arena model wants.  musl + zig gives a static PIE in one pass; no cross
+# toolchain to install.
+#
+# Manual only: the output is committed as v2/tests/guest/busybox, so this runs
+# when busybox needs rebuilding, not on every push.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: busybox version
+        default: "1.36.1"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch zig
+        run: |
+          set -eu
+          version=0.13.0
+          url="https://ziglang.org/download/${version}/zig-linux-x86_64-${version}.tar.xz"
+          curl -fsSL "$url" -o /tmp/zig.tar.xz
+          mkdir -p "$HOME/zig"
+          tar -C "$HOME/zig" --strip-components=1 -xf /tmp/zig.tar.xz
+          "$HOME/zig/zig" version
+          echo "$HOME/zig" >> "$GITHUB_PATH"
+
+      - name: Fetch busybox
+        run: |
+          set -eu
+          curl -fsSL "https://busybox.net/downloads/busybox-${{ inputs.version }}.tar.bz2" \
+            -o /tmp/busybox.tar.bz2
+          tar -C /tmp -xf /tmp/busybox.tar.bz2
+          ls -d /tmp/busybox-*
+
+      - name: Configure
+        working-directory: /tmp
+        run: |
+          set -eu
+          cd "busybox-${{ inputs.version }}"
+          make defconfig
+          # CONFIG_STATIC would add -static, which cancels -pie and gives an
+          # ET_EXEC binary -- the one thing this job exists to avoid.
+          sed -i 's/^CONFIG_STATIC=y/# CONFIG_STATIC is not set/' .config
+          sed -i 's/^CONFIG_FEATURE_SYNC_FANCY=y/# CONFIG_FEATURE_SYNC_FANCY is not set/' .config || true
+          grep -E '^CONFIG_STATIC|^CONFIG_PIE' .config || true
+
+      - name: Build
+        working-directory: /tmp
+        run: |
+          set -eu
+          cd "busybox-${{ inputs.version }}"
+          make -j"$(nproc)" \
+            CC="zig cc -target aarch64-linux-musl -fPIE -pie -O2" \
+            HOSTCC="gcc" \
+            SKIP_STRIP=y \
+            V=0 2>&1 | tail -40
+          ls -lh busybox
+
+      - name: Check the result is a static PIE
+        working-directory: /tmp
+        run: |
+          set -eu
+          python3 - <<'PY'
+          import struct, sys
+          path = "busybox-${{ inputs.version }}/busybox"
+          data = open(path, "rb").read()
+          e_type, e_machine = struct.unpack_from("<HH", data, 16)
+          phoff, = struct.unpack_from("<Q", data, 32)
+          phentsize, phnum = struct.unpack_from("<HH", data, 54)
+          kinds = [struct.unpack_from("<I", data, phoff + i * phentsize)[0]
+                   for i in range(phnum)]
+          print("type=%d machine=%d bytes=%d phdrs=%s" % (e_type, e_machine, len(data), kinds))
+          ok = e_type == 3 and e_machine == 183 and 3 not in kinds
+          print("static PIE:", ok)
+          sys.exit(0 if ok else 1)
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: busybox-aarch64-pie
+          path: /tmp/busybox-${{ inputs.version }}/busybox
+          if-no-files-found: error

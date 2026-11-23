@@ -3,8 +3,11 @@
  */
 #include "v2/proc.h"
 
+#include <dirent.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 int v2_proc_init(struct v2_proc *proc, v2_space *space, const char *root)
 {
@@ -83,10 +86,26 @@ static int normalise(const char *path, char *out, size_t size)
 int v2_proc_translate(struct v2_proc *proc, int dirfd, const char *guest,
                       char *out, size_t size)
 {
-    char combined[V2_PATH_MAX * 2];
     char normal[V2_PATH_MAX];
     int written;
     int status;
+
+    status = v2_proc_normalize(proc, dirfd, guest, normal, sizeof(normal));
+    if (status != 0) {
+        return status;
+    }
+    written = snprintf(out, size, "%s%s", proc->root, normal);
+    if (written < 0 || (size_t)written >= size) {
+        return -V2_ENAMETOOLONG;
+    }
+    return 0;
+}
+
+int v2_proc_normalize(struct v2_proc *proc, int dirfd, const char *guest,
+                      char *out, size_t size)
+{
+    char combined[V2_PATH_MAX * 2];
+    int written;
 
     if (guest == NULL || guest[0] == '\0') {
         return -V2_ENOENT;
@@ -94,9 +113,13 @@ int v2_proc_translate(struct v2_proc *proc, int dirfd, const char *guest,
     if (guest[0] == '/') {
         written = snprintf(combined, sizeof(combined), "%s", guest);
     } else if (dirfd >= 0 && dirfd != -100 /* AT_FDCWD */) {
-        const char *base = proc->fd_path[dirfd];
+        const char *base;
 
-        if (dirfd >= V2_MAX_FDS || base[0] == '\0') {
+        if (dirfd >= V2_MAX_FDS) {
+            return -V2_EBADF;
+        }
+        base = proc->fd_path[dirfd];
+        if (base[0] == '\0') {
             return -V2_EBADF;
         }
         written = snprintf(combined, sizeof(combined), "%s/%s", base, guest);
@@ -107,15 +130,48 @@ int v2_proc_translate(struct v2_proc *proc, int dirfd, const char *guest,
     if (written < 0 || (size_t)written >= sizeof(combined)) {
         return -V2_ENAMETOOLONG;
     }
-    status = normalise(combined, normal, sizeof(normal));
+    return normalise(combined, out, size);
+}
+
+int v2_proc_chdir(struct v2_proc *proc, int dirfd, const char *guest)
+{
+    char normal[V2_PATH_MAX];
+    char host[V2_PATH_MAX * 2];
+    struct stat info;
+    int status;
+
+    status = v2_proc_normalize(proc, dirfd, guest, normal, sizeof(normal));
     if (status != 0) {
         return status;
     }
-    written = snprintf(out, size, "%s%s", proc->root, normal);
-    if (written < 0 || (size_t)written >= size) {
-        return -V2_ENAMETOOLONG;
+    status = v2_proc_translate(proc, -1, normal, host, sizeof(host));
+    if (status != 0) {
+        return status;
     }
+    if (stat(host, &info) != 0) {
+        return -V2_ENOENT;
+    }
+    if (!S_ISDIR(info.st_mode)) {
+        return -V2_ENOTDIR;
+    }
+    snprintf(proc->cwd, sizeof(proc->cwd), "%s", normal);
     return 0;
+}
+
+void v2_proc_fd_release(struct v2_proc *proc, int guest_fd)
+{
+    if (guest_fd < 0 || guest_fd >= V2_MAX_FDS) {
+        return;
+    }
+    if (proc->dirs[guest_fd] != NULL) {
+        closedir((DIR *)proc->dirs[guest_fd]);
+        proc->dirs[guest_fd] = NULL;
+    }
+    if (proc->fds[guest_fd] >= 0 && guest_fd > 2) {
+        close(proc->fds[guest_fd]);
+    }
+    proc->fds[guest_fd] = -1;
+    proc->fd_path[guest_fd][0] = '\0';
 }
 
 int v2_proc_fd_alloc(struct v2_proc *proc, int host_fd, const char *path)

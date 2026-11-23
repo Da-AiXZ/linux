@@ -52,6 +52,7 @@
 #define V2_ENOTTY  25
 #define V2_ENAMETOOLONG 36
 #define V2_ENOSYS 38
+#define V2_ERANGE 34
 
 /*
  * Host operations.  The address space owns no platform header; the Darwin
