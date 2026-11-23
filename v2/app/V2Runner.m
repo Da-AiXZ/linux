@@ -1,10 +1,23 @@
 #import "V2Runner.h"
 
+#import <signal.h>
+#import <errno.h>
 #import <spawn.h>
 #import <sys/wait.h>
 #import <unistd.h>
 
 extern char **environ;
+
+/*
+ * The iOS SDK has no <sys/ptrace.h>.  Request 11 is PT_DETACH.
+ *
+ * The helper calls ptrace(PT_TRACE_ME) as its first instruction, which makes
+ * us its tracer and stops it before it runs anything.  Detaching is the whole
+ * trick: the process keeps CS_DEBUGGED afterwards, which is what allows
+ * mprotect(PROT_EXEC) on anonymous pages.
+ */
+extern int ptrace(int request, int pid, void *address, int data);
+#define V2_PT_DETACH 11
 
 @implementation V2Runner
 
@@ -47,6 +60,30 @@ extern char **environ;
         close(fds[0]);
         [output appendFormat:@"posix_spawn failed: %d\n", status];
         return -1;
+    }
+
+    for (int attempt = 0; attempt < 300; attempt++) {
+        int state = 0;
+        pid_t result = waitpid(child, &state, WUNTRACED | WNOHANG);
+
+        if (result == child) {
+            if (WIFSTOPPED(state)) {
+                if (ptrace(V2_PT_DETACH, child, NULL, 0) != 0) {
+                    [output appendFormat:@"[app] PT_DETACH failed: %d\n", errno];
+                }
+                kill(child, SIGCONT);
+                for (int extra = 0; extra < 3; extra++) {
+                    usleep(10 * 1000);
+                    kill(child, SIGCONT);
+                }
+                [output appendString:@"[app] detached (CS_DEBUGGED)\n"];
+            }
+            break;
+        }
+        if (result < 0) {
+            break;
+        }
+        usleep(10 * 1000);
     }
 
     NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout];
