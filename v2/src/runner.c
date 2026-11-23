@@ -28,7 +28,14 @@
 #include "v2/vspace.h"
 
 #define V2_SPACE_SIZE  (1024u * 1024u * 1024u)
-#define V2_ISLAND_STRIDE (16u * 1024u * 1024u)
+/*
+ * One trampoline island per 128 MiB zone.  `b` reaches +/-128 MiB, so a site
+ * is never more than 64 MiB from an island, and a single mapping can be up to
+ * ~128 MiB -- enough for the heap and for apk's index buffers.  A 16 MiB
+ * stride (the first attempt) fragmented the space so badly that a 64 MiB heap
+ * could not be placed at all.
+ */
+#define V2_ISLAND_STRIDE (128u * 1024u * 1024u)
 #define V2_ISLAND_SIZE (64u * 1024u)
 #define V2_HEAP_SIZE (64u * 1024u * 1024u)
 #define V2_STACK_SIZE (8u * 1024u * 1024u)
@@ -205,7 +212,7 @@ int main(int argc, char **argv)
                                   V2_PROT_READ | V2_PROT_WRITE, V2_MAP_ANON,
                                   -1, 0);
     if ((int64_t)heap <= 0) {
-        die("heap", "cannot map");
+        die("heap", "cannot map 64 MiB contiguously");
     }
     proc.brk_base = heap;
     proc.brk_current = heap;
@@ -215,7 +222,7 @@ int main(int argc, char **argv)
                                    V2_PROT_READ | V2_PROT_WRITE, V2_MAP_ANON,
                                    -1, 0);
     if ((int64_t)stack <= 0) {
-        die("stack", "cannot map");
+        die("stack", "cannot map 8 MiB contiguously");
     }
     proc.stack_base = stack;
     proc.stack_top = stack + V2_STACK_SIZE;
