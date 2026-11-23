@@ -38,11 +38,20 @@
 #define V2_PAGE_PROT_MASK 0x07
 
 /* Linux errno values used by this layer. */
+#define V2_ENOENT  2
 #define V2_EIO     5
+#define V2_EBADF   9
+#define V2_EACCES 13
 #define V2_ENOMEM 12
 #define V2_EFAULT 14
 #define V2_EEXIST 17
+#define V2_ENOTDIR 20
+#define V2_EISDIR  21
 #define V2_EINVAL 22
+#define V2_EMFILE  24
+#define V2_ENOTTY  25
+#define V2_ENAMETOOLONG 36
+#define V2_ENOSYS 38
 
 /*
  * Host operations.  The address space owns no platform header; the Darwin
@@ -89,6 +98,9 @@ struct v2_host {
     /* Copy host memory into a guest range (ELF segments, stack, argv). */
     int (*write)(void *ctx, void *destination, const void *source,
                  size_t length);
+    /* Copy a guest range out to host memory (syscall arguments). */
+    int (*read)(void *ctx, void *destination, const void *source,
+                size_t length);
 
     /* Make freshly written code visible to the instruction fetch unit. */
     void (*flush_icache)(void *ctx, void *address, size_t length);
@@ -118,6 +130,16 @@ size_t v2_space_page_size(const v2_space *space);
 size_t v2_space_page_count(const v2_space *space);
 size_t v2_space_island_stride(const v2_space *space);
 size_t v2_space_island_size(const v2_space *space);
+
+/*
+ * Checked copies across the guest boundary.  Both validate the range against
+ * the page table first, so a wild pointer becomes -EFAULT instead of a host
+ * fault that kills the runtime.
+ */
+int v2_space_read(const v2_space *space, void *destination,
+                  const void *source, size_t length);
+int v2_space_write(const v2_space *space, void *destination,
+                   const void *source, size_t length);
 
 /* The host operations this space was built with.  Loaders need read_at and
  * write; keeping the struct opaque and exposing one const pointer is less

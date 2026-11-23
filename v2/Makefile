@@ -10,7 +10,15 @@ CFLAGS := -std=c11 -O2 -g -Iinclude -Wall -Wextra -Werror -Wshadow
 SANITIZE := -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all
 
 SOURCES := src/vspace.c src/elf.c src/patch.c
-HEADERS := include/v2/vspace.h include/v2/elf.h include/v2/patch.h
+HEADERS := include/v2/vspace.h include/v2/elf.h include/v2/patch.h \
+           include/v2/cpu.h include/v2/proc.h include/v2/stack.h \
+           include/v2/host_darwin.h
+
+# The part that can execute guest code.  macOS on aarch64 only: the guest is
+# aarch64 Linux, so the host has to be the same instruction set.
+GUEST_SOURCES := src/vspace.c src/elf.c src/patch.c src/proc.c src/stack.c \
+                 src/syscall.c src/entry_aarch64.c src/host_darwin.c \
+                 src/runner.c
 
 all: $(BUILD)/test_vspace $(BUILD)/test_elf
 
@@ -68,7 +76,21 @@ port:
 	                                tests/trace/tight.tsv \
 	                                tests/trace/wide.tsv
 
-clean:
-	@rm -f $(BUILD)/test_vspace $(BUILD)/test_elf
+# ---------------------------------------------------------------- guest
 
-.PHONY: all test windows traces model port clean
+$(BUILD)/guest-runner: $(GUEST_SOURCES) $(HEADERS)
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) -o $@ $(GUEST_SOURCES)
+
+guest: $(BUILD)/guest-runner
+
+# Runs a real Linux ELF on the host.  Only meaningful on macOS/aarch64.
+guest-test: $(BUILD)/guest-runner
+	@$(BUILD)/guest-runner --root . tests/guest/hello > $(BUILD)/guest.out 2>&1
+	@grep -q "hello from guest" $(BUILD)/guest.out
+	@echo "guest ok: $$(grep -c 'hello from guest' $(BUILD)/guest.out) line(s)"
+
+clean:
+	@rm -f $(BUILD)/test_vspace $(BUILD)/test_elf $(BUILD)/guest-runner
+
+.PHONY: all test windows guest guest-test traces model port clean

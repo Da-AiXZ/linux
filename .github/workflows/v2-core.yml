@@ -53,3 +53,31 @@ jobs:
               exit 1
             fi
           done
+
+  # The guest is aarch64 Linux; the only host that can execute it is aarch64.
+  # This job is the whole point of the rewrite: a real ELF runs, through the
+  # real syscall path, in ten seconds and without a device.
+  guest:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Host architecture
+        run: |
+          uname -m
+          if [ "$(uname -m)" != "arm64" ]; then
+            echo "::error::guest execution needs an arm64 runner"
+            exit 1
+          fi
+
+      - name: Build runner
+        working-directory: v2
+        run: make guest
+
+      - name: Run a Linux ELF natively
+        working-directory: v2
+        run: |
+          set -eu
+          ./build/guest-runner --root . tests/guest/hello | tee /tmp/guest.out
+          grep -q "hello from guest" /tmp/guest.out
+          echo "guest exit status: $?"

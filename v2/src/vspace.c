@@ -646,3 +646,33 @@ int v2_space_verify(const v2_space *space)
     }
     return 0;
 }
+
+int v2_space_read(const v2_space *space, void *destination,
+                  const void *source, size_t length)
+{
+    if (length == 0) {
+        return 0;
+    }
+    if (v2_space_check(space, source, length, V2_PROT_READ) != 0) {
+        return -V2_EFAULT;
+    }
+    if (space->host.read(space->host.ctx, destination, source, length) != 0) {
+        return -V2_EFAULT;
+    }
+    return 0;
+}
+
+int v2_space_write(const v2_space *space, void *destination,
+                   const void *source, size_t length)
+{
+    if (length == 0) {
+        return 0;
+    }
+    if (v2_space_check(space, destination, length, V2_PROT_WRITE) != 0) {
+        return -V2_EFAULT;
+    }
+    if (space->host.write(space->host.ctx, destination, source, length) != 0) {
+        return -V2_EFAULT;
+    }
+    return 0;
+}
