@@ -289,13 +289,26 @@
             @[@"id"],
             @[@"pwd"],
         ];
+        /*
+         * Everything the applets print goes into the *uploaded* text as well
+         * as the screen.  0.1.3 uploaded only the hello section, so the log
+         * that arrived said nothing about the six commands that had just run.
+         */
+        [text appendString:@"\n=== busybox ===\n"];
         [self append:@"\n=== busybox ===\n"];
         for (NSArray<NSString *> *command in commands) {
-            [self append:[NSString stringWithFormat:@"\n$ busybox %@\n",
-                          [command componentsJoinedByString:@" "]]];
+            NSString *header = [NSString stringWithFormat:@"\n$ busybox %@\n",
+                                [command componentsJoinedByString:@" "]];
             NSMutableString *piece = [NSMutableString string];
-            [V2Runner runGuest:busybox root:root args:command timeout:20
-                        output:piece];
+            int command_status;
+
+            [text appendString:header];
+            [self append:header];
+            command_status = [V2Runner runGuest:busybox root:root args:command
+                                        timeout:20 output:piece];
+            [text appendString:piece];
+            [text appendFormat:@"[app] busybox %@ status=%d\n",
+                                command.firstObject, command_status];
             [self append:piece];
         }
     }
