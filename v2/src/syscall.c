@@ -21,6 +21,7 @@
 #include "v2/fsops.h"
 #include "v2/patch.h"
 #include "v2/proc.h"
+#include "v2/sysnames.h"
 #include "v2/vspace.h"
 
 struct v2_proc *v2_current_process;
@@ -33,8 +34,8 @@ static long long log_unsupported(uint64_t number)
 
     if (number < sizeof(seen) && !seen[number]) {
         seen[number] = 1;
-        fprintf(stderr, "[v2] unsupported syscall %llu\n",
-                (unsigned long long)number);
+        fprintf(stderr, "[v2] unsupported syscall %llu (%s)\n",
+                (unsigned long long)number, v2_syscall_name((unsigned)number));
     }
     return -V2_ENOSYS;
 }

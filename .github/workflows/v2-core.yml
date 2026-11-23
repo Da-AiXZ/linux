@@ -154,8 +154,10 @@ jobs:
           cp -R tests/guest/root /tmp/g5root
           ./build/guest-runner --root /tmp/g5root /tmp/g5root/sbin/apk \
             update --allow-untrusted --no-progress 2>&1 | tee /tmp/g5_update
-          # The cache file is APKINDEX.<hash>.tar.gz, named after the repo
-          # URL, so the check is on the prefix rather than an exact name.
-          ls /tmp/g5root/var/cache/apk | tee /dev/stderr | grep -q APKINDEX
-          grep -q "distinct packages" /tmp/g5_update
-          echo "G5 groundwork ok: index fetched, parsed and cached"
+          # A local repository is read in place, so there is no cache file to
+          # check; what matters is that apk parsed our index and counted the
+          # packages in it, and that it read DESCRIPTION out of the tarball.
+          grep -q "v2 test repository" /tmp/g5_update
+          grep -q "distinct packages available" /tmp/g5_update
+          grep -q "2 distinct packages" /tmp/g5_update
+          echo "G5 groundwork ok: index fetched and parsed"
