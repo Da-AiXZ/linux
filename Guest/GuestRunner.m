@@ -4227,15 +4227,26 @@ static uint64_t GuestSyscallDispatchInner(uint64_t *args,
         return GuestBrkCurrent;
     }
     case 222: { /* mmap */
-        return GuestHandleMmap(args[0],
-                               args[1],
-                               (int)args[2],
-                               args[3],
-                               (int)args[4],
-                               args[5]);
+        uint64_t mapped = GuestHandleMmap(args[0],
+                                          args[1],
+                                          (int)args[2],
+                                          args[3],
+                                          (int)args[4],
+                                          args[5]);
+        if (mapped != (uint64_t)(-1)) {
+            uint64_t record[3] = { mapped, args[1], 0 };
+            GuestSyscallRingRecord(0x1000 | 222, record);
+        }
+        return mapped;
     }
     case 215: { /* munmap */
-        return GuestHandleMunmap((uintptr_t)args[0], (size_t)args[1]);
+        uint64_t released = GuestHandleMunmap((uintptr_t)args[0],
+                                              (size_t)args[1]);
+        if (released == 0) {
+            uint64_t record[3] = { args[0], args[1], 0 };
+            GuestSyscallRingRecord(0x1000 | 215, record);
+        }
+        return released;
     }
     case 216: { /* mremap */
         return GuestHandleMremap((uintptr_t)args[0],

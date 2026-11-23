@@ -206,13 +206,16 @@ static void zspyReport(zspy_stream *stream, int result, uInt before)
         if (gzipWrapped && zspyCheckReports < 500) {
             zspyCheckReports++;
             zspyLog("[zck] call=%u check=%08lx this_out=%lu"
-                    " total_out=%lu state_total=%lu outcrc=%08lx\n",
+                    " total_out=%lu state_total=%lu outcrc=%08lx"
+                    " out=0x%lx out_start=0x%lx\n",
                     zspyCalls,
                     (unsigned long)check,
                     (unsigned long)(stream->next_out - zspyOutStart),
                     (unsigned long)stream->total_out,
                     (unsigned long)*totalField,
-                    (unsigned long)zspyOutCrc);
+                    (unsigned long)zspyOutCrc,
+                    (unsigned long)(uintptr_t)stream->next_out,
+                    (unsigned long)(uintptr_t)zspyOutStart);
             if (!zspyMarked && check != zspyOutCrc) {
                 /* 0.40.36: ask the runner to dump the syscall ring here. */
                 zspyMarked = 1;
