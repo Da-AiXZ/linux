@@ -258,6 +258,19 @@ static unsigned GuestMappingUnbacked;
  * of inferring it.
  */
 #define GUEST_FREED_SLOTS 64
+/*
+ * Every guest mapping we created, so a fault address can be named and a
+ * munmap can tell owned pages from somebody else's.  Declared up here because
+ * the watchpoint handler classifies a pc by the record that owns it.
+ */
+#define GUEST_MMAP_RECORDS 4096
+
+static struct {
+    uintptr_t address;
+    size_t length;
+} GuestMmapRecords[GUEST_MMAP_RECORDS];
+static int GuestMmapRecordCount = 0;
+
 static uintptr_t GuestFreedStart[GUEST_FREED_SLOTS];
 static uintptr_t GuestFreedEnd[GUEST_FREED_SLOTS];
 static unsigned GuestFreedCount;
@@ -5870,13 +5883,6 @@ static void GuestEmitForkSupport(uint8_t *base)
 #pragma mark - Guest mmap / mprotect for the dynamic linker
 
 #define GUEST_HOST_PAGE_SIZE 0x4000ULL
-#define GUEST_MMAP_RECORDS 4096
-
-static struct {
-    uintptr_t address;
-    size_t length;
-} GuestMmapRecords[GUEST_MMAP_RECORDS];
-static int GuestMmapRecordCount = 0;
 
 static inline uintptr_t GuestAlignDown(uintptr_t value)
 {
