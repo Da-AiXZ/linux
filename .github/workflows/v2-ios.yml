@@ -49,6 +49,12 @@ jobs:
           cp "$HELPER" "$APP/Helpers/guest-runner"
           cp v2/tests/guest/hello "$APP/Helpers/hello"
           chmod +x "$APP/Helpers/guest-runner"
+          # Same static-PIE busybox the CI guest job runs.  It is data to the
+          # app (the loader reads the file), so it needs no signature.
+          if [ -f v2/tests/guest/busybox ]; then
+            cp v2/tests/guest/busybox "$APP/Helpers/busybox"
+            chmod +x "$APP/Helpers/busybox"
+          fi
 
           ldid -Sv2/app/V2Runner.entitlements "$APP/Helpers/guest-runner"
           ldid -Sv2/app/V2.entitlements "$APP/V2Probe"

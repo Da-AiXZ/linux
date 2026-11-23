@@ -69,14 +69,29 @@ jobs:
           # understands; kbuild does not need the .d files for a clean build.
           cat > /tmp/zigcc <<'WRAP'
           #!/bin/bash
+          # kbuild asks for dependencies with -Wp,-MD,<file> -Wp,-MT,<target>.
+          # zig's driver does not accept that spelling: it tries to delete the
+          # path and fails with FileNotFound, which fails the compile.  Rewrite
+          # it into the standard -MD -MF -MT form, and if zig still declines to
+          # write the file, leave a minimal one behind -- kbuild's fixdep runs
+          # unconditionally and errors out when it is missing.
+          deps=""
+          target=""
           out=()
           for a in "$@"; do
             case "$a" in
-              -Wp,-MD,*|-Wp,-MMD,*|-Wp,-MT,*) continue ;;
+              -Wp,-MD,*) deps="${a#-Wp,-MD,}"; out+=("-MD" "-MF" "$deps") ;;
+              -Wp,-MMD,*) deps="${a#-Wp,-MMD,}"; out+=("-MMD" "-MF" "$deps") ;;
+              -Wp,-MT,*) target="${a#-Wp,-MT,}"; out+=("-MT" "$target") ;;
+              *) out+=("$a") ;;
             esac
-            out+=("$a")
           done
-          exec "$ZIG" cc -target aarch64-linux-musl -fPIE -pie -O2 "${out[@]}"
+          "$ZIG" cc -target aarch64-linux-musl -fPIE -pie -O2 "${out[@]}"
+          status=$?
+          if [ $status -eq 0 ] && [ -n "$deps" ] && [ ! -f "$deps" ]; then
+            printf '%s: %s\n' "${target:-busybox}" "${out[-1]}" > "$deps"
+          fi
+          exit $status
           WRAP
           chmod +x /tmp/zigcc
           export ZIG="$(command -v zig)"
