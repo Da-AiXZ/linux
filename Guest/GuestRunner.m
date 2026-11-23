@@ -1102,6 +1102,23 @@ static void GuestArmWatchpoint(uintptr_t address)
     sigemptyset(&action.sa_mask);
     sigaction(SIGTRAP, &action, NULL);
 
+    /*
+     * Prove the state is real at arming time: zlib sets state->strm first, so
+     * a valid inflate_state starts with the z_stream pointer.  Reading it
+     * here, and again at the foreign write, says whether the memory was
+     * already somebody else's before apk's realloc returned this address.
+     */
+    {
+        uintptr_t objectBase = address - 0x20;
+        GuestLog("[dbg] arm object=0x%lx words=%016llx %016llx %016llx %016llx"
+                 "\n",
+                 (unsigned long)objectBase,
+                 (unsigned long long)*(uint64_t *)objectBase,
+                 (unsigned long long)*(uint64_t *)(objectBase + 8),
+                 (unsigned long long)*(uint64_t *)(objectBase + 16),
+                 (unsigned long long)*(uint64_t *)(objectBase + 24));
+        GuestLogRegion("arm", objectBase);
+    }
     /* A new object: point the watchpoint at it, keep the pc baseline. */
     GuestWatchAddress = address;
     int result = GuestSetDebugWatch((uint64_t)address, 1, 0);
@@ -3298,6 +3315,8 @@ static void GuestLogSyscallStats(void)
              GuestMunmapReleasedPages, GuestMunmapSharedPages);
     GuestLog("[guest] munmap kept=%u (unowned, shared or sub-page)\n",
              GuestMunmapKeptPages);
+    GuestLog("[guest] munmap strict-kept=%u (record != request)\n",
+             GuestReleaseStrictKept);
     GuestLog("[guest] mapping checks=%u unbacked=%u\n",
              GuestMappingChecks, GuestMappingUnbacked);
     GuestLogMmapHistogram();
@@ -6959,6 +6978,8 @@ static BOOL GuestPageIsRuntime(uintptr_t page)
  * page that had been in active use.  Inspect the records against the request
  * before touching either.
  */
+static unsigned GuestReleaseStrictKept = 0;
+
 static BOOL GuestPageRecordsFitRequest(uintptr_t page,
                                        uintptr_t requestStart,
                                        uintptr_t requestEnd)
@@ -6973,7 +6994,25 @@ static BOOL GuestPageRecordsFitRequest(uintptr_t page,
             continue;
         }
         found = YES;
-        if (start < requestStart || end > requestEnd) {
+        /*
+         * 0.41.4: the rule used to be "the record is inside the request",
+         * which releases a page whose owner mapping merely happens to be
+         * covered by a larger munmap -- exactly one way to unmap a group
+         * that musl still believes it owns, after which the same 32KB can be
+         * mapped again for a different size class and two live objects end up
+         * eight bytes apart.  Require an exact match instead; a mismatch only
+         * leaks address space, and one apk run fits.
+         */
+        if (start != requestStart || end != requestEnd) {
+            GuestReleaseStrictKept++;
+            if (GuestReleaseStrictKept <= 8) {
+                GuestLog("[rel] kept 0x%lx..0x%lx: request"
+                         " 0x%lx..0x%lx does not match the record\n",
+                         (unsigned long)start,
+                         (unsigned long)end,
+                         (unsigned long)requestStart,
+                         (unsigned long)requestEnd);
+            }
             return NO;
         }
     }
