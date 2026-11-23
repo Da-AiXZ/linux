@@ -51,7 +51,12 @@ PACKAGES = [
 def tar_gz(entries):
     """entries: [(name, bytes or None for a directory, mode)]"""
     raw = io.BytesIO()
-    with tarfile.open(fileobj=raw, mode="w") as tar:
+    # USTAR, explicitly.  Python's tarfile defaults to PAX since 3.8, which
+    # emits a pax_global_header and per-file extended headers; apk's tar
+    # parser does not understand them and answers "BAD archive".  The first
+    # attempt at this repository did exactly that.
+    with tarfile.open(fileobj=raw, mode="w",
+                      format=tarfile.USTAR_FORMAT) as tar:
         for name, data, mode in entries:
             info = tarfile.TarInfo(name)
             info.mode = mode
@@ -93,7 +98,9 @@ def build_package(spec):
     for path, data in sorted(spec["files"].items()):
         parts = path.split("/")
         for index in range(1, len(parts)):
-            directory = "/".join(parts[:index])
+            # Trailing slash, the way GNU tar spells a directory; apk reads
+            # the name to decide what it is extracting.
+            directory = "/".join(parts[:index]) + "/"
             if not any(name == directory for name, _, _ in entries):
                 entries.append((directory, None, 0o755))
         entries.append((path, data, 0o755 if path.startswith("usr/bin") else 0o644))
