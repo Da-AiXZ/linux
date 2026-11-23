@@ -18,6 +18,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "v2/fsops.h"
 #include "v2/patch.h"
 #include "v2/proc.h"
 #include "v2/vspace.h"
@@ -25,8 +26,6 @@
 struct v2_proc *v2_current_process;
 struct v2_patcher *v2_current_patcher;
 _Thread_local uint64_t v2_tls_shadow;
-
-typedef long long (*v2_syscall_fn)(struct v2_cpu *cpu, struct v2_proc *proc);
 
 static long long log_unsupported(uint64_t number)
 {
@@ -701,6 +700,13 @@ static long long sys_fcntl(struct v2_cpu *cpu, struct v2_proc *proc)
     case 2:  /* F_SETFD */
     case 4:  /* F_SETFL */
         return fcntl(host, command, (int)cpu->x[2]);
+    case 5:  /* F_GETLK  */
+    case 6:  /* F_SETLK  */
+    case 7:  /* F_SETLKW */
+        /* One process, one thread: there is no second locker.  Succeeding
+         * is what apk's db lock is asking for (Darwin numbers these 7/8/9,
+         * so they must not be forwarded). */
+        return 0;
     default:
         return -V2_EINVAL;
     }
@@ -1014,6 +1020,21 @@ static const struct v2_sysent table[320] = {
     [23] = {"dup", sys_dup},
     [25] = {"fcntl", sys_fcntl},
     [29] = {"ioctl", sys_ioctl},
+    [32] = {"flock", v2_fs_flock},
+    [34] = {"mkdirat", v2_fs_mkdirat},
+    [35] = {"unlinkat", v2_fs_unlinkat},
+    [36] = {"symlinkat", v2_fs_symlinkat},
+    [37] = {"linkat", v2_fs_linkat},
+    [38] = {"renameat", v2_fs_renameat},
+    [45] = {"truncate", v2_fs_truncate},
+    [46] = {"ftruncate", v2_fs_ftruncate},
+    [52] = {"fchmod", v2_fs_fchmod},
+    [53] = {"fchmodat", v2_fs_fchmodat},
+    [54] = {"fchownat", v2_fs_fchownat},
+    [81] = {"sync", sys_ok},
+    [82] = {"fsync", v2_fs_fsync},
+    [83] = {"fdatasync", v2_fs_fsync},
+    [88] = {"utimensat", v2_fs_utimensat},
     [48] = {"faccessat", sys_faccessat},
     [49] = {"chdir", sys_chdir},
     [50] = {"fchdir", sys_fchdir},
