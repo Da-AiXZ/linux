@@ -898,6 +898,23 @@ static unsigned GuestWatchHits = 0;
 static unsigned GuestWatchForeign = 0;
 static uintptr_t GuestWatchAddress = 0;
 static uintptr_t GuestWatchLegitPc = 0;
+static uintptr_t GuestWatchCodeStart = 0;
+static uintptr_t GuestWatchCodeEnd = 0;
+
+/* Range of the mmap record that contains an address, for module classification. */
+static int GuestWatchRangeFor(uintptr_t address, uintptr_t *start, uintptr_t *end)
+{
+    for (int index = 0; index < GuestMmapRecordCount; index++) {
+        uintptr_t recordStart = GuestMmapRecords[index].address;
+        uintptr_t recordEnd = recordStart + GuestMmapRecords[index].length;
+        if (address >= recordStart && address < recordEnd) {
+            *start = recordStart;
+            *end = recordEnd;
+            return 1;
+        }
+    }
+    return 0;
+}
 
 static int GuestDebugStateRead(arm_debug_state64_t *state)
 {
@@ -1014,24 +1031,35 @@ static void GuestTrapHandler(int signalNumber,
      * {dest, value, length} -- enough to say exactly which apk array
      * landed on inflate_state and how it got there.
      */
-    if (GuestWatchLegitPc == 0) {
-        GuestWatchLegitPc = pc;
-        GuestLog("[dbg] watch hit #%u (first) pc=0x%llx lr=0x%llx"
-                 " esr=0x%x in %s\n",
-                 GuestWatchHits,
-                 (unsigned long long)pc,
-                 (unsigned long long)lr,
-                 (unsigned)esr,
-                 where);
-    } else if (GuestWatchHits <= 3) {
+    /*
+     * Classify by MODULE, not by a single pc.  zlib writes check from several
+     * instructions (header, trailer, update), and the first version called
+     * every one of those "foreign".  The first hit names the module that owns
+     * inflate(); any later store from inside that same range is zlib's own
+     * bookkeeping, and a store from anywhere else is the writer we want.
+     */
+    if (GuestWatchCodeEnd == 0) {
+        if (GuestWatchRangeFor(pc, &GuestWatchCodeStart, &GuestWatchCodeEnd)) {
+            GuestLog("[dbg] watch code module 0x%lx..0x%lx (first hit"
+                     " pc=0x%llx in %s)\n",
+                     (unsigned long)GuestWatchCodeStart,
+                     (unsigned long)GuestWatchCodeEnd,
+                     (unsigned long long)pc,
+                     where);
+        }
+    }
+    int insideCode = GuestWatchCodeEnd != 0 &&
+                     pc >= GuestWatchCodeStart && pc < GuestWatchCodeEnd;
+    if (GuestWatchHits <= 2) {
         GuestLog("[dbg] watch hit #%u (%s) pc=0x%llx lr=0x%llx in %s\n",
                  GuestWatchHits,
-                 pc == GuestWatchLegitPc ? "same site" : "OTHER SITE",
+                 insideCode ? "zlib module" : "OUTSIDE zlib",
                  (unsigned long long)pc,
                  (unsigned long long)lr,
                  where);
-    } else if (pc == GuestWatchLegitPc) {
-        /* The expected UPDATE_CHECK store; stay quiet. */
+    }
+    if (insideCode) {
+        /* zlib's own store; skip it and keep watching. */
     } else {
         GuestWatchForeign++;
         GuestLog("[dbg] FOREIGN write #%u pc=0x%llx lr=0x%llx far=0x%llx"
