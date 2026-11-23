@@ -83,6 +83,9 @@ jobs:
               -Wp,-MD,*) deps="${a#-Wp,-MD,}"; out+=("-MD" "-MF" "$deps") ;;
               -Wp,-MMD,*) deps="${a#-Wp,-MMD,}"; out+=("-MMD" "-MF" "$deps") ;;
               -Wp,-MT,*) target="${a#-Wp,-MT,}"; out+=("-MT" "$target") ;;
+              # kbuild asks GNU ld for --warn-common; lld has no such option
+              # and zig turns the unknown flag into a hard error.
+              -Wl,--warn-common|-Wl,-warn-common) continue ;;
               *) out+=("$a") ;;
             esac
           done
