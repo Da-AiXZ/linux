@@ -190,35 +190,68 @@
 }
 
 /*
- * The guest sees Documents/root as "/".  It gets a handful of files so the
- * applets have something real to list, read and stat -- the same fixture CI
- * uses in v2/tests/guest/root.
+ * The guest sees Documents/root as "/".
+ *
+ * The whole fixture tree ships in the bundle (Helpers/root) and is copied out
+ * once: G3 only needed a few text files, but G4 needs the musl runtime and
+ * apk's libraries at their real paths, and Documents is writable, which the
+ * bundle is not -- apk will want that in G5.
  */
 - (void)prepareRoot:(NSString *)root
 {
     NSFileManager *files = [NSFileManager defaultManager];
-    NSDictionary<NSString *, NSString *> *fixture = @{
-        @"etc/motd": @"v2 guest rootfs\n",
-        @"etc/passwd": @"root:x:0:0:root:/root:/bin/sh\n",
-        @"etc/group": @"root:x:0:\n",
-        @"hello.txt": @"hello from the guest root\n",
-        @"sub/note.txt": @"nested file\n",
-    };
+    NSString *source = [[[NSBundle mainBundle] bundlePath]
+        stringByAppendingPathComponent:@"Helpers/root"];
+    NSMutableString *report = [NSMutableString string];
+    NSError *error = nil;
+    NSDirectoryEnumerator<NSString *> *walk;
+    int copied = 0;
+    int kept = 0;
 
-    for (NSString *relative in fixture) {
-        NSString *path = [root stringByAppendingPathComponent:relative];
-
-        [files createDirectoryAtPath:[path stringByDeletingLastPathComponent]
-        withIntermediateDirectories:YES
-                         attributes:nil
-                              error:nil];
-        if (![files fileExistsAtPath:path]) {
-            [fixture[relative] writeToFile:path
-                                atomically:YES
-                                  encoding:NSUTF8StringEncoding
-                                     error:nil];
-        }
+    if (![files fileExistsAtPath:source]) {
+        [self append:@"[app] no bundled rootfs; the guest gets an empty one\n"];
+        return;
     }
+
+    walk = [files enumeratorAtPath:source];
+    for (NSString *relative in walk) {
+        NSString *from = [source stringByAppendingPathComponent:relative];
+        NSString *to = [root stringByAppendingPathComponent:relative];
+        BOOL directory = NO;
+        NSDictionary *info;
+
+        if (![files fileExistsAtPath:from isDirectory:&directory] || directory) {
+            [files createDirectoryAtPath:to withIntermediateDirectories:YES
+                              attributes:nil error:nil];
+            continue;
+        }
+        info = [files attributesOfItemAtPath:from error:nil];
+        if ([files fileExistsAtPath:to] &&
+            [[[files attributesOfItemAtPath:to error:nil] fileSize]
+                unsignedLongLongValue] ==
+                [[info fileSize] unsignedLongLongValue]) {
+            kept++;
+            continue;
+        }
+        [files createDirectoryAtPath:[to stringByDeletingLastPathComponent]
+             withIntermediateDirectories:YES
+                              attributes:nil
+                                   error:&error];
+        if (![files copyItemAtPath:from toPath:to error:&error]) {
+            /* Replacing an older, shorter copy is the normal case on an
+             * upgrade, so remove and retry once before complaining. */
+            [files removeItemAtPath:to error:nil];
+            if (![files copyItemAtPath:from toPath:to error:&error]) {
+                [report appendFormat:@"  %@: %@\n", relative,
+                                     error.localizedDescription];
+                continue;
+            }
+        }
+        copied++;
+    }
+    [self append:[NSString stringWithFormat:
+        @"[app] rootfs %d copied, %d already present%s%s\n", copied, kept,
+        report.length ? "\n" : "", report]];
 }
 
 #pragma mark - run
@@ -309,6 +342,44 @@
             [text appendString:piece];
             [text appendFormat:@"[app] busybox %@ status=%d\n",
                                 command.firstObject, command_status];
+            [self append:piece];
+        }
+    }
+
+    /*
+     * G4: the same two checks CI runs.  `busybox` here is the *dynamic*
+     * build from the rootfs, so this only works if PT_INTERP was honoured,
+     * ld.so found libc through our openat/mmap, and the interpreter
+     * relocated it -- apk adds libapk, libcrypto, libssl and libz on top.
+     */
+    NSString *dynamicBusybox = [root stringByAppendingPathComponent:@"bin/busybox"];
+    NSString *apk = [root stringByAppendingPathComponent:@"sbin/apk"];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:apk]) {
+        NSArray<NSDictionary *> *dynamic = @[
+            @{@"title": @"dynamic busybox echo",
+              @"path": dynamicBusybox,
+              @"args": @[@"echo", @"dynamic-busybox-ok"]},
+            @{@"title": @"apk --version",
+              @"path": apk,
+              @"args": @[@"--version"]},
+        ];
+
+        [text appendString:@"\n=== dynamic ===\n"];
+        [self append:@"\n=== dynamic ===\n"];
+        for (NSDictionary *one in dynamic) {
+            NSString *header = [NSString stringWithFormat:@"\n$ %@\n",
+                                one[@"title"]];
+            NSMutableString *piece = [NSMutableString string];
+            int dynamic_status;
+
+            [text appendString:header];
+            [self append:header];
+            dynamic_status = [V2Runner runGuest:one[@"path"] root:root
+                                           args:one[@"args"] timeout:30
+                                         output:piece];
+            [text appendString:piece];
+            [text appendFormat:@"[app] %@ status=%d\n", one[@"title"],
+                                dynamic_status];
             [self append:piece];
         }
     }

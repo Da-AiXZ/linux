@@ -55,6 +55,14 @@ jobs:
             cp v2/tests/guest/busybox "$APP/Helpers/busybox"
             chmod +x "$APP/Helpers/busybox"
           fi
+          # G4 needs the guest's "/" inside the bundle: musl's ld.so, libc and
+          # apk's libraries at the paths ld.so searches.  The app copies this
+          # tree into Documents on first launch so the guest gets a writable
+          # root (apk will want that in G5).
+          rm -rf "$APP/Helpers/root"
+          cp -R v2/tests/guest/root "$APP/Helpers/root"
+          find "$APP/Helpers/root" -type f | wc -l
+          du -sh "$APP/Helpers/root"
 
           ldid -Sv2/app/V2Runner.entitlements "$APP/Helpers/guest-runner"
           ldid -Sv2/app/V2.entitlements "$APP/V2Probe"
