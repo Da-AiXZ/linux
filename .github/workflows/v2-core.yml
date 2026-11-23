@@ -228,4 +228,5 @@ jobs:
 
       - name: Note the open G5b failure
         if: steps.add.outcome == 'failure'
-        run: echo "::warning::apk add is still failing (G5b): libz inflate reads a NULL window"
+        run: |
+          echo "::warning::apk add is still failing (G5b) -- libz inflate reads a NULL window"
