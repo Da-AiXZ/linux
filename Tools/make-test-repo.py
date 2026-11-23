@@ -142,11 +142,19 @@ def main():
         handle.write(index_tar)
 
     # --- what apk expects around the repo -------------------------------
+    # apk 2.x keeps its database in /lib/apk/db (not /var/lib/apk) and needs
+    # the directory to exist.  Git cannot store an empty directory, so each
+    # one carries a .keep: apk only looks for APKINDEX*/installed/lock there
+    # and ignores everything else.
     etc_apk = os.path.join(ROOT, "etc", "apk")
-    for directory in (etc_apk, os.path.join(etc_apk, "keys"),
+    for directory in (etc_apk,
+                      os.path.join(etc_apk, "keys"),
                       os.path.join(ROOT, "var", "cache", "apk"),
-                      os.path.join(ROOT, "var", "lib", "apk")):
+                      os.path.join(ROOT, "lib", "apk", "db")):
         os.makedirs(directory, exist_ok=True)
+        keep = os.path.join(directory, ".keep")
+        if not os.path.exists(keep):
+            open(keep, "w").close()
     with open(os.path.join(etc_apk, "repositories"), "w") as handle:
         handle.write("/repo/main\n")
     with open(os.path.join(etc_apk, "arch"), "w") as handle:

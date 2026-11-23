@@ -378,3 +378,75 @@ long long v2_fs_flock(struct v2_cpu *cpu, struct v2_proc *proc)
     (void)cpu->x[1];
     return 0;
 }
+
+/* ------------------------------------------------------------------ statfs */
+
+/*
+ * aarch64's struct statfs is eight 8-byte words, then a two-int fsid, then
+ * three more words and four spare -- 120 bytes.  It is filled by offset for
+ * the same reason struct stat is: Darwin's layout differs after the first
+ * field and a cast would compile and lie.
+ */
+#define V2_STATFS_SIZE 120
+
+static long long fill_statfs(struct v2_proc *proc, uint64_t address)
+{
+    uint8_t block[V2_STATFS_SIZE];
+    const uint64_t words[13] = {
+        0xEF53,                 /* f_type: ext2/3/4, what Alpine's root is */
+        4096,                   /* f_bsize */
+        32ULL * 1024 * 1024,    /* f_blocks: 128 GiB of make-believe */
+        24ULL * 1024 * 1024,    /* f_bfree */
+        24ULL * 1024 * 1024,    /* f_bavail */
+        1024 * 1024,            /* f_files */
+        1024 * 1024,            /* f_ffree */
+        0,                      /* f_fsid[0] */
+        0,                      /* f_fsid[1] */
+        255,                    /* f_namelen */
+        4096,                   /* f_frsize */
+        0,                      /* f_flags */
+        0,                      /* f_spare[0] */
+    };
+
+    if (address == 0) {
+        return -V2_EFAULT;
+    }
+    memset(block, 0, sizeof(block));
+    for (int index = 0; index < 7; index++) {
+        memcpy(block + index * 8, &words[index], 8);
+    }
+    memcpy(block + 56, &words[7], 8);       /* fsid is two 32-bit halves */
+    for (int index = 0; index < 4; index++) {
+        memcpy(block + 64 + index * 8, &words[9 + index], 8);
+    }
+    if (v2_space_write(proc->space, (void *)(uintptr_t)address, block,
+                       sizeof(block)) != 0) {
+        return -V2_EFAULT;
+    }
+    return 0;
+}
+
+long long v2_fs_statfs(struct v2_cpu *cpu, struct v2_proc *proc)
+{
+    char path[V2_PATH_MAX * 2];
+    int status = resolve(proc, V2_AT_FDCWD, cpu->x[0], path, sizeof(path));
+
+    if (status != 0) {
+        return status;
+    }
+    /* Touching it proves the path exists; the numbers are ours. */
+    if (access(path, F_OK) != 0) {
+        return -(long long)v2_errno_from_host(errno);
+    }
+    return fill_statfs(proc, cpu->x[1]);
+}
+
+long long v2_fs_fstatfs(struct v2_cpu *cpu, struct v2_proc *proc)
+{
+    int host = v2_proc_fd_get(proc, (int)cpu->x[0]);
+
+    if (host < 0) {
+        return -V2_EBADF;
+    }
+    return fill_statfs(proc, cpu->x[1]);
+}

@@ -39,4 +39,12 @@ long long v2_fs_truncate(struct v2_cpu *cpu, struct v2_proc *proc);
 long long v2_fs_ftruncate(struct v2_cpu *cpu, struct v2_proc *proc);
 long long v2_fs_flock(struct v2_cpu *cpu, struct v2_proc *proc);
 
+/*
+ * apk asks the filesystem how much room is left before it unpacks anything.
+ * We are a directory on the host, so the honest answer is a generous one;
+ * answering ENOSYS makes apk refuse to continue.
+ */
+long long v2_fs_statfs(struct v2_cpu *cpu, struct v2_proc *proc);
+long long v2_fs_fstatfs(struct v2_cpu *cpu, struct v2_proc *proc);
+
 #endif /* V2_FSOPS_H */
