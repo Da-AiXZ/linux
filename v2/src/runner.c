@@ -233,7 +233,7 @@ int main(int argc, char **argv)
     if (status != 0) {
         die("cannot reserve the guest address space", NULL);
     }
-    printf("[v2] space 0x%llx..0x%llx page=0x%zx\n",
+    fprintf(stderr, "[v2] space 0x%llx..0x%llx page=0x%zx\n",
            (unsigned long long)(uintptr_t)v2_space_base(space),
            (unsigned long long)((uintptr_t)v2_space_base(space) +
                                 v2_space_length(space)),
@@ -247,7 +247,7 @@ int main(int argc, char **argv)
     if (status != 0) {
         die("parse", error);
     }
-    printf("[v2] elf %s type=%u segments=%d entry=0x%llx\n", elf_path,
+    fprintf(stderr, "[v2] elf %s type=%u segments=%d entry=0x%llx\n", elf_path,
            image.type, image.segment_count, (unsigned long long)image.entry);
 
     v2_patch_init(&patcher, space);
@@ -266,10 +266,10 @@ int main(int argc, char **argv)
         die("load", error);
     }
     free(file);
-    printf("[v2] load base=0x%llx entry=0x%llx span=0x%llx\n",
+    fprintf(stderr, "[v2] load base=0x%llx entry=0x%llx span=0x%llx\n",
            (unsigned long long)load.base, (unsigned long long)load.entry,
            (unsigned long long)load.span);
-    printf("[v2] patch svc=%u mrs=%u msr=%u\n", patcher.counts[V2_PATCH_SVC],
+    fprintf(stderr, "[v2] patch svc=%u mrs=%u msr=%u\n", patcher.counts[V2_PATCH_SVC],
            patcher.counts[V2_PATCH_MRS], patcher.counts[V2_PATCH_MSR]);
 
     status = v2_elf_protect(space, &image, &load, error, sizeof(error));
@@ -330,7 +330,7 @@ int main(int argc, char **argv)
     if (sp == 0) {
         die("stack", "cannot build the initial stack");
     }
-    printf("[v2] stack top=0x%llx sp=0x%llx argc=%d\n",
+    fprintf(stderr, "[v2] stack top=0x%llx sp=0x%llx argc=%d\n",
            (unsigned long long)proc.stack_top, (unsigned long long)sp,
            guest_argc);
 
@@ -347,7 +347,7 @@ int main(int argc, char **argv)
     space_base = (uint64_t)(uintptr_t)v2_space_base(space);
     space_end = space_base + v2_space_length(space);
 
-    printf("[v2] enter\n");
+    fprintf(stderr, "[v2] enter\n");
     fflush(stdout);
     v2_guest_enter(cpu.pc, cpu.sp);
     return 0;

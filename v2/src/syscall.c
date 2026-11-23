@@ -336,8 +336,13 @@ static void encode_stat(const struct stat *info, uint8_t out[128])
     uint64_t inode = (uint64_t)info->st_ino;
     uint32_t mode = (uint32_t)info->st_mode;
     uint32_t links = (uint32_t)info->st_nlink;
-    uint32_t uid = (uint32_t)info->st_uid;
-    uint32_t gid = (uint32_t)info->st_gid;
+    /*
+     * The guest is a single-user machine: every file belongs to its root.
+     * Passing the host's uid through made `ls -l` print "501 20" -- numbers
+     * that mean nothing inside the guest and match no /etc/passwd entry.
+     */
+    uint32_t uid = 0;
+    uint32_t gid = 0;
     uint64_t rdev = (uint64_t)info->st_rdev;
     uint64_t pad1 = 0;
     int64_t size = (int64_t)info->st_size;
