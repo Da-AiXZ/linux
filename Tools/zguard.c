@@ -94,9 +94,19 @@ void ZLIB_INTERNAL zcfree(voidpf opaque, voidpf address)
     if (address == NULL) {
         return;
     }
+    /*
+     * 0.41.9: free the slot, keep the pages.
+     *
+     * inflateEnd used to munmap the whole guarded block, which handed that
+     * address range back to the kernel a moment before apk's next realloc and
+     * the next inflateInit2.  The register dump caught the result: an apk
+     * array header eight bytes inside a live inflate_state.  A mapping that
+     * is never released cannot be handed out twice, so the state and the
+     * window now keep their address for the life of the process.  The cost is
+     * one 48-64KB block per inflateInit2 (a few MB per apk run).
+     */
     for (int index = 0; index < ZG_SLOTS; index++) {
         if (zg_entries[index].object == address) {
-            munmap(zg_entries[index].base, zg_entries[index].total);
             zg_entries[index].object = NULL;
             zg_entries[index].base = NULL;
             zg_entries[index].total = 0;
