@@ -1068,7 +1068,7 @@ static void GuestTrapHandler(int signalNumber,
                  (unsigned long long)*(uint64_t *)(GuestWatchAddress - 0x08));
     }
 
-    if (GuestWatchHits > 400 || GuestWatchForeign > 8) {
+    if (GuestWatchHits > 8 || GuestWatchForeign > 8) {
         GuestWatchArmed = 0;
         GuestSetDebugWatch(0, 0, 0);
         GuestLog("[dbg] watch stopped hits=%u foreign=%u\n",
@@ -1189,6 +1189,17 @@ static void GuestScanForInflateState(const char *text, size_t length)
             haveStreams = 1;
         }
         break;
+    }
+    /*
+     * 0.41.6: only the late streams.  Every arming burns up to 400 traps
+     * because MDSCR_EL1.SS cannot be written from the signal handler, and the
+     * old build spent that budget on stream 1 -- 30 seconds of stalling, then
+     * the watch was off exactly when the index streams (5 and 6) ran.  The
+     * failure always happens on the community index, which is the last pair.
+     */
+    if (haveStreams && streams < 5) {
+        GuestLog("[dbg] watch skip stream=%u (early member)\n", streams);
+        return;
     }
     if (haveStreams && (streams % 2) != 0) {
         GuestLog("[dbg] watch skip stream=%u (signature member)\n", streams);
@@ -6548,6 +6559,18 @@ static uint64_t GuestHandleFixedAnon(uintptr_t address,
      * munmap, and the fault reporter printed "no guest mapping" for a range
      * that was in active use.  Record it before touching the bytes.
      */
+    {
+        uintptr_t conflict = GuestMmapConflictEnd(address, length);
+        static unsigned fixedConflicts = 0;
+        if (conflict != 0 && fixedConflicts < 20) {
+            fixedConflicts++;
+            GuestLog("[ovl-fixed] anon 0x%lx..0x%lx overlaps a live record"
+                     " up to 0x%lx\n",
+                     (unsigned long)address,
+                     (unsigned long)(address + length),
+                     (unsigned long)conflict);
+        }
+    }
     GuestRememberMmap(address, length);
     GuestVerifyMapping(address, length, "fixed anon");
     if (address >= GuestHeapBase && address < GuestBrkCurrent) {
