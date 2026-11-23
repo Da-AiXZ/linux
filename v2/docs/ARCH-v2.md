@@ -446,3 +446,23 @@ Error relocating /usr/lib/libcrypto.so.3: pthread_rwlock_init: symbol not found
 这两件事很可能同源：**某处在特定布局下写到不该写的地方**。下一步的做法不是继续读代码，
 而是把 `V2_VERIFY` 自检打开（映射后逐页与文件比对），让"映射错了"和"状态被写了"
 这两种可能被数据分开。
+
+### 14.9 G4 的间歇性重定位失败（未解决，2026-11-24）
+
+`apk --version` 连续跑 2000 次，失败率 0.4%–2.4%，**每次报的符号都不一样**：
+
+```
+run  42  Error relocating /usr/lib/libssl.so.3: EVP_PKEY_set_type: symbol not found
+run 107  Error relocating /usr/lib/libcrypto.so.3: pthread_rwlock_wrlock: symbol not found
+run 142  Error relocating tests/guest/root/sbin/apk: apk_istream_tee_fd: symbol not found
+run 175  Error relocating /usr/lib/libapk.so.2.14.0: vasprintf: symbol not found
+run 226  Error relocating /usr/lib/libapk.so.2.14.0: fetchXGetHTTP: symbol not found
+run 264  Error relocating tests/guest/root/sbin/apk: dup: symbol not found
+```
+
+**"每次符号都不一样"是关键指纹**：不是某个符号坏了，而是符号表里**某一段**在有些运行里不是文件里的内容。
+已排除的：地址布局（失败分布在四个不同的 arena 基址上）、短读（现在会重试三次才认 EOF）、
+补丁误命中（`sites=+0`，这些库根本没有 `svc`）。
+
+**下一个工具**：`V2_VERIFY` —— 映射完成后逐页与文件比对，把"映射内容错了"和"musl 查表错了"
+彻底分开。在拿到这个数据之前，不再猜。
