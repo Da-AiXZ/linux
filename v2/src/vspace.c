@@ -317,26 +317,39 @@ long long v2_space_map(v2_space *space, void *hint, size_t length, int prot,
         uint8_t *destination = space->base + first * space->page_size;
         size_t total = count * space->page_size;
         size_t done = 0;
+        int failed = 0;
 
         if (v2_commit(space, first, count, V2_PROT_READ | V2_PROT_WRITE) != 0) {
             v2_release_pages(space, first, count);
             return -V2_ENOMEM;
         }
+        /*
+         * A file mapping is routinely longer than the file: the last page of
+         * the last PT_LOAD carries .bss, and ld.so maps whole libraries with
+         * one call.  Linux zero-fills past EOF, so running out of file is not
+         * an error -- an actual read error is.  (v1 treated short reads as
+         * fatal and could never map libc.)
+         */
         while (done < total) {
             long got = space->host.read_at(space->host.ctx, fd,
                                            destination + done, total - done,
                                            offset + (long long)done);
-            if (got <= 0) {
+            if (got < 0) {
+                failed = 1;
+                break;
+            }
+            if (got == 0) {
                 break;
             }
             done += (size_t)got;
         }
-        if (done < total) {
-            /* Linux would fault on first touch; we cannot, so report it. */
+        if (failed) {
             space->host.decommit(space->host.ctx, destination, total);
             v2_release_pages(space, first, count);
             return -V2_EIO;
         }
+        /* Past EOF the pages stay zero: commit just handed us fresh
+         * anonymous pages and only the first `done` bytes were written. */
         if (prot != (V2_PROT_READ | V2_PROT_WRITE)) {
             if (space->host.protect(space->host.ctx, destination, total,
                                     prot) != 0) {

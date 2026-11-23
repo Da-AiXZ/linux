@@ -115,3 +115,29 @@ jobs:
           grep -q "uid=0"               /tmp/g3_id
           test "$(cat /tmp/g3_pwd)" = "/"
           echo "G3 ok: six applets ran"
+
+      # G4: the program does not contain libc.  PT_INTERP names ld.so, we load
+      # that at its own base, AT_BASE points at it, and *it* maps
+      # libc.musl-aarch64.so.1 from /lib and relocates both sides.  Static PIE
+      # (G3) never exercised any of this.
+      - name: Dynamic linking (ld.so + libc)
+        working-directory: v2
+        run: |
+          set -eu
+          if [ ! -f tests/guest/root/lib/ld-musl-aarch64.so.1 ]; then
+            echo "::error::the musl runtime is missing from the test rootfs"
+            exit 1
+          fi
+          echo "--- dynamic busybox: echo"
+          ./build/guest-runner --root tests/guest/root \
+            tests/guest/root/bin/busybox echo dynamic-busybox-ok \
+            > /tmp/g4_echo
+          cat /tmp/g4_echo
+          grep -q "dynamic-busybox-ok" /tmp/g4_echo
+
+          echo "--- apk --version"
+          ./build/guest-runner --root tests/guest/root \
+            tests/guest/root/sbin/apk --version > /tmp/g4_apk
+          cat /tmp/g4_apk
+          grep -q "apk-tools" /tmp/g4_apk
+          echo "G4 ok: ld.so loaded, libc relocated, apk ran"

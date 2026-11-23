@@ -63,6 +63,8 @@ static void die(const char *what, const char *detail)
 
 static uint64_t image_base;
 static uint64_t image_end;
+static uint64_t link_base;
+static uint64_t link_end;
 static uint64_t space_base;
 static uint64_t space_end;
 
@@ -97,6 +99,13 @@ static void v2_fault(int number, siginfo_t *info, void *context)
                 (unsigned long long)(address - space_base));
     }
     /* The instructions around pc, when they are inside the guest. */
+    if (link_base != 0 && pc >= link_base && pc < link_end) {
+        fprintf(stderr, "[v2] pc is inside the interpreter (+0x%llx)\n",
+                (unsigned long long)(pc - link_base));
+    } else if (image_base != 0 && pc >= image_base && pc < image_end) {
+        fprintf(stderr, "[v2] pc is inside the program (+0x%llx)\n",
+                (unsigned long long)(pc - image_base));
+    }
     if (space_base != 0 && pc >= space_base + 16 && pc < space_end) {
         const uint32_t *words = (const uint32_t *)(uintptr_t)(pc - 16);
 
@@ -178,6 +187,8 @@ int main(int argc, char **argv)
     struct v2_patcher patcher;
     struct v2_elf_image image;
     struct v2_elf_load load;
+    struct v2_elf_image interp_image;
+    struct v2_elf_load interp_load;
     struct v2_proc proc;
     struct v2_auxv aux;
     struct v2_cpu cpu;
@@ -186,10 +197,15 @@ int main(int argc, char **argv)
     size_t file_length = 0;
     uint64_t heap;
     uint64_t stack;
+    uint64_t aux_base_pending = 0;
+    uint64_t jump_entry;
     uint64_t sp;
     size_t page_size;
     int fd;
     int status;
+
+    memset(&interp_image, 0, sizeof(interp_image));
+    memset(&interp_load, 0, sizeof(interp_load));
 
     for (int index = 1; index < argc; index++) {
         if (strcmp(argv[index], "--root") == 0 && index + 1 < argc) {
@@ -239,6 +255,15 @@ int main(int argc, char **argv)
                                 v2_space_length(space)),
            page_size);
 
+    /*
+     * The path translator is needed before the interpreter is loaded, and it
+     * only needs the root, so it comes up before the ELF is parsed.
+     */
+    status = v2_proc_init(&proc, space, root);
+    if (status != 0) {
+        die("proc", "bad root");
+    }
+
     file = read_file(elf_path, &file_length);
     if (file == NULL) {
         die("cannot read", elf_path);
@@ -272,6 +297,59 @@ int main(int argc, char **argv)
     fprintf(stderr, "[v2] patch svc=%u mrs=%u msr=%u\n", patcher.counts[V2_PATCH_SVC],
            patcher.counts[V2_PATCH_MRS], patcher.counts[V2_PATCH_MSR]);
 
+    /*
+     * A dynamically linked program names its interpreter in PT_INTERP.  The
+     * kernel would load that file at a random base and jump to *its* entry,
+     * with AT_BASE pointing at it and AT_PHDR/AT_ENTRY still describing the
+     * main program -- because it is ld.so that reads the main program's
+     * dynamic section and relocates it.
+     */
+    if (image.has_interp) {
+        char host_path[V2_PATH_MAX * 2];
+        char interp_error[192] = "";
+        uint8_t *interp_file;
+        size_t interp_length = 0;
+        int interp_fd;
+
+        status = v2_proc_translate(&proc, -100 /* AT_FDCWD */, image.interp,
+                                   host_path, sizeof(host_path));
+        if (status != 0) {
+            die("cannot locate the interpreter", image.interp);
+        }
+        interp_file = read_file(host_path, &interp_length);
+        if (interp_file == NULL) {
+            die("cannot read the interpreter", host_path);
+        }
+        status = v2_elf_parse(interp_file, interp_length, &interp_image,
+                              interp_error, sizeof(interp_error));
+        if (status != 0) {
+            die("interpreter parse", interp_error);
+        }
+        interp_fd = open(host_path, O_RDONLY);
+        if (interp_fd < 0) {
+            die("cannot reopen the interpreter", host_path);
+        }
+        status = v2_elf_load(space, interp_fd, &interp_image, 0, &patcher,
+                             &interp_load, interp_error, sizeof(interp_error));
+        close(interp_fd);
+        free(interp_file);
+        if (status != 0) {
+            die("interpreter load", interp_error);
+        }
+        status = v2_elf_protect(space, &interp_image, &interp_load,
+                                interp_error, sizeof(interp_error));
+        if (status != 0) {
+            die("interpreter protect", interp_error);
+        }
+        fprintf(stderr,
+                "[v2] interp %s base=0x%llx entry=0x%llx span=0x%llx\n",
+                image.interp, (unsigned long long)interp_load.base,
+                (unsigned long long)interp_load.entry,
+                (unsigned long long)interp_load.span);
+        jump_entry = interp_load.entry;
+        aux_base_pending = interp_load.base;
+    }
+
     status = v2_elf_protect(space, &image, &load, error, sizeof(error));
     if (status != 0) {
         die("protect", error);
@@ -281,10 +359,6 @@ int main(int argc, char **argv)
         die("seal", error);
     }
 
-    status = v2_proc_init(&proc, space, root);
-    if (status != 0) {
-        die("proc", "bad root");
-    }
     proc.patcher = &patcher;
     proc.image_base = load.base;
     proc.image_entry = load.entry;
@@ -315,14 +389,22 @@ int main(int argc, char **argv)
     guest_envp[1] = "HOME=/";
     guest_envp[2] = NULL;
 
+    jump_entry = load.entry;   /* overwritten above when ld.so is in charge */
+
     memset(&aux, 0, sizeof(aux));
     aux.phdr = proc.image_phdr;
     aux.phnum = image.phnum;
     aux.phent = image.phentsize;
     aux.entry = load.entry;
-    aux.base = 0;
+    aux.base = aux_base_pending;
     aux.pagesz = page_size;
-    aux.hwcap = 0;
+    /*
+     * AT_HWCAP.  Only FP and ASIMD are claimed: every aarch64 core has them,
+     * and claiming more would make OpenSSL (inside libcrypto) select code
+     * paths this runtime has never executed.  With AES/SHA bits clear it
+     * uses portable C -- slower, and correct on any core.
+     */
+    aux.hwcap = 3;   /* HWCAP_FP | HWCAP_ASIMD */
     aux.execfn = elf_path;
 
     sp = v2_stack_build(space, proc.stack_top, guest_argc, guest_argv, 2,
@@ -335,7 +417,7 @@ int main(int argc, char **argv)
            guest_argc);
 
     memset(&cpu, 0, sizeof(cpu));
-    cpu.pc = load.entry;
+    cpu.pc = jump_entry;
     cpu.sp = sp;
 
     v2_current_process = &proc;
@@ -344,6 +426,8 @@ int main(int argc, char **argv)
 
     image_base = load.start;
     image_end = load.start + load.span;
+    link_base = interp_load.start;
+    link_end = interp_load.start + interp_load.span;
     space_base = (uint64_t)(uintptr_t)v2_space_base(space);
     space_end = space_base + v2_space_length(space);
 

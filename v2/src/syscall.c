@@ -271,6 +271,53 @@ static long long sys_read(struct v2_cpu *cpu, struct v2_proc *proc)
     return (long long)done;
 }
 
+/*
+ * pread64.  ld.so reads program headers with it precisely because it must not
+ * disturb the file offset, and musl's mmap-based file loading relies on that.
+ */
+static long long sys_pread64(struct v2_cpu *cpu, struct v2_proc *proc)
+{
+    int fd = (int)cpu->x[0];
+    uint64_t buffer = cpu->x[1];
+    uint64_t count = cpu->x[2];
+    int64_t offset = (int64_t)cpu->x[3];
+    int host = v2_proc_fd_get(proc, fd);
+    uint8_t chunk[4096];
+    uint64_t done = 0;
+
+    if (host < 0) {
+        return -V2_EBADF;
+    }
+    if (offset < 0) {
+        return -V2_EINVAL;
+    }
+    while (done < count) {
+        size_t want = (size_t)(count - done);
+        ssize_t got;
+
+        if (want > sizeof(chunk)) {
+            want = sizeof(chunk);
+        }
+        got = pread(host, chunk, want, (off_t)(offset + (int64_t)done));
+        if (got < 0) {
+            return done > 0 ? (long long)done : -V2_EIO;
+        }
+        if (got == 0) {
+            break;
+        }
+        if (v2_space_write(proc->space,
+                           (void *)(uintptr_t)(buffer + done), chunk,
+                           (size_t)got) != 0) {
+            return done > 0 ? (long long)done : -V2_EFAULT;
+        }
+        done += (uint64_t)got;
+        if ((size_t)got < want) {
+            break;
+        }
+    }
+    return (long long)done;
+}
+
 static long long sys_openat(struct v2_cpu *cpu, struct v2_proc *proc)
 {
     int dirfd = (int)cpu->x[0];
@@ -957,6 +1004,7 @@ static const struct v2_sysent table[320] = {
     [64] = {"write", sys_write},
     [65] = {"readv", sys_readv},
     [66] = {"writev", sys_writev},
+    [67] = {"pread64", sys_pread64},
     [78] = {"readlinkat", sys_readlinkat},
     [79] = {"newfstatat", sys_newfstatat},
     [80] = {"fstat", sys_fstat},
