@@ -162,6 +162,30 @@ jobs:
           echo "--- runtime offset 0x21d5c minus 0x10000 ---"
           python3 Tools/elf_peek.py "$SO" 0x11d5c 0x20 0x40 || true
 
+      # A self-contained stress test for the inflate failure.  Everything so
+      # far needed a build + a manual install + one run to produce a single
+      # sample, so a 30% failure rate needed ten of those to mean anything.
+      # gzstress decodes the cached APKINDEX gzip members in a loop inside the
+      # guest: 200 samples per app run, no network, no apk, no watchpoint.
+      - name: Build gzstress (static guest stress test)
+        run: |
+          set -eux
+          command -v zig >/dev/null 2>&1 || brew install zig
+          if [ ! -d /tmp/zlib ]; then
+            curl -fsSL -o /tmp/zlib.tar.gz \
+              https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz
+            rm -rf /tmp/zlib
+            mkdir -p /tmp/zlib
+            tar -xzf /tmp/zlib.tar.gz -C /tmp/zlib --strip-components=1
+          fi
+          zig cc -target aarch64-linux-musl -O2 -static -I/tmp/zlib \
+            -o /tmp/gzstress \
+            Tools/gzstress.c \
+            /tmp/zlib/adler32.c /tmp/zlib/crc32.c /tmp/zlib/inflate.c \
+            /tmp/zlib/inftrees.c /tmp/zlib/inffast.c /tmp/zlib/zutil.c
+          file /tmp/gzstress
+          ls -l /tmp/gzstress
+
       - name: Package IPA
         run: |
           set -eux
@@ -177,6 +201,8 @@ jobs:
           cp "$GUEST" "$APP/Helpers/guest-runner"
           cp Tools/busybox.static "$APP/Helpers/busybox"
           cp Tools/pie-hello "$APP/Helpers/pie-hello"
+          test -f /tmp/gzstress
+          cp /tmp/gzstress "$APP/Helpers/gzstress"
           mkdir -p "$APP/Helpers/alpine/lib"
           cp /tmp/alpine-rootfs/lib/ld-musl-aarch64.so.1 \
              "$APP/Helpers/alpine/lib/ld-musl-aarch64.so.1"

@@ -261,6 +261,23 @@
                                            handler:^(__kindof UIAction *action) {
         [weakSelf runApkUpdateWatched];
     }];
+    /*
+     * gzstress: the same decode apk does, in a loop inside the guest.  One
+     * app run gives 200 samples instead of one, and nothing about it can
+     * disturb the measurement (no network, no apk, no watchpoint).
+     */
+    UIAction *stress200 = [UIAction actionWithTitle:@"gzstress x200 (churn)"
+                                              image:nil
+                                         identifier:nil
+                                            handler:^(__kindof UIAction *action) {
+        [weakSelf runGzStress:200 churn:YES];
+    }];
+    UIAction *stress50 = [UIAction actionWithTitle:@"gzstress x50 (no churn)"
+                                             image:nil
+                                        identifier:nil
+                                           handler:^(__kindof UIAction *action) {
+        [weakSelf runGzStress:50 churn:NO];
+    }];
 
     UIMenu *probeSection = [UIMenu menuWithTitle:@""
                                            image:nil
@@ -291,7 +308,8 @@
                                               options:0
                                              children:@[zlibStock, zlibSpy,
                                                         selfTest20, selfTest10,
-                                                        watchRun]];
+                                                        watchRun, stress200,
+                                                        stress50]];
 
     return [UIMenu menuWithTitle:@"Linux Probe"
                        children:@[probeSection, staticSection, alpineSection,
@@ -479,6 +497,10 @@
         [self setZlibVariant:@"zspy"];
     } else if ([action isEqualToString:@"watch"]) {
         [self runApkUpdateWatched];
+    } else if ([action isEqualToString:@"gzstress"]) {
+        [self runGzStress:200 churn:YES];
+    } else if ([action isEqualToString:@"gzstress50"]) {
+        [self runGzStress:50 churn:NO];
     } else {
         [self appendLog:@"remote command not recognised"];
     }
@@ -669,6 +691,43 @@
     }];
     if (![self.guestLauncher runGuestNamed:@"Helpers/alpine-apk"
                                  arguments:[self localUpdateArguments]]) {
+        [self endRun];
+    }
+}
+
+/*
+ * The same decode apk performs, in a loop inside the guest.  Nothing here can
+ * disturb the measurement: no network, no apk, and no hardware watchpoint.
+ * One line per iteration, one tally at the end -- 200 samples per app run
+ * instead of one, which is the difference between a guess and a statistic.
+ */
+- (void)runGzStress:(NSInteger)iterations churn:(BOOL)churn
+{
+    if (self.running) {
+        [self appendLog:@"another action is still running"];
+        return;
+    }
+    self.watchState = NO;
+    [self beginRunWithLabel:[NSString stringWithFormat:
+        @"gzstress %ld iterations (churn=%d)...",
+        (long)iterations, churn ? 1 : 0]];
+
+    NSMutableArray<NSString *> *arguments =
+        [NSMutableArray arrayWithObjects:
+            @"gzstress", @"both",
+            [NSString stringWithFormat:@"%ld", (long)iterations], nil];
+    if (churn) {
+        [arguments addObject:@"--churn"];
+    }
+
+    __weak typeof(self) weakSelf = self;
+    self.guestLauncher = [self launcherForLocalUpdateWithCompletion:^(int status) {
+        [weakSelf appendLogNow:[NSString stringWithFormat:
+            @"##### GZSTRESS EXIT status=%d", status]];
+        [weakSelf endRun];
+    }];
+    if (![self.guestLauncher runGuestNamed:@"Helpers/gzstress"
+                                 arguments:arguments]) {
         [self endRun];
     }
 }
