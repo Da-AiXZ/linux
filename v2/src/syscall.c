@@ -22,6 +22,7 @@
 #include "v2/patch.h"
 #include "v2/proc.h"
 #include "v2/sysnames.h"
+#include "v2/vmops.h"
 #include "v2/vspace.h"
 
 struct v2_proc *v2_current_process;
@@ -650,6 +651,14 @@ static long long sys_readlinkat(struct v2_cpu *cpu, struct v2_proc *proc)
     if (got < 0) {
         return errno == ENOENT ? -V2_ENOENT : -V2_EINVAL;
     }
+    /*
+     * readlinkat takes a buffer size and Linux truncates to it.  Writing the
+     * whole target regardless would push up to V2_PATH_MAX bytes past the
+     * caller's buffer, straight into whatever it had put there.
+     */
+    if ((uint64_t)got > cpu->x[3]) {
+        got = (ssize_t)cpu->x[3];
+    }
     if (v2_space_write(proc->space, (void *)(uintptr_t)cpu->x[2], target,
                        (size_t)got) != 0) {
         return -V2_EFAULT;
@@ -825,93 +834,6 @@ static long long sys_ignore(struct v2_cpu *cpu, struct v2_proc *proc)
     return 0;
 }
 
-static long long sys_brk(struct v2_cpu *cpu, struct v2_proc *proc)
-{
-    uint64_t requested = cpu->x[0];
-
-    if (requested == 0 || requested < proc->brk_base ||
-        requested > proc->brk_limit) {
-        return (long long)proc->brk_current;
-    }
-    proc->brk_current = requested;
-    return (long long)requested;
-}
-
-static long long sys_mmap(struct v2_cpu *cpu, struct v2_proc *proc)
-{
-    uint64_t address = cpu->x[0];
-    uint64_t length = cpu->x[1];
-    uint64_t prot = cpu->x[2];
-    uint64_t flags = cpu->x[3];
-    int fd = (int)(int64_t)cpu->x[4];
-    uint64_t offset = cpu->x[5];
-    long long result;
-
-    if ((flags & V2_MAP_ANON) == 0 && fd >= 0) {
-        fd = v2_proc_fd_get(proc, fd);
-        if (fd < 0) {
-            return -V2_EBADF;
-        }
-    } else {
-        fd = -1;
-    }
-    result = v2_space_map(proc->space, (void *)(uintptr_t)address,
-                          (size_t)length, (int)prot, (int)flags, fd,
-                          (long long)offset);
-    /*
-     * A library mapped by ld.so arrives with its syscalls still raw.  ld.so
-     * maps the whole library once with the first segment's protection, which
-     * for a shared object is the executable one, so "file-backed and
-     * executable" is exactly the set of pages that may contain `svc #0`.
-     * They are writable for the few microseconds it takes to rewrite them.
-     */
-    if (result > 0 && fd >= 0 && (prot & V2_PROT_EXEC) != 0 &&
-        proc->patcher != NULL) {
-        char patch_error[96] = "";
-        int before = proc->patcher->site_count;
-
-        if (v2_space_protect(proc->space, (void *)(uintptr_t)result,
-                             (size_t)length,
-                             V2_PROT_READ | V2_PROT_WRITE) != 0 ||
-            v2_patch_runtime(proc->patcher, (uint64_t)result, (size_t)length,
-                             patch_error, sizeof(patch_error)) != 0) {
-            fprintf(stderr, "[v2] runtime patch failed: %s\n", patch_error);
-        }
-        v2_space_protect(proc->space, (void *)(uintptr_t)result,
-                         (size_t)length, (int)prot);
-        fprintf(stderr,
-                "[v2] exec map %s at 0x%llx len=0x%llx prot=%llu sites=+%d\n",
-                proc->fd_path[(int)cpu->x[4]], (unsigned long long)result,
-                (unsigned long long)length, (unsigned long long)prot,
-                proc->patcher->site_count - before);
-    }
-    return result;
-}
-
-static long long sys_munmap(struct v2_cpu *cpu, struct v2_proc *proc)
-{
-    long long status = v2_space_unmap(proc->space,
-                                      (void *)(uintptr_t)cpu->x[0],
-                                      (size_t)cpu->x[1]);
-    return status < 0 ? (int)status : 0;
-}
-
-static long long sys_mprotect(struct v2_cpu *cpu, struct v2_proc *proc)
-{
-    long long status = v2_space_protect(proc->space,
-                                        (void *)(uintptr_t)cpu->x[0],
-                                        (size_t)cpu->x[1], (int)cpu->x[2]);
-    return status < 0 ? (int)status : 0;
-}
-
-static long long sys_madvise(struct v2_cpu *cpu, struct v2_proc *proc)
-{
-    long long status = v2_space_advise(proc->space,
-                                       (void *)(uintptr_t)cpu->x[0],
-                                       (size_t)cpu->x[1], (int)cpu->x[2]);
-    return status < 0 ? (int)status : 0;
-}
-
 static long long sys_uname(struct v2_cpu *cpu, struct v2_proc *proc)
 {
     char buffer[6 * 65];
@@ -1085,11 +1007,12 @@ static const struct v2_sysent table[320] = {
     [176] = {"getgid", sys_getuid},
     [177] = {"getegid", sys_getuid},
     [178] = {"gettid", sys_getpid},
-    [214] = {"brk", sys_brk},
-    [215] = {"munmap", sys_munmap},
-    [222] = {"mmap", sys_mmap},
-    [226] = {"mprotect", sys_mprotect},
-    [233] = {"madvise", sys_madvise},
+    [214] = {"brk", v2_vm_brk},
+    [215] = {"munmap", v2_vm_munmap},
+    [216] = {"mremap", v2_vm_mremap},
+    [222] = {"mmap", v2_vm_mmap},
+    [226] = {"mprotect", v2_vm_mprotect},
+    [233] = {"madvise", v2_vm_madvise},
     [261] = {"prlimit64", sys_prlimit64},
     [278] = {"getrandom", sys_getrandom},
 };

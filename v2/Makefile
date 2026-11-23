@@ -12,13 +12,14 @@ SANITIZE := -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-r
 SOURCES := src/vspace.c src/elf.c src/patch.c
 HEADERS := include/v2/vspace.h include/v2/elf.h include/v2/patch.h \
            include/v2/cpu.h include/v2/proc.h include/v2/stack.h \
-           include/v2/fsops.h include/v2/sysnames.h \
+           include/v2/fsops.h include/v2/vmops.h include/v2/sysnames.h \
            include/v2/host_darwin.h
 
 # The part that can execute guest code.  macOS on aarch64 only: the guest is
 # aarch64 Linux, so the host has to be the same instruction set.
 GUEST_SOURCES := src/vspace.c src/elf.c src/patch.c src/proc.c src/stack.c \
-                 src/syscall.c src/fsops.c src/sysnames.c src/entry_aarch64.c \
+                 src/syscall.c src/fsops.c src/vmops.c src/sysnames.c \
+                 src/entry_aarch64.c \
                  src/host_darwin.c src/runner.c
 
 all: $(BUILD)/test_vspace $(BUILD)/test_elf $(BUILD)/test_stack

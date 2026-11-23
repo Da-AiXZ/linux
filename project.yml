@@ -127,6 +127,7 @@ targets:
       - path: v2/src/stack.c
       - path: v2/src/syscall.c
       - path: v2/src/fsops.c
+      - path: v2/src/vmops.c
       - path: v2/src/sysnames.c
       - path: v2/src/entry_aarch64.c
       - path: v2/src/host_darwin.c
