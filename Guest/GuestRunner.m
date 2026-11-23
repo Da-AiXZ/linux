@@ -241,6 +241,7 @@ static uintptr_t GuestAllocateMmapAddress(size_t length,
 static BOOL GuestRangeOverlapsRuntime(uintptr_t address, size_t length);
 static void GuestRememberMmap(uintptr_t address, size_t length);
 static void GuestDumpMmapRecords(void);
+static void GuestLogRegion(const char *tag, uintptr_t address);
 static void GuestDescribeAddress(uintptr_t address,
                                  char *buffer,
                                  size_t size);
@@ -1044,6 +1045,20 @@ static void GuestTrapHandler(int signalNumber,
                  (unsigned long long)registers[20],
                  (unsigned long long)registers[21],
                  (unsigned long long)registers[22]);
+        {
+            char stateRecord[128];
+            char arrayRecord[128];
+            GuestDescribeAddress(GuestWatchAddress - 0x20,
+                                 stateRecord,
+                                 sizeof(stateRecord));
+            GuestDescribeAddress((uintptr_t)registers[19],
+                                 arrayRecord,
+                                 sizeof(arrayRecord));
+            GuestLog("[dbg] state record: %s\n", stateRecord);
+            GuestLog("[dbg] array record: %s\n", arrayRecord);
+            GuestLogRegion("state", GuestWatchAddress - 0x20);
+            GuestLogRegion("array", (uintptr_t)registers[19]);
+        }
         GuestLog("[dbg] foreign state at watch-0x20:"
                  " %016llx %016llx %016llx %016llx\n",
                  (unsigned long long)*(uint64_t *)(GuestWatchAddress - 0x20),
@@ -5980,6 +5995,26 @@ static void GuestVerifyMapping(uintptr_t address, size_t length,
 
 static void GuestRememberMmap(uintptr_t address, size_t length)
 {
+    {
+        uintptr_t end = address + length;
+        static unsigned overlaps = 0;
+        for (int index = 0; index < GuestMmapRecordCount && overlaps < 20;
+             index++) {
+            uintptr_t start = GuestMmapRecords[index].address;
+            uintptr_t stop = start + GuestMmapRecords[index].length;
+            if (address < stop && start < end) {
+                overlaps++;
+                GuestLog("[ovl-rec] 0x%lx..0x%lx overlaps"
+                         " 0x%lx..0x%lx (records=%d)\n",
+                         (unsigned long)address,
+                         (unsigned long)end,
+                         (unsigned long)start,
+                         (unsigned long)stop,
+                         GuestMmapRecordCount);
+                break;
+            }
+        }
+    }
     if (GuestMmapRecordCount >= GUEST_MMAP_RECORDS) {
         GuestLog("[guest] mmap records full, leaking 0x%lx..0x%lx\n",
                  (unsigned long)address,
@@ -6023,6 +6058,42 @@ static void GuestDescribeAddress(uintptr_t address,
     }
     snprintf(buffer, size, "no guest mapping (records=%d)",
              GuestMmapRecordCount);
+}
+
+/*
+ * The kernel's view of one address: region start, length and protection.
+ * A 64KB group, a 16KB guard and a merged run of mappings all look the same
+ * from the guest pointer, so this is the only way to tell whether two live
+ * allocations really share pages.
+ */
+static void GuestLogRegion(const char *tag, uintptr_t address)
+{
+    vm_address_t region = (vm_address_t)address;
+    vm_size_t size = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t object = MACH_PORT_NULL;
+    memset(&info, 0, sizeof(info));
+    kern_return_t result = vm_region_64(mach_task_self(),
+                                        &region,
+                                        &size,
+                                        VM_REGION_BASIC_INFO_64,
+                                        (vm_region_info_t)&info,
+                                        &count,
+                                        &object);
+    if (object != MACH_PORT_NULL) {
+        mach_port_deallocate(mach_task_self(), object);
+    }
+    if (result != KERN_SUCCESS) {
+        GuestLog("[dbg] %s region: none (kr=%d)\n", tag, (int)result);
+        return;
+    }
+    GuestLog("[dbg] %s region: 0x%lx..0x%lx prot=%d/%d\n",
+             tag,
+             (unsigned long)region,
+             (unsigned long)(region + size),
+             info.protection,
+             info.max_protection);
 }
 
 static void GuestForgetMmap(uintptr_t address, size_t length)
