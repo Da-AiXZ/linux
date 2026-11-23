@@ -1016,11 +1016,19 @@ static void GuestTrapHandler(int signalNumber,
      */
     if (GuestWatchLegitPc == 0) {
         GuestWatchLegitPc = pc;
-        GuestLog("[dbg] watch hit #1 (baseline site) pc=0x%llx lr=0x%llx"
+        GuestLog("[dbg] watch hit #%u (first) pc=0x%llx lr=0x%llx"
                  " esr=0x%x in %s\n",
+                 GuestWatchHits,
                  (unsigned long long)pc,
                  (unsigned long long)lr,
                  (unsigned)esr,
+                 where);
+    } else if (GuestWatchHits <= 3) {
+        GuestLog("[dbg] watch hit #%u (%s) pc=0x%llx lr=0x%llx in %s\n",
+                 GuestWatchHits,
+                 pc == GuestWatchLegitPc ? "same site" : "OTHER SITE",
+                 (unsigned long long)pc,
+                 (unsigned long long)lr,
                  where);
     } else if (pc == GuestWatchLegitPc) {
         /* The expected UPDATE_CHECK store; stay quiet. */
@@ -1068,7 +1076,7 @@ static void GuestTrapHandler(int signalNumber,
                  (unsigned long long)*(uint64_t *)(GuestWatchAddress - 0x08));
     }
 
-    if (GuestWatchHits > 8 || GuestWatchForeign > 8) {
+    if (GuestWatchHits > 3000 || GuestWatchForeign > 8) {
         GuestWatchArmed = 0;
         GuestSetDebugWatch(0, 0, 0);
         GuestLog("[dbg] watch stopped hits=%u foreign=%u\n",
@@ -1077,21 +1085,21 @@ static void GuestTrapHandler(int signalNumber,
         return;
     }
 
-    int result = GuestSetDebugWatch((uint64_t)GuestWatchAddress, 0, 1);
-    if (result != 0) {
-        static int reported = 0;
-        GuestWatchArmed = 0;
-        GuestSetDebugWatch(0, 0, 0);
-        if (reported < 1) {
-            reported = 1;
-            GuestLog("[dbg] watch cannot single-step kr=%d, disabled"
-                     " (signal=%d)\n",
-                     result,
-                     signalNumber);
-        }
-        return;
+    /*
+     * 0.41.7: skip the trapping instruction instead of single-stepping.
+     *
+     * Writing MDSCR_EL1.SS from inside the trap is ignored (kr=-5), so the
+     * handler cannot let the store through and re-arm.  Advancing pc by one
+     * instruction has the same effect for our purpose: the watchpoint stays
+     * enabled, the store is skipped, and the next write to the same address
+     * traps again.  zlib's own check update is therefore lost -- every
+     * watched run fails its CRC on purpose -- but a foreign writer still
+     * shows up with its pc, which is the only thing we are after.
+     */
+    if (state != NULL && state->uc_mcontext != NULL) {
+        state->uc_mcontext->__ss.__pc += 4;
     }
-    GuestWatchStepping = 1;
+    (void)signalNumber;
 }
 
 static void GuestArmWatchpoint(uintptr_t address)
@@ -1167,6 +1175,7 @@ static void GuestScanForInflateState(const char *text, size_t length)
      */
     unsigned streams = 0;
     int haveStreams = 0;
+    (void)haveStreams;
     const char *streamKey = "streams=";
     for (at = offset; at + 8 <= length && at < offset + 64; at++) {
         if (memcmp(text + at, streamKey, 8) != 0) {
@@ -1197,12 +1206,7 @@ static void GuestScanForInflateState(const char *text, size_t length)
      * the watch was off exactly when the index streams (5 and 6) ran.  The
      * failure always happens on the community index, which is the last pair.
      */
-    if (haveStreams && streams < 5) {
-        GuestLog("[dbg] watch skip stream=%u (early member)\n", streams);
-        return;
-    }
-    if (haveStreams && (streams % 2) != 0) {
-        GuestLog("[dbg] watch skip stream=%u (signature member)\n", streams);
+    if (haveStreams && streams < 1) {
         return;
     }
 
