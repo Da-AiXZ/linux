@@ -1000,6 +1000,65 @@ static int GuestSetDebugWatch(uint64_t address, int enable, int step)
 #define GUEST_EC_STEP 0x32
 #define GUEST_EC_WATCH 0x33
 
+/*
+ * 0.41.10: perform the store the watchpoint trapped on, instead of skipping it.
+ *
+ * Skipping kept the watch armed but dropped zlib's check update, so apk threw
+ * the stream away before the interesting part.  Re-issuing the store keeps the
+ * guest's state exact, which means a watched run behaves like a normal one and
+ * a foreign writer can be caught without disturbing anything.
+ *
+ * Only the single-register unsigned-offset forms and the 64-bit STP pair are
+ * decoded; anything else is skipped (and reported), because writing the wrong
+ * thing would be worse than losing one update.
+ */
+static int GuestEmulateStore(uint64_t pc, uint64_t *registers, int *widthOut)
+{
+    uint32_t instruction = *(uint32_t *)(uintptr_t)pc;
+    uint32_t base = instruction & 0xFFC00000u;
+    int is64 = 0;
+    int width = 0;
+
+    if ((instruction & 0xFFC00000u) == 0xF9000000u) {      /* STR  Xt */
+        is64 = 1; width = 8;
+    } else if ((instruction & 0xFFC00000u) == 0xB9000000u) { /* STR  Wt */
+        width = 4;
+    } else if ((instruction & 0xFFC00000u) == 0x39000000u) { /* STRB Wt */
+        width = 1;
+    } else if ((instruction & 0xFFC00000u) == 0x79000000u) { /* STRH Wt */
+        width = 2;
+    } else if ((instruction & 0xFF800000u) == 0xA9000000u) { /* STP  Xt,Xt2 */
+        unsigned rt = instruction & 0x1F;
+        unsigned rt2 = (instruction >> 10) & 0x1F;
+        unsigned rn = (instruction >> 5) & 0x1F;
+        unsigned imm = (instruction >> 15) & 0x7F;
+        uintptr_t address = (uintptr_t)registers[rn] + (uintptr_t)(imm * 8);
+        *(uint64_t *)address = registers[rt];
+        *(uint64_t *)(address + 8) = registers[rt2];
+        *widthOut = 16;
+        return 1;
+    } else {
+        return 0;
+    }
+    (void)base;
+
+    unsigned rt = instruction & 0x1F;
+    unsigned rn = (instruction >> 5) & 0x1F;
+    unsigned imm = (instruction >> 10) & 0xFFF;
+    uintptr_t address = (uintptr_t)registers[rn] + imm;
+    if (is64) {
+        *(uint64_t *)address = registers[rt];
+    } else if (width == 4) {
+        *(uint32_t *)address = (uint32_t)registers[rt];
+    } else if (width == 2) {
+        *(uint16_t *)address = (uint16_t)registers[rt];
+    } else {
+        *(uint8_t *)address = (uint8_t)registers[rt];
+    }
+    *widthOut = width;
+    return 1;
+}
+
 static void GuestTrapHandler(int signalNumber,
                              siginfo_t *information,
                              void *context)
@@ -1072,7 +1131,21 @@ static void GuestTrapHandler(int signalNumber,
                  where);
     }
     if (insideCode) {
-        /* zlib's own store; skip it and keep watching. */
+        /*
+         * Re-issue zlib's own store so the stream keeps its exact state, then
+         * step over the instruction.  If the form is not recognised, fall back
+         * to skipping and say so once.
+         */
+        int width = 0;
+        if (!GuestEmulateStore(pc, registers, &width)) {
+            static int unsupported = 0;
+            if (unsupported < 3) {
+                unsupported++;
+                GuestLog("[dbg] emu unsupported insn 0x%08x at 0x%llx\n",
+                         *(uint32_t *)(uintptr_t)pc,
+                         (unsigned long long)pc);
+            }
+        }
     } else {
         GuestWatchForeign++;
         GuestLog("[dbg] FOREIGN write #%u pc=0x%llx lr=0x%llx far=0x%llx"
