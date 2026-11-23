@@ -257,6 +257,8 @@ int main(void)
         int seen_entry = 0;
         int seen_execfn = 0;
         int seen_random = 0;
+        int seen_phent = 0;
+        int seen_phnum = 0;
         int seen_null = 0;
 
         for (int index = 0; index < 16; index++) {
@@ -282,11 +284,20 @@ int main(void)
             } else if (key == 25) {
                 CHECK(value != 0);
                 seen_random = 1;
+            } else if (key == 4) {
+                /* AT_PHENT.  Its tag is 4, not 11: 10 and 11 are not even
+                 * phdr-related, and getting this wrong makes musl compute a
+                 * load address of zero and die before main. */
+                CHECK(value == aux.phent);
+                seen_phent = 1;
+            } else if (key == 5) {
+                CHECK(value == aux.phnum);   /* AT_PHNUM */
+                seen_phnum = 1;
             }
             cursor += 16;
         }
         CHECK(seen_pagesz && seen_phdr && seen_entry && seen_execfn &&
-              seen_random && seen_null);
+              seen_random && seen_phent && seen_phnum && seen_null);
     }
 
     /* The whole block must live inside the stack mapping. */

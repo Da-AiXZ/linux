@@ -123,12 +123,12 @@ uint64_t v2_stack_build(v2_space *space, uint64_t top, int argc,
     }
     pairs++;
     if (push_u64(space, &cursor, aux->phent) != 0 ||
-        push_u64(space, &cursor, 11 /* AT_PHENT */) != 0) {
+        push_u64(space, &cursor, 4 /* AT_PHENT */) != 0) {
         return 0;
     }
     pairs++;
     if (push_u64(space, &cursor, aux->phnum) != 0 ||
-        push_u64(space, &cursor, 10 /* AT_PHNUM */) != 0) {
+        push_u64(space, &cursor, 5 /* AT_PHNUM */) != 0) {
         return 0;
     }
     pairs++;
