@@ -1033,8 +1033,8 @@ static int GuestEmulateStore(uint64_t pc, uint64_t *registers, int *widthOut)
         unsigned rn = (instruction >> 5) & 0x1F;
         unsigned imm = (instruction >> 15) & 0x7F;
         uintptr_t address = (uintptr_t)registers[rn] + (uintptr_t)(imm * 8);
-        *(uint64_t *)address = registers[rt];
-        *(uint64_t *)(address + 8) = registers[rt2];
+        *(uint64_t *)address = rt == 31 ? 0 : registers[rt];
+        *(uint64_t *)(address + 8) = rt2 == 31 ? 0 : registers[rt2];
         *widthOut = 16;
         return 1;
     } else {
@@ -1044,16 +1044,23 @@ static int GuestEmulateStore(uint64_t pc, uint64_t *registers, int *widthOut)
 
     unsigned rt = instruction & 0x1F;
     unsigned rn = (instruction >> 5) & 0x1F;
-    unsigned imm = (instruction >> 10) & 0xFFF;
+    /*
+     * 0.41.12: the 12-bit immediate is SCALED by the access size.  Reading it
+     * raw put `str x0,[x28,#0x20]` at state+4 instead of state+0x20, which
+     * overwrote last/wrap/havedict/flags and killed all eight 0.41.10 runs at
+     * their first hit (guest exited: status=70).
+     */
+    unsigned imm = ((instruction >> 10) & 0xFFF) * (unsigned)width;
+    uint64_t value = rt == 31 ? 0 : registers[rt];
     uintptr_t address = (uintptr_t)registers[rn] + imm;
     if (is64) {
-        *(uint64_t *)address = registers[rt];
+        *(uint64_t *)address = value;
     } else if (width == 4) {
-        *(uint32_t *)address = (uint32_t)registers[rt];
+        *(uint32_t *)address = (uint32_t)value;
     } else if (width == 2) {
-        *(uint16_t *)address = (uint16_t)registers[rt];
+        *(uint16_t *)address = (uint16_t)value;
     } else {
-        *(uint8_t *)address = (uint8_t)registers[rt];
+        *(uint8_t *)address = (uint8_t)value;
     }
     *widthOut = width;
     return 1;
@@ -1088,12 +1095,21 @@ static void GuestTrapHandler(int signalNumber,
     GuestWatchHits++;
     char where[128];
     GuestDescribeAddress((uintptr_t)pc, where, sizeof(where));
-    uint64_t registers[23];
+    /*
+     * 0.41.11: all 32 register slots.  A store's base can be SP (rn=31) and
+     * its source can be XZR (rt=31); reading those out of a 23-entry array
+     * produced a wild write and killed the guest right after the first hit
+     * (eight runs exited with status 70 and never printed another line).
+     */
+    uint64_t registers[32];
     memset(registers, 0, sizeof(registers));
     if (state != NULL && state->uc_mcontext != NULL) {
-        for (int index = 0; index < 23; index++) {
+        for (int index = 0; index < 29; index++) {
             registers[index] = (uint64_t)state->uc_mcontext->__ss.__x[index];
         }
+        registers[29] = (uint64_t)state->uc_mcontext->__ss.__x[29];
+        registers[30] = (uint64_t)state->uc_mcontext->__ss.__x[30];
+        registers[31] = (uint64_t)state->uc_mcontext->__ss.__sp;
     }
     /*
      * A foreign store is the whole point of this build, so print the
