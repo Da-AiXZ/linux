@@ -86,6 +86,13 @@ struct v2_host {
     int (*copy)(void *ctx, void *destination, const void *source,
                 size_t length);
 
+    /* Copy host memory into a guest range (ELF segments, stack, argv). */
+    int (*write)(void *ctx, void *destination, const void *source,
+                 size_t length);
+
+    /* Make freshly written code visible to the instruction fetch unit. */
+    void (*flush_icache)(void *ctx, void *address, size_t length);
+
     /*
      * Metadata allocation.  Deliberately separate from the C heap: the page
      * array must never share an arena with anything the guest can reach.
@@ -109,6 +116,20 @@ void *v2_space_base(const v2_space *space);
 size_t v2_space_length(const v2_space *space);
 size_t v2_space_page_size(const v2_space *space);
 size_t v2_space_page_count(const v2_space *space);
+size_t v2_space_island_stride(const v2_space *space);
+size_t v2_space_island_size(const v2_space *space);
+
+/* The host operations this space was built with.  Loaders need read_at and
+ * write; keeping the struct opaque and exposing one const pointer is less
+ * error prone than handing out the whole space. */
+const struct v2_host *v2_space_host(const v2_space *space);
+
+/*
+ * Take ownership of a range that was reserved at creation (a trampoline
+ * island).  Refuses anything that is not entirely RESERVED, so a stale
+ * address cannot silently become writable.
+ */
+long long v2_space_claim(v2_space *space, void *addr, size_t length, int prot);
 
 /* All return an address, 0, or a negative errno. */
 long long v2_space_map(v2_space *space, void *hint, size_t length, int prot,

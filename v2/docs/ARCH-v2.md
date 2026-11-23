@@ -287,9 +287,11 @@ v2/
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| **G1** | 地址空间 + 模型对拍 + CI | 已提交（本次） |
-| **G2** | 装载器 + 补丁 + 跳板 + 最小 syscall（write/exit/mmap/brk/open/read） | 下一步 |
-| **G3** | 静态 busybox 六条命令（桌面 arm64 先绿，再上真机） | |
+| **G1** | 地址空间 + 模型对拍 + CI | ✅ 2026-11-23 |
+| **G2a** | ELF 解析/装载 + 站点扫描 + per-site stub + 段权限归并 | ✅ 2026-11-23（合成 ELF，93 条断言；stub 机器码与汇编器逐字相同） |
+| **G2b** | 最小 syscall（write/exit/mmap/brk/open/read/close）+ 栈与 auxv | 下一步 |
+| **G2c** | 第一个真程序：`pie-hello`（静态 PIE） | |
+| **G3** | 静态 busybox 六条命令（桌面先绿，再上真机） | |
 | **G4** | PT_INTERP + musl `ld.so` + `apk --version` | |
 | **G5** | rootfs + `apk add` 本地 + `apk update` 本地 index ×200 | |
 | **G6** | socket/TLS + 网络 `apk update` + `apk add bash` + `bash` | |

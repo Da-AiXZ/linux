@@ -24,6 +24,7 @@ struct v2_space {
     size_t page_size;
     size_t page_count;
     size_t island_size;    /* bytes, at offset 0 of every stride */
+    size_t island_stride;
     size_t alloc_start;    /* first page that may be handed out */
     size_t cursor;         /* next-fit hint, in pages */
     uint8_t *pages;
@@ -145,6 +146,7 @@ int v2_space_create(v2_space **out, const struct v2_host *host,
     space->page_size = page_size;
     space->page_count = pages;
     space->island_size = island_size;
+    space->island_stride = island_stride;
 
     if (host->reserve(host->ctx, space->length, &base) != 0 ||
         base == NULL) {
@@ -203,6 +205,44 @@ void *v2_space_base(const v2_space *space) { return space->base; }
 size_t v2_space_length(const v2_space *space) { return space->length; }
 size_t v2_space_page_size(const v2_space *space) { return space->page_size; }
 size_t v2_space_page_count(const v2_space *space) { return space->page_count; }
+size_t v2_space_island_stride(const v2_space *space)
+{
+    return space->island_stride;
+}
+size_t v2_space_island_size(const v2_space *space) { return space->island_size; }
+
+const struct v2_host *v2_space_host(const v2_space *space)
+{
+    return &space->host;
+}
+
+long long v2_space_claim(v2_space *space, void *addr, size_t length, int prot)
+{
+    size_t first;
+    size_t count;
+
+    if (space == NULL || length == 0 || !v2_is_aligned(space, addr)) {
+        return -V2_EINVAL;
+    }
+    if ((uintptr_t)addr < (uintptr_t)space->base) {
+        return -V2_EINVAL;
+    }
+    first = (size_t)(((uintptr_t)addr - (uintptr_t)space->base) /
+                     space->page_size);
+    count = v2_pages_for(length, space->page_size);
+    if (first >= space->page_count || count > space->page_count - first) {
+        return -V2_EINVAL;
+    }
+    for (size_t page = first; page < first + count; page++) {
+        if (space->pages[page] != V2_PAGE_RESERVED) {
+            return -V2_EINVAL;
+        }
+    }
+    if (v2_commit(space, first, count, prot) != 0) {
+        return -V2_ENOMEM;
+    }
+    return (long long)(uintptr_t)(space->base + first * space->page_size);
+}
 
 long long v2_space_map(v2_space *space, void *hint, size_t length, int prot,
                        int flags, int fd, long long offset)
