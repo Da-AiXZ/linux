@@ -851,6 +851,27 @@ static long long sys_mmap(struct v2_cpu *cpu, struct v2_proc *proc)
     result = v2_space_map(proc->space, (void *)(uintptr_t)address,
                           (size_t)length, (int)prot, (int)flags, fd,
                           (long long)offset);
+    /*
+     * A library mapped by ld.so arrives with its syscalls still raw.  ld.so
+     * maps the whole library once with the first segment's protection, which
+     * for a shared object is the executable one, so "file-backed and
+     * executable" is exactly the set of pages that may contain `svc #0`.
+     * They are writable for the few microseconds it takes to rewrite them.
+     */
+    if (result > 0 && fd >= 0 && (prot & V2_PROT_EXEC) != 0 &&
+        proc->patcher != NULL) {
+        char patch_error[96] = "";
+
+        if (v2_space_protect(proc->space, (void *)(uintptr_t)result,
+                             (size_t)length,
+                             V2_PROT_READ | V2_PROT_WRITE) != 0 ||
+            v2_patch_runtime(proc->patcher, (uint64_t)result, (size_t)length,
+                             patch_error, sizeof(patch_error)) != 0) {
+            fprintf(stderr, "[v2] runtime patch failed: %s\n", patch_error);
+        }
+        v2_space_protect(proc->space, (void *)(uintptr_t)result,
+                         (size_t)length, (int)prot);
+    }
     return result;
 }
 

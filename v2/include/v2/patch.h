@@ -64,6 +64,7 @@ struct v2_patcher {
 
     int site_count;
     int overflow;
+    int sealed;
     unsigned counts[4];
     struct v2_patch_site sites[V2_PATCH_MAX_SITES];
 };
@@ -81,6 +82,17 @@ int v2_patch_buffer(struct v2_patcher *patcher, uint64_t site_base,
 
 /* Islands go back to read-execute once every image is loaded. */
 int v2_patch_seal(struct v2_patcher *patcher, char *error, size_t error_size);
+
+/*
+ * Patch a range that appeared *after* startup.
+ *
+ * A static program carries its own syscalls, so v2_elf_load sees every site.
+ * A dynamically linked one does not: ld.so maps libc itself, through our
+ * mmap, and libc's text arrives with raw `svc #0` in it.  This is the hook
+ * that rewrites those pages while they are briefly writable.
+ */
+int v2_patch_runtime(struct v2_patcher *patcher, uint64_t address,
+                     size_t length, char *error, size_t error_size);
 
 const struct v2_patch_site *v2_patch_find(const struct v2_patcher *patcher,
                                           uint64_t site);

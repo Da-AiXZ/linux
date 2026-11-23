@@ -16,6 +16,7 @@
  */
 #include "v2/patch.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 static void v2_patch_error(char *buffer, size_t size, const char *text)
@@ -222,6 +223,83 @@ int v2_patch_buffer(struct v2_patcher *patcher, uint64_t site_base,
     return 0;
 }
 
+static int set_islands(struct v2_patcher *patcher, int prot, char *error,
+                       size_t error_size)
+{
+    for (int index = 0; index < patcher->island_count; index++) {
+        if (!patcher->islands[index].claimed ||
+            patcher->islands[index].used == 0) {
+            continue;
+        }
+        if (v2_space_protect(patcher->space,
+                             (void *)(uintptr_t)patcher->islands[index].address,
+                             patcher->island_size, prot) != 0) {
+            v2_patch_error(error, error_size,
+                           prot == V2_PROT_READ
+                               ? "cannot reopen a trampoline island"
+                               : "cannot seal a trampoline island");
+            return -V2_ENOMEM;
+        }
+    }
+    return 0;
+}
+
+int v2_patch_runtime(struct v2_patcher *patcher, uint64_t address,
+                     size_t length, char *error, size_t error_size)
+{
+    const struct v2_host *host = v2_space_host(patcher->space);
+    uint8_t *buffer;
+    int was_sealed;
+    int status;
+
+    if (length == 0) {
+        return 0;
+    }
+    was_sealed = patcher->sealed;
+    if (was_sealed) {
+        status = set_islands(patcher, V2_PROT_READ | V2_PROT_WRITE, error,
+                             error_size);
+        if (status != 0) {
+            return status;
+        }
+        patcher->sealed = 0;
+    }
+
+    buffer = (uint8_t *)malloc(length);
+    if (buffer == NULL) {
+        v2_patch_error(error, error_size, "out of memory");
+        status = -V2_ENOMEM;
+        goto reseal;
+    }
+    if (v2_space_read(patcher->space, buffer,
+                      (const void *)(uintptr_t)address, length) != 0) {
+        v2_patch_error(error, error_size, "cannot read the new image");
+        status = -V2_EFAULT;
+        goto done;
+    }
+    status = v2_patch_buffer(patcher, address, buffer, length, error,
+                             error_size);
+    if (status == 0 &&
+        v2_space_write(patcher->space, (void *)(uintptr_t)address, buffer,
+                       length) != 0) {
+        v2_patch_error(error, error_size, "cannot write the patched image");
+        status = -V2_EFAULT;
+    }
+    host->flush_icache(host->ctx, (void *)(uintptr_t)address, length);
+done:
+    free(buffer);
+reseal:
+    if (was_sealed) {
+        char ignored[8];
+
+        if (v2_patch_seal(patcher, ignored, sizeof(ignored)) != 0) {
+            v2_patch_error(error, error_size, "cannot re-seal the islands");
+            return -V2_ENOMEM;
+        }
+    }
+    return status;
+}
+
 int v2_patch_seal(struct v2_patcher *patcher, char *error, size_t error_size)
 {
     const struct v2_host *host = v2_space_host(patcher->space);
@@ -243,6 +321,7 @@ int v2_patch_seal(struct v2_patcher *patcher, char *error, size_t error_size)
         host->flush_icache(host->ctx, (void *)(uintptr_t)address,
                            patcher->island_size);
     }
+    patcher->sealed = 1;
     return 0;
 }
 

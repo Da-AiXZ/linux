@@ -291,11 +291,10 @@ int main(int argc, char **argv)
         die("load", error);
     }
     free(file);
+    jump_entry = load.entry;   /* the interpreter replaces this below */
     fprintf(stderr, "[v2] load base=0x%llx entry=0x%llx span=0x%llx\n",
            (unsigned long long)load.base, (unsigned long long)load.entry,
            (unsigned long long)load.span);
-    fprintf(stderr, "[v2] patch svc=%u mrs=%u msr=%u\n", patcher.counts[V2_PATCH_SVC],
-           patcher.counts[V2_PATCH_MRS], patcher.counts[V2_PATCH_MSR]);
 
     /*
      * A dynamically linked program names its interpreter in PT_INTERP.  The
@@ -354,6 +353,10 @@ int main(int argc, char **argv)
     if (status != 0) {
         die("protect", error);
     }
+    fprintf(stderr, "[v2] patch svc=%u mrs=%u msr=%u\n",
+           patcher.counts[V2_PATCH_SVC], patcher.counts[V2_PATCH_MRS],
+           patcher.counts[V2_PATCH_MSR]);
+
     status = v2_patch_seal(&patcher, error, sizeof(error));
     if (status != 0) {
         die("seal", error);
@@ -388,8 +391,6 @@ int main(int argc, char **argv)
     guest_envp[0] = "PATH=/";
     guest_envp[1] = "HOME=/";
     guest_envp[2] = NULL;
-
-    jump_entry = load.entry;   /* overwritten above when ld.so is in charge */
 
     memset(&aux, 0, sizeof(aux));
     aux.phdr = proc.image_phdr;
@@ -431,7 +432,8 @@ int main(int argc, char **argv)
     space_base = (uint64_t)(uintptr_t)v2_space_base(space);
     space_end = space_base + v2_space_length(space);
 
-    fprintf(stderr, "[v2] enter\n");
+    fprintf(stderr, "[v2] enter pc=0x%llx at_base=0x%llx\n",
+            (unsigned long long)cpu.pc, (unsigned long long)aux.base);
     fflush(stdout);
     v2_guest_enter(cpu.pc, cpu.sp);
     return 0;
