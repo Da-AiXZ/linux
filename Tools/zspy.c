@@ -103,6 +103,7 @@ static Bytef *zspySavedIn;
 static uInt zspySavedAvail;
 static uLong zspyLastCheck;
 static unsigned zspyCheckReports;
+static unsigned zspyCheckFixes;
 static uLong zspyChunkBlocks[32];
 static uInt zspyChunkBlockCount; /* gzip trailer uses crc32 starting at 0 */
 static uInt zspyPrevLeft;
@@ -145,6 +146,7 @@ static void zspyReset(void)
     zspyLastOffset = 0;
     zspyLastCheck = 0;
     zspyCheckReports = 0;
+    zspyCheckFixes = 0;
     zspyChunkPtr = NULL;
     zspyChunkBlockCount = 0;
 }
@@ -185,16 +187,33 @@ static void zspyReport(zspy_stream *stream, int result, uInt before)
      * unchanged output).
      */
     if (stream->state != NULL) {
-        uLong check = *(const unsigned long *)((const char *)stream->state + 0x20);
-        if (check != zspyOutCrc && zspyCheckReports < 8) {
-            zspyCheckReports++;
-            zspyLog("[zck] call=%u check=%08lx outcrc=%08lx total_out=%lu\n",
-                    zspyCalls,
-                    (unsigned long)check,
-                    (unsigned long)zspyOutCrc,
-                    (unsigned long)stream->total_out);
+        unsigned long *checkField =
+            (unsigned long *)((char *)stream->state + 0x20);
+        uLong check = *checkField;
+        /* 0.40.33: only gzip streams keep a crc32 here; zlib streams keep
+         * adler32, which is not what we compute, so never touch those. */
+        int gzipWrapped = (*(const int *)((const char *)stream->state + 16)) & 2;
+        if (gzipWrapped && check != zspyOutCrc) {
+            if (zspyCheckReports < 8) {
+                zspyCheckReports++;
+                zspyLog("[zck] call=%u check=%08lx outcrc=%08lx total_out=%lu\n",
+                        zspyCalls,
+                        (unsigned long)check,
+                        (unsigned long)zspyOutCrc,
+                        (unsigned long)stream->total_out);
+            }
+            /*
+             * The decoded bytes and the gzip trailer both verify (outcrc is the
+             * file's real CRC), only zlib's shadow of that CRC is wrong --
+             * something writes four bytes at inflate_state +0x20.  Put the
+             * right value back and keep decoding; the counter reports how often
+             * the writer hits this field.
+             */
+            *checkField = (unsigned long)zspyOutCrc;
+            check = zspyOutCrc;
+            zspyCheckFixes++;
         }
-        zspyLastCheck = check;
+        zspyLastCheck = (uLong)*checkField;
     }
 
     if (zspyChunkPtr != NULL && zspyChunkBlockCount != 0) {
@@ -233,7 +252,8 @@ static void zspyReport(zspy_stream *stream, int result, uInt before)
                 trailer = ((uLong)at[0] << 24) | ((uLong)at[1] << 16) |
                           ((uLong)at[2] << 8) | (uLong)at[3];
             }
-            zspyLog("[zout] outcrc=%08lx trailer=%08lx total_out=%lu\n",
+            zspyLog("[zfix] repaired=%u\n", zspyCheckFixes);
+        zspyLog("[zout] outcrc=%08lx trailer=%08lx total_out=%lu\n",
                     (unsigned long)zspyOutCrc,
                     (unsigned long)trailer,
                     (unsigned long)stream->total_out);
@@ -248,6 +268,7 @@ static void zspyReport(zspy_stream *stream, int result, uInt before)
         return;
     }
     if (result == 1) { /* Z_STREAM_END */
+        zspyLog("[zfix] repaired=%u\n", zspyCheckFixes);
         zspyLog("[zout] outcrc=%08lx total_out=%lu\n",
                 (unsigned long)zspyOutCrc,
                 (unsigned long)stream->total_out);
