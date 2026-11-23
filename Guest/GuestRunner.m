@@ -7,6 +7,7 @@
 #import <fcntl.h>
 #import <limits.h>
 #import <mach/mach.h>
+#import <mach/arm/thread_status.h>
 #import <mach/task_info.h>
 #import <mach/thread_info.h>
 #import <mach/thread_act.h>
@@ -873,6 +874,156 @@ static BOOL GuestEnableJIT(void)
 #endif
 }
 
+/* ------------------------------------------------ hardware watchpoint (dbg) */
+
+/*
+ * A data watchpoint on inflate_state.check.
+ *
+ * Twenty builds of printf inside libz answered "the accumulator is wrong"
+ * but not "who wrote it": the store happens while inflate() runs, and the
+ * only code running there is zlib itself.  A hardware watchpoint turns that
+ * into a fault with the writer's pc in it -- one run instead of twenty.
+ *
+ * Armed from the "[zspy] init2 ... state=0x..." line, because only the
+ * instrumented libz knows the address.  The store lands at state + 0x20
+ * (offsetof(struct inflate_state, check) on LP64).
+ */
+static volatile int GuestWatchArmed = 0;
+static int GuestWatchEnabled = 0;
+static uintptr_t GuestWatchAddress = 0;
+
+static int GuestSetDebugWatch(uint64_t address, int enable)
+{
+    arm_debug_state64_t state;
+    mach_msg_type_number_t count = ARM_DEBUG_STATE64_COUNT;
+    memset(&state, 0, sizeof(state));
+    kern_return_t result = thread_get_state(mach_thread_self(),
+                                            ARM_DEBUG_STATE64,
+                                            (thread_state_t)&state,
+                                            &count);
+    if (result != KERN_SUCCESS) {
+        return (int)result;
+    }
+    state.__wvr[0] = address;
+    /* DBGWCR_EL1: E=1, LSC=2 (store), BAS=0xff (8 bytes), MASK=0. */
+    state.__wcr[0] = enable
+        ? ((1ULL << 0) | (2ULL << 3) | (0xFFULL << 5))
+        : 0;
+    count = ARM_DEBUG_STATE64_COUNT;
+    result = thread_set_state(mach_thread_self(),
+                              ARM_DEBUG_STATE64,
+                              (thread_state_t)&state,
+                              count);
+    return (int)result;
+}
+
+static void GuestTrapHandler(int signalNumber,
+                             siginfo_t *information,
+                             void *context)
+{
+    (void)information;
+    ucontext_t *state = (ucontext_t *)context;
+    uint64_t pc = 0;
+    uint64_t lr = 0;
+    uint64_t far = 0;
+    uint32_t esr = 0;
+    if (state != NULL && state->uc_mcontext != NULL) {
+        pc = (uint64_t)state->uc_mcontext->__ss.__pc;
+        lr = (uint64_t)state->uc_mcontext->__ss.__lr;
+        far = (uint64_t)state->uc_mcontext->__es.__far;
+        esr = (uint32_t)state->uc_mcontext->__es.__esr;
+    }
+    char where[128];
+    GuestDescribeAddress((uintptr_t)pc, where, sizeof(where));
+    GuestLog("[dbg] watchpoint hit signal=%d pc=0x%llx lr=0x%llx"
+             " far=0x%llx esr=0x%x watch=0x%lx pc in %s\n",
+             signalNumber,
+             (unsigned long long)pc,
+             (unsigned long long)lr,
+             (unsigned long long)far,
+             (unsigned)esr,
+             (unsigned long)GuestWatchAddress,
+             where);
+    GuestSetDebugWatch(0, 0);
+    GuestWatchArmed = 0;
+}
+
+static void GuestArmWatchpoint(uintptr_t address)
+{
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_sigaction = GuestTrapHandler;
+    action.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigemptyset(&action.sa_mask);
+    sigaction(SIGTRAP, &action, NULL);
+
+    int result = GuestSetDebugWatch((uint64_t)address, 1);
+    GuestWatchAddress = address;
+    GuestWatchArmed = (result == 0);
+    GuestLog("[dbg] watchpoint addr=0x%lx kr=%d armed=%d\n",
+             (unsigned long)address,
+             result,
+             GuestWatchArmed);
+}
+
+/*
+ * Look for "[zspy] init2 ... state=0x..." in a write(2) from the guest.  The
+ * buffer is not NUL terminated, so scan with an explicit bound.
+ */
+static void GuestScanForInflateState(const char *text, size_t length)
+{
+    static int attempted = 0;
+    if (attempted || !GuestWatchEnabled || text == NULL || length < 24) {
+        return;
+    }
+    const char *magic = "[zspy] init2";
+    const size_t magicLength = 12;
+    size_t at = 0;
+    const char *found = NULL;
+    for (; at + magicLength <= length; at++) {
+        if (memcmp(text + at, magic, magicLength) == 0) {
+            found = text + at;
+            break;
+        }
+    }
+    if (found == NULL) {
+        return;
+    }
+    size_t offset = (size_t)(found - text);
+    const char *key = "state=0x";
+    const size_t keyLength = 8;
+    for (at = offset; at + keyLength <= length; at++) {
+        if (memcmp(text + at, key, keyLength) != 0) {
+            continue;
+        }
+        size_t cursor = at + keyLength;
+        uint64_t value = 0;
+        size_t digits = 0;
+        while (cursor < length && digits < 16) {
+            char character = text[cursor];
+            uint64_t nibble;
+            if (character >= '0' && character <= '9') {
+                nibble = (uint64_t)(character - '0');
+            } else if (character >= 'a' && character <= 'f') {
+                nibble = (uint64_t)(character - 'a' + 10);
+            } else if (character >= 'A' && character <= 'F') {
+                nibble = (uint64_t)(character - 'A' + 10);
+            } else {
+                break;
+            }
+            value = (value << 4) | nibble;
+            cursor++;
+            digits++;
+        }
+        if (digits < 8 || value == 0) {
+            return;
+        }
+        attempted = 1;
+        GuestArmWatchpoint((uintptr_t)(value + 0x20));
+        return;
+    }
+}
+
 #pragma mark - Syscall trampoline
 
 uint64_t GuestSyscallDispatch(uint64_t *args,
@@ -1308,6 +1459,147 @@ static void GuestInstallAlpineRuntime(NSString *directory)
     GuestLog("[guest] time=%lld\n", (long long)time(NULL));
 }
 
+/* ------------------------------------------------------------------ libz */
+
+/*
+ * Which libz the guest loads is an experiment switch, not a build flag.
+ *
+ * Every build since 0.40.20 shipped a rebuilt, instrumented libz (zspy) as
+ * <rootfs>/lib/libz.so.1, so there has been no clean baseline to compare
+ * against.  The bundle now carries both variants, guest-runner copies the
+ * selected one into place at bootstrap, and the menu flips GUEST_ZLIB
+ * between runs -- one install, two configurations.
+ */
+static uint32_t GuestFileFingerprint(const char *path, off_t *sizeOut)
+{
+    int descriptor = open(path, O_RDONLY);
+    if (descriptor < 0) {
+        return 0;
+    }
+    uint32_t hash = 2166136261u;
+    uint8_t buffer[65536];
+    off_t total = 0;
+    for (;;) {
+        ssize_t got = read(descriptor, buffer, sizeof(buffer));
+        if (got <= 0) {
+            break;
+        }
+        for (ssize_t index = 0; index < got; index++) {
+            hash ^= buffer[index];
+            hash *= 16777619u;
+        }
+        total += got;
+    }
+    close(descriptor);
+    if (sizeOut != NULL) {
+        *sizeOut = total;
+    }
+    return hash;
+}
+
+static int GuestCopyFileOver(const char *source, const char *target)
+{
+    int in = open(source, O_RDONLY);
+    if (in < 0) {
+        return -1;
+    }
+    int out = open(target, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (out < 0) {
+        close(in);
+        return -1;
+    }
+    uint8_t buffer[65536];
+    int status = 0;
+    for (;;) {
+        ssize_t got = read(in, buffer, sizeof(buffer));
+        if (got < 0) {
+            status = -1;
+            break;
+        }
+        if (got == 0) {
+            break;
+        }
+        uint8_t *cursor = buffer;
+        ssize_t left = got;
+        while (left > 0) {
+            ssize_t written = write(out, cursor, (size_t)left);
+            if (written <= 0) {
+                status = -1;
+                break;
+            }
+            cursor += written;
+            left -= written;
+        }
+        if (status != 0) {
+            break;
+        }
+    }
+    close(in);
+    close(out);
+    return status;
+}
+
+static void GuestLogSelectedZlib(const char *tag)
+{
+    char path[GUEST_ROOT_MAX];
+    snprintf(path, sizeof(path), "%s/lib/libz.so.1", GuestRootPath);
+    struct stat info;
+    if (stat(path, &info) != 0) {
+        GuestLog("[guest] libz selected=%s missing at %s\n", tag, path);
+        return;
+    }
+    off_t size = 0;
+    uint32_t hash = GuestFileFingerprint(path, &size);
+    GuestLog("[guest] libz selected=%s size=%lld fnv=%08x path=%s\n",
+             tag,
+             (long long)size,
+             hash,
+             path);
+}
+
+static void GuestSelectZlib(void)
+{
+    const char *variant = getenv("GUEST_ZLIB");
+    if (variant == NULL || variant[0] == 0) {
+        GuestLogSelectedZlib("default");
+        return;
+    }
+
+    char source[GUEST_ROOT_MAX];
+    char target[GUEST_ROOT_MAX];
+    char alias[GUEST_ROOT_MAX];
+    snprintf(source, sizeof(source), "%s/lib/libz.so.1.%s",
+             GuestRootPath, variant);
+    snprintf(target, sizeof(target), "%s/lib/libz.so.1", GuestRootPath);
+    snprintf(alias, sizeof(alias), "%s/lib/libz.so.1.3.1", GuestRootPath);
+
+    struct stat info;
+    if (stat(source, &info) != 0) {
+        GuestLog("[guest] libz variant=%s missing at %s (keeping current)\n",
+                 variant,
+                 source);
+        GuestLogSelectedZlib("unavailable");
+        return;
+    }
+    if (GuestCopyFileOver(source, target) != 0) {
+        GuestLog("[guest] libz variant=%s copy failed errno=%d\n",
+                 variant,
+                 errno);
+        GuestLogSelectedZlib("copy-failed");
+        return;
+    }
+    /*
+     * Alpine ships libz.so.1 as a symlink to libz.so.1.3.1.  If the copy in
+     * the bundle replaced the symlink with a regular file this is a no-op;
+     * if the symlink survived, both names must point at the same variant.
+     */
+    struct stat aliasInfo;
+    if (stat(alias, &aliasInfo) == 0 && S_ISREG(aliasInfo.st_mode)) {
+        GuestCopyFileOver(source, alias);
+    }
+    GuestLogSelectedZlib(variant);
+}
+
 static void GuestBootstrapRootfs(void)
 {
     const char *configured = getenv("LINUXPROBE_ROOT");
@@ -1484,6 +1776,7 @@ static void GuestBootstrapRootfs(void)
         }
 
         GuestInstallAlpineRuntime([NSString stringWithUTF8String:executable]);
+        GuestSelectZlib();
 
         snprintf(GuestAlpineLibPath,
                  sizeof(GuestAlpineLibPath),
@@ -2960,6 +3253,7 @@ static uint64_t GuestSyscallDispatchInner(uint64_t *args,
                     break;
                 }
             }
+            GuestScanForInflateState(text, length);
         }
         return (uint64_t)result;
     }
@@ -7808,6 +8102,13 @@ int main(int argc, char *argv[])
         atexit(GuestHostExit);
 
         GuestLog( "[guest] runner pid=%d\n", getpid());
+        /*
+         * GUEST_WATCH=1 arms a hardware watchpoint on inflate_state.check as
+         * soon as the instrumented libz reports the address.  Off by default:
+         * a watchpoint that fires inside zlib would stop every run.
+         */
+        GuestWatchEnabled = getenv("GUEST_WATCH") != NULL;
+        GuestLog("[guest] watch enabled=%d\n", GuestWatchEnabled);
         if (argc < 2) {
             GuestLog( "[guest] usage: guest-runner <elf>\n");
             return 2;

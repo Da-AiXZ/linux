@@ -280,7 +280,7 @@ extern char **environ;
     while (environ[environmentCount] != NULL) {
         environmentCount++;
     }
-    char **environment = calloc(environmentCount + 4, sizeof(char *));
+    char **environment = calloc(environmentCount + 6, sizeof(char *));
     if (environment == NULL) {
         free(argv);
         posix_spawn_file_actions_destroy(&actions);
@@ -292,8 +292,10 @@ extern char **environ;
     for (size_t index = 0; index < environmentCount; index++) {
         environment[index] = environ[index];
     }
+    size_t cursor = environmentCount;
     NSString *rootVariable = [NSString stringWithFormat:
         @"LINUXPROBE_ROOT=%@", rootPath];
+    environment[cursor++] = (char *)rootVariable.fileSystemRepresentation;
     /*
      * OpenSSL looks for OPENSSLDIR/cert.pem by default.  Point it at the
      * Alpine CA bundle explicitly so apk's HTTPS fetches verify even if the
@@ -306,12 +308,23 @@ extern char **environ;
      */
     NSString *certificateFile = @"SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt";
     NSString *certificateDirectory = @"SSL_CERT_DIR=/etc/ssl/certs";
-    environment[environmentCount] = (char *)rootVariable.fileSystemRepresentation;
-    environment[environmentCount + 1] =
-        (char *)certificateFile.fileSystemRepresentation;
-    environment[environmentCount + 2] =
-        (char *)certificateDirectory.fileSystemRepresentation;
-    environment[environmentCount + 3] = NULL;
+    environment[cursor++] = (char *)certificateFile.fileSystemRepresentation;
+    environment[cursor++] = (char *)certificateDirectory.fileSystemRepresentation;
+    /*
+     * Which libz the guest should load, and whether to arm the hardware
+     * watchpoint.  Both are read by guest-runner at bootstrap; leaving them
+     * unset keeps the bundle default, which is what every previous build did.
+     */
+    NSString *zlibVariable = nil;
+    if (self.zlibVariant.length != 0) {
+        zlibVariable = [NSString stringWithFormat:@"GUEST_ZLIB=%@",
+                                                  self.zlibVariant];
+        environment[cursor++] = (char *)zlibVariable.fileSystemRepresentation;
+    }
+    if (self.watchState) {
+        environment[cursor++] = (char *)"GUEST_WATCH=1";
+    }
+    environment[cursor] = NULL;
 
     pid_t pid = 0;
     int result = posix_spawn(&pid,
