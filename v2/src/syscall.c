@@ -81,18 +81,13 @@ static int host_flags_from_linux(uint64_t flags)
 
 /* -------------------------------------------------------------- handlers */
 
-static long long sys_write(struct v2_cpu *cpu, struct v2_proc *proc)
+/* Write a guest range to a host fd, in chunks.  Shared by write and writev. */
+static uint64_t write_range(struct v2_proc *proc, int host, uint64_t buffer,
+                            uint64_t count, long long *error)
 {
-    int fd = (int)cpu->x[0];
-    uint64_t buffer = cpu->x[1];
-    uint64_t count = cpu->x[2];
-    int host = v2_proc_fd_get(proc, fd);
     uint8_t chunk[4096];
     uint64_t done = 0;
 
-    if (host < 0) {
-        return -V2_EBADF;
-    }
     while (done < count) {
         size_t want = (size_t)(count - done);
         ssize_t written;
@@ -103,18 +98,138 @@ static long long sys_write(struct v2_cpu *cpu, struct v2_proc *proc)
         if (v2_space_read(proc->space, chunk,
                           (const void *)(uintptr_t)(buffer + done),
                           want) != 0) {
-            return done > 0 ? (long long)done : -V2_EFAULT;
+            *error = -V2_EFAULT;
+            return done;
         }
         written = write(host, chunk, want);
         if (written < 0) {
-            return done > 0 ? (long long)done : -V2_EIO;
+            *error = -V2_EIO;
+            return done;
         }
         done += (uint64_t)written;
         if ((size_t)written < want) {
             break;
         }
     }
+    *error = 0;
+    return done;
+}
+
+static long long sys_write(struct v2_cpu *cpu, struct v2_proc *proc)
+{
+    int fd = (int)cpu->x[0];
+    int host = v2_proc_fd_get(proc, fd);
+    long long error = 0;
+    uint64_t done;
+
+    if (host < 0) {
+        return -V2_EBADF;
+    }
+    done = write_range(proc, host, cpu->x[1], cpu->x[2], &error);
+    if (done == 0 && error != 0) {
+        return error;
+    }
     return (long long)done;
+}
+
+/*
+ * writev/readv matter more than they look: musl's stdio flushes through
+ * writev whenever more than one buffer is pending, so without it every
+ * applet prints nothing and the failure looks like "the program did not
+ * produce output" rather than "a syscall is missing".
+ */
+static long long sys_writev(struct v2_cpu *cpu, struct v2_proc *proc)
+{
+    int fd = (int)cpu->x[0];
+    uint64_t vectors = cpu->x[1];
+    uint64_t count = cpu->x[2];
+    int host = v2_proc_fd_get(proc, fd);
+    uint64_t total = 0;
+
+    if (host < 0) {
+        return -V2_EBADF;
+    }
+    if (count > 1024) {
+        return -V2_EINVAL;
+    }
+    for (uint64_t index = 0; index < count; index++) {
+        uint64_t base = 0;
+        uint64_t length = 0;
+        long long error = 0;
+        uint64_t written;
+
+        if (v2_space_read(proc->space, &base,
+                          (const void *)(uintptr_t)(vectors + index * 16),
+                          8) != 0 ||
+            v2_space_read(proc->space, &length,
+                          (const void *)(uintptr_t)(vectors + index * 16 + 8),
+                          8) != 0) {
+            return total > 0 ? (long long)total : -V2_EFAULT;
+        }
+        written = write_range(proc, host, base, length, &error);
+        total += written;
+        if (written < length) {
+            return total > 0 ? (long long)total : error;
+        }
+    }
+    return (long long)total;
+}
+
+static long long sys_readv(struct v2_cpu *cpu, struct v2_proc *proc)
+{
+    int fd = (int)cpu->x[0];
+    uint64_t vectors = cpu->x[1];
+    uint64_t count = cpu->x[2];
+    int host = v2_proc_fd_get(proc, fd);
+    uint64_t total = 0;
+    uint8_t chunk[4096];
+
+    if (host < 0) {
+        return -V2_EBADF;
+    }
+    if (count > 1024) {
+        return -V2_EINVAL;
+    }
+    for (uint64_t index = 0; index < count; index++) {
+        uint64_t base = 0;
+        uint64_t length = 0;
+        uint64_t done = 0;
+
+        if (v2_space_read(proc->space, &base,
+                          (const void *)(uintptr_t)(vectors + index * 16),
+                          8) != 0 ||
+            v2_space_read(proc->space, &length,
+                          (const void *)(uintptr_t)(vectors + index * 16 + 8),
+                          8) != 0) {
+            return total > 0 ? (long long)total : -V2_EFAULT;
+        }
+        while (done < length) {
+            size_t want = (size_t)(length - done);
+            ssize_t got;
+
+            if (want > sizeof(chunk)) {
+                want = sizeof(chunk);
+            }
+            got = read(host, chunk, want);
+            if (got < 0) {
+                return total > 0 ? (long long)total : -V2_EIO;
+            }
+            if (got == 0) {
+                return (long long)total;
+            }
+            if (v2_space_write(proc->space,
+                               (void *)(uintptr_t)(base + done), chunk,
+                               (size_t)got) != 0) {
+                return total > 0 ? (long long)total : -V2_EFAULT;
+            }
+            done += (uint64_t)got;
+            total += (uint64_t)got;
+            if ((size_t)got < want) {
+                return (long long)total;
+            }
+        }
+    }
+    return (long long)total;
 }
 
 static long long sys_read(struct v2_cpu *cpu, struct v2_proc *proc)
@@ -620,9 +735,21 @@ static long long sys_getppid(struct v2_cpu *cpu, struct v2_proc *proc)
 
 static long long sys_getgroups(struct v2_cpu *cpu, struct v2_proc *proc)
 {
-    (void)cpu;
-    (void)proc;
-    return 0;
+    uint64_t size = cpu->x[0];
+    uint64_t list = cpu->x[1];
+    uint32_t group = 0;         /* the guest runs as root, in root's group */
+
+    if (size == 0) {
+        return 1;
+    }
+    if (size > 1) {
+        size = 1;
+    }
+    if (v2_space_write(proc->space, (void *)(uintptr_t)list, &group,
+                       sizeof(group)) != 0) {
+        return -V2_EFAULT;
+    }
+    return (long long)size;
 }
 
 static long long sys_umask(struct v2_cpu *cpu, struct v2_proc *proc)
@@ -823,6 +950,8 @@ static const struct v2_sysent table[320] = {
     [62] = {"lseek", sys_lseek},
     [63] = {"read", sys_read},
     [64] = {"write", sys_write},
+    [65] = {"readv", sys_readv},
+    [66] = {"writev", sys_writev},
     [78] = {"readlinkat", sys_readlinkat},
     [79] = {"newfstatat", sys_newfstatat},
     [80] = {"fstat", sys_fstat},
@@ -838,6 +967,11 @@ static const struct v2_sysent table[320] = {
     [135] = {"rt_sigprocmask", sys_ignore},
     [139] = {"rt_sigreturn", sys_ignore},
     [153] = {"getgroups", sys_getgroups},
+    [154] = {"setgroups", sys_ok},
+    [155] = {"sched_setscheduler", sys_ok},
+    [156] = {"sched_getscheduler", sys_ok},
+    [157] = {"sched_getparam", sys_ok},
+    [158] = {"sched_setparam", sys_ok},
     [160] = {"uname", sys_uname},
     [166] = {"umask", sys_umask},
     [172] = {"getpid", sys_getpid},
