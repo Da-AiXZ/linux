@@ -295,6 +295,17 @@ static uint64_t branch_target(uint32_t word, uint64_t site)
     return site + (uint64_t)(delta * 4);
 }
 
+/* Where an `ldr xt, [pc, #imm]` reads from.  Base is the ldr's own address. */
+static uint64_t literal_target(uint32_t word, uint64_t here)
+{
+    int64_t delta = (int64_t)((word >> 5) & 0x7FFFFu);
+
+    if ((delta & 0x40000) != 0) {
+        delta -= 0x80000;
+    }
+    return here + (uint64_t)(delta * 4);
+}
+
 static uint32_t word_at(struct fake *fake, uint64_t address)
 {
     uint32_t value;
@@ -400,10 +411,20 @@ int main(void)
         CHECK(site->kind == V2_PATCH_SVC);
         CHECK(site->stub == stub);
         CHECK(site->original == V2_ARM64_SVC0);
-        CHECK(word_at(&fake, stub + 0) == 0x58000090u);
-        CHECK(word_at(&fake, stub + 4) == 0x58000071u);
+        CHECK((word_at(&fake, stub + 0) & 0xFF000000u) == 0x58000000u);
+        CHECK((word_at(&fake, stub + 4) & 0xFF000000u) == 0x58000000u);
         CHECK(word_at(&fake, stub + 8) == 0xD61F0200u);
         CHECK(word_at(&fake, stub + 12) == 0xD4200000u);
+        /*
+         * Decode where each literal load actually reads, then check the value
+         * that lives there.  Comparing the raw instruction word only proves
+         * the encoder matches itself -- the shipped stub once carried a
+         * wrong-but-stable offset and passed exactly that kind of check.
+         */
+        CHECK(literal_target(word_at(&fake, stub + 0), stub + 0) == stub + 16);
+        CHECK(literal_target(word_at(&fake, stub + 4), stub + 4) == stub + 24);
+        CHECK((word_at(&fake, stub + 0) & 31u) == 16);   /* loads into x16 */
+        CHECK((word_at(&fake, stub + 4) & 31u) == 17);   /* loads into x17 */
         memcpy(&entry_literal, fake.memory + (stub + 16 - fake.base), 8);
         memcpy(&site_literal, fake.memory + (stub + 24 - fake.base), 8);
         CHECK(entry_literal == 0x1000);

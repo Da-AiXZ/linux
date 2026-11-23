@@ -18,6 +18,13 @@ NS_ASSUME_NONNULL_BEGIN
 /// Forget the cached address (next call rediscovers).
 + (void)reset;
 
+/// A manually entered address outranks discovery.  Pass nil to clear it.
++ (nullable NSString *)manualBaseURL;
++ (void)setManualBaseURL:(nullable NSString *)url;
+
+/// Why the last upload or discovery failed; nil when the last one worked.
++ (nullable NSString *)lastFailure;
+
 /// POST a whole log.  Returns the server's id, or nil.
 + (nullable NSString *)upload:(NSString *)log
                         build:(NSString *)build

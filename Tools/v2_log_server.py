@@ -53,6 +53,8 @@ ACKS = os.path.join(STATE, "acks.txt")
 
 lock = threading.Lock()
 uploads = {"count": 0, "last": None}
+seen_peers = set()
+BEACON_PORT = 8767
 
 
 def ensure_state():
@@ -102,6 +104,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/v2/ping":
+            peer = self.client_address[0]
+            with lock:
+                first = peer not in seen_peers
+                seen_peers.add(peer)
+            if first:
+                log(f"ping from {peer}: the device can reach this workstation")
             self._json({"ok": 1, "name": "v2-log", "port": self.server.server_port})
             return
         if parsed.path == "/v2/command":
@@ -212,6 +220,38 @@ def discovery(port, udp_port, stop):
     sock.close()
 
 
+def beacon(port, beacon_port, stop):
+    """Broadcast `V2LOG <port> <addresses>` every two seconds.
+
+    Discovery already answers a device that asks; this is the other direction,
+    and it saves the case where the access point drops the device's broadcast
+    but still delivers this one.  Receiving a broadcast needs no port to be
+    open on the device side, only the local network permission.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    try:
+        sock.bind(("0.0.0.0", 0))
+    except OSError as error:
+        log(f"beacon disabled: {error}")
+        sock.close()
+        return
+    log(f"beacon on udp/{beacon_port} every 2s")
+    while not stop.is_set():
+        addresses = local_addresses() or ["127.0.0.1"]
+        payload = f"V2LOG {port} {','.join(addresses)}".encode()
+        targets = {"255.255.255.255"}
+        for address in addresses:
+            targets.add(address.rsplit(".", 1)[0] + ".255")
+        for target in targets:
+            try:
+                sock.sendto(payload, (target, beacon_port))
+            except OSError:
+                continue
+        stop.wait(2.0)
+    sock.close()
+
+
 def local_addresses():
     addresses = set()
     try:
@@ -233,6 +273,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--udp", type=int, default=8766)
+    parser.add_argument("--beacon", type=int, default=BEACON_PORT)
     parser.add_argument("--bind", default="0.0.0.0")
     parser.add_argument("--once", action="store_true",
                         help="exit after the first upload (wake-up mode)")
@@ -246,12 +287,15 @@ def main():
     stop = threading.Event()
     threading.Thread(target=discovery, args=(args.port, args.udp, stop),
                      daemon=True).start()
+    threading.Thread(target=beacon, args=(args.port, args.beacon, stop),
+                     daemon=True).start()
 
     print()
     print("  v2 log server")
     print(f"  listen   http://{args.bind}:{args.port}")
     for address in local_addresses():
         print(f"  device   http://{address}:{args.port}")
+    print(f"  beacon   udp/{args.beacon} every 2s (the device can stay passive)")
     print(f"  inbox    {INBOX}")
     print(f"  commands {COMMANDS}   (echo 'run ls' >> this file)")
     if args.once:

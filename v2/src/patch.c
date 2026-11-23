@@ -49,8 +49,19 @@ void v2_patch_emit_stub(uint8_t *out, uint64_t entry, uint64_t site)
 {
     uint32_t words[4];
 
-    words[0] = 0x58000090u;    /* ldr x16, [pc, #16]  */
-    words[1] = 0x58000071u;    /* ldr x17, [pc, #12]  */
+    /*
+     * A literal load uses the address of *its own* instruction as the base,
+     * not the start of the stub.  The second ldr sits at +4, so reaching the
+     * site word at +24 needs #20, not #12.
+     *
+     * #12 was shipped once and cost a device round trip: x17 came out as the
+     * entry point, so the dispatcher "returned" to entry+4 -- four bytes into
+     * the middle of the frame-building sequence.  The guest printed its line
+     * and died of SIGBUS, which reads exactly like a kernel rejection of
+     * executable anonymous memory.  It was not; it was one wrong offset.
+     */
+    words[0] = 0x58000090u;    /* ldr x16, [pc, #16]  -> +16 (entry) */
+    words[1] = 0x580000B1u;    /* ldr x17, [pc, #20]  -> +24 (site)  */
     words[2] = 0xD61F0200u;    /* br  x16             */
     words[3] = 0xD4200000u;    /* brk #0              */
     memcpy(out, words, sizeof(words));
