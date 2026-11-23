@@ -7,7 +7,8 @@
 
 | 角色 | 在哪 | 做什么 |
 |---|---|---|
-| `Tools/v2_log_server.py` | 工作站 | 收日志、发命令、UDP 应答发现 |
+| `Tools/v2_log_server.py` | 工作站 | 收日志、发命令、UDP 应答发现、每 2 秒广播 beacon |
+| `Tools/v2_open_firewall.ps1` | 工作站（一次性） | 放行 8765/tcp、8766+8767/udp（需要管理员） |
 | App 里的 `V2Remote` | iPad | 启动即跑 → POST 日志 → 长轮询命令 |
 | `Tools/v2_wait.py` | 工作站（后台） | 等到新日志就退出，退出即唤醒我 |
 
@@ -20,9 +21,29 @@
 | GET | `/v2/command?wait=25` | 长轮询；返回 `{"action":"run","args":["ls"]}` 或 `{"action":null}` |
 | POST | `/v2/ack` | 设备回报执行结果，追加到 `acks.txt` |
 
-发现：向 UDP 8766 发 `V2DISCOVER`，服务器回 `V2LOG <port> <ip1,ip2,…>`。
-工作站常有多个网卡（Wi-Fi、WSL、Hyper-V、VPN），所以回**全部**地址，
-设备逐个试——不猜"包是从哪块网卡进来的"。
+发现是**双向**的，两条路任意一条通就够：
+
+1. **主动**：设备向 UDP 8766 发 `V2DISCOVER`（受限广播 + 每块网卡的有向广播 + 回环），
+   服务器回 `V2LOG <port> <ip1,ip2,…>`。工作站常有多个网卡（Wi-Fi、WSL、Hyper-V、VPN），
+   所以回**全部**地址，设备**并发** ping 它们——WSL 的 172.31.x 不会拒绝连接，只会
+   一直等到超时，串行试就要多等几秒。
+2. **被动**：服务器每 2 秒向 UDP 8767 广播一次 `V2LOG <port> <地址们>`。设备只听不说，
+   适合接入点把设备的广播丢掉、但服务器的广播能送达的情况。
+
+无论哪条路，候选地址都并发 ping 一次，**序号最靠前的可达地址胜出**并记住。
+
+## 诊断（0.1.2 起）
+
+失败不再只说 `failed`，会说清是哪一步：
+
+```
+[app] server=http://192.168.144.180:8765
+[app] upload failed (http://172.31.160.1:8765 -> NSURLErrorDomain -1004)
+[app] upload failed (no beacon and no discovery reply -- local network
+                     permission on the device, or a firewall on the workstation)
+```
+
+服务器侧会打印 `ping from <ip>`——设备第一次连上来时出现这一行，它就是链路真通了的证据。
 
 状态都在 `.remote/v2/`（已在 `.gitignore` 里）：
 
@@ -43,12 +64,21 @@ python Tools/v2_log_server.py
 python Tools/v2_log_server.py --once
 ```
 
-首次运行 Windows 会弹防火墙；也可以提前放行（管理员 PowerShell）：
+**防火墙必须先放行一次**（管理员权限；助手不能自己提权）：
 
-```powershell
-netsh advfirewall firewall add rule name="v2 log tcp" dir=in action=allow protocol=TCP localport=8765
-netsh advfirewall firewall add rule name="v2 log udp" dir=in action=allow protocol=UDP localport=8766
-```
+右键 `Tools\v2_open_firewall.ps1` → **以管理员身份运行**。
+
+脚本放行三个端口：
+
+| 端口 | 协议 | 用途 |
+|---|---|---|
+| 8765 | TCP | 上传日志、长轮询命令 |
+| 8766 | UDP | 发现应答 |
+| 8767 | UDP | beacon |
+
+这一条不是可选的：Windows 把 Wi-Fi 默认归到 **公用网络**，而公用配置**默认拒绝所有入站**。
+2026-11-23 第一次真机安装就栽在这里——设备根本没连上，日志里只有 `failed`，
+看起来像代码 bug，其实是网络策略。
 
 只想本机自测、完全不碰网络：`--bind 127.0.0.1`。
 
@@ -85,18 +115,34 @@ upload -> {'ok': 1, 'id': '20261123-231521-loop-0.log'}
 command-> {'action': 'run', 'args': ['ls', '-l', '/']}
 ```
 
-## App 侧还差什么
+## App 侧
 
-`V2Remote.m`（上传 + 发现 + 长轮询 + 断线重试）要等 v2 的 App target 落地才编进去。
-它不做任何判断，只负责"启动跑什么、跑完发什么"，测试逻辑在 `v2/tests/guest/`。
+已落地（`v2/app/`）：`V2Remote` 负责发现/上传/长轮询，`V2Runner` 负责 spawn 助手并
+detach（拿到 `CS_DEBUGGED`），`V2ViewController` 只负责显示日志。
 
-App 的启动顺序约定（写进代码，不靠记忆）：
+启动顺序：
 
-1. 读 `UserDefaults` 里的 `uploadURL`；没有就 UDP 发现（3 秒超时）
-2. 立即执行默认动作（`--action` 参数或上次的动作）
-3. 日志先落盘 `Documents/v2/logs/`，再上传；失败重试 3 次，间隔 2/5/10 秒
-4. 上传成功后长轮询 25 秒等命令，拿到就执行、回报、继续轮询
-5. 屏幕常亮、切后台不退出（TrollStore 环境下可用 `no-sandbox`）
+1. 手动地址（用户在 "…" 里填过）→ 缓存地址 → 双通道发现
+2. 立即跑内置 guest（`Helpers/hello`），不点任何按钮
+3. 上传；失败重试 3 次，间隔 2/5/10 秒；每次失败写明地址 + 错误码
+4. 成功后长轮询 25 秒等命令，拿到就执行、回报
+5. 全部失败时日志留在设备上，屏幕上也能看到
+
+右上角 "…" 菜单：**Run again / Set server address… / Copy log / Share log… / Clear log**。
+手填地址写进 `UserDefaults`（键 `v2.manualBaseURL`），优先级高于发现——
+换网络、换工作站不用重新打包。
+
+## 装完怎么判定成功
+
+```
+[app] server=http://192.168.144.180:8765
+[v2] patch svc=2 mrs=0 msr=0
+hello from guest
+[app] guest exited status=0        ← 0.1.2 起；0.1.1 这里是 killed by signal 10
+[app] uploaded id=2026…-auto-0.1.2.3.log
+```
+
+服务器侧同时出现 `ping from 192.168.144.x`。
 
 ## 为什么不用云
 

@@ -18,6 +18,8 @@ v1 的教训之一是"日志看着像证据，其实仪器本身坏了"，所以
 | 初始栈 argv/envp/auxv | 2 参数 / 2 环境变量 | 通过，156 条断言 |
 | stub 机器码与汇编器逐字比对 | 4 条指令 + 2 个字面量 | 与 `zig cc -target aarch64` 输出完全相同 |
 | **真执行 guest**：`hello`（aarch64 Linux，ET_DYN） | GitHub `macos-latest`（arm64），7 s | ✅ 打印 `hello from guest`，走完整装载→补丁→syscall→exit |
+| **真机执行 guest**：同一份 `hello` | iPad（iOS 16.6.1，TrollStore），0.05 s | ✅ 打印 `hello from guest`（0.1.1）；退出码在 0.1.2 修好跳板偏移后复测 |
+| 跳板偏移（`ldr` 字面量） | 汇编器 + 解码断言 | ✅ `58000090 580000b1 d61f0200 d4200000`，读 +16 / +24 |
 
 断言内容包括：每一步之后"宿主视角"与"页表"逐页相等、永不重复 commit、
 地址对齐与边界、`check()` 与保护位一致、`munmap` 后必然 `EFAULT`。
