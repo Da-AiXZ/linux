@@ -95,7 +95,7 @@ jobs:
             exit 0
           fi
           run() {
-            echo "--- busybox $*"
+            echo "--- busybox $*" >&2
             ./build/guest-runner --root tests/guest/root tests/guest/busybox "$@"
           }
           run ls /          | tee /tmp/g3_ls
