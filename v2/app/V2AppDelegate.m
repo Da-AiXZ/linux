@@ -1,10 +1,6 @@
-#import <UIKit/UIKit.h>
+#import "V2AppDelegate.h"
 
 #import "V2ViewController.h"
-
-@interface V2AppDelegate : UIResponder <UIApplicationDelegate>
-@property (nonatomic, strong) UIWindow *window;
-@end
 
 @implementation V2AppDelegate
 

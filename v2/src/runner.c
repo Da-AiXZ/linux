@@ -12,9 +12,6 @@
 #if defined(__APPLE__) && defined(__aarch64__)
 
 #include <TargetConditionals.h>
-#if TARGET_OS_IPHONE
-#include <sys/ptrace.h>
-#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -30,6 +27,15 @@
 #include "v2/proc.h"
 #include "v2/stack.h"
 #include "v2/vspace.h"
+
+/*
+ * The iOS SDK does not ship <sys/ptrace.h>; the declaration below is the one
+ * v1 used and the one every jailbreak tool uses.  Request 0 is PT_TRACE_ME.
+ */
+#if TARGET_OS_IPHONE
+extern int ptrace(int request, pid_t pid, caddr_t address, int data);
+#define V2_PT_TRACE_ME 0
+#endif
 
 #define V2_SPACE_SIZE  (1024u * 1024u * 1024u)
 /*
@@ -95,7 +101,7 @@ int main(int argc, char **argv)
      * process, is the tracer, and it detaches after the handshake.
      * On macOS this call would stop the process instead, hence the guard.
      */
-    ptrace(PT_TRACE_ME, 0, 0, 0);
+    ptrace(V2_PT_TRACE_ME, 0, NULL, 0);
 #endif
     const char *root = ".";
     const char *elf_path = NULL;
