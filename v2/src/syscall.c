@@ -868,6 +868,7 @@ static long long sys_mmap(struct v2_cpu *cpu, struct v2_proc *proc)
     if (result > 0 && fd >= 0 && (prot & V2_PROT_EXEC) != 0 &&
         proc->patcher != NULL) {
         char patch_error[96] = "";
+        int before = proc->patcher->site_count;
 
         if (v2_space_protect(proc->space, (void *)(uintptr_t)result,
                              (size_t)length,
@@ -878,6 +879,11 @@ static long long sys_mmap(struct v2_cpu *cpu, struct v2_proc *proc)
         }
         v2_space_protect(proc->space, (void *)(uintptr_t)result,
                          (size_t)length, (int)prot);
+        fprintf(stderr,
+                "[v2] exec map %s at 0x%llx len=0x%llx prot=%llu sites=+%d\n",
+                proc->fd_path[(int)cpu->x[4]], (unsigned long long)result,
+                (unsigned long long)length, (unsigned long long)prot,
+                proc->patcher->site_count - before);
     }
     return result;
 }
