@@ -57,10 +57,19 @@ jobs:
 
       - name: Build
         working-directory: /tmp
+        env:
+          # A per-job cache: zig's shared cache is safe in principle, but this
+          # build starts a thousand compilers that all write dep files, and a
+          # shared tmp directory turned one of them into "FileNotFound".
+          ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}/zig-cache
+          ZIG_LOCAL_CACHE_DIR: ${{ runner.temp }}/zig-cache/local
         run: |
           set -eu
           cd "busybox-${{ inputs.version }}"
-          make -j"$(nproc)" \
+          # -j1 on purpose: kbuild generates include/applets.h while the
+          # applets are being compiled, and the parallel order is the one
+          # thing that failed.  A slow green build beats a fast red one.
+          make -j1 \
             CC="zig cc -target aarch64-linux-musl -fPIE -pie -O2" \
             HOSTCC="gcc" \
             SKIP_STRIP=y \
