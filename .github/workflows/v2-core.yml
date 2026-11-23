@@ -135,16 +135,17 @@ jobs:
           cat /tmp/g4_echo
           grep -q "dynamic-busybox-ok" /tmp/g4_echo
 
-          # Ten times, because this failed once in five runs with
+          # Two hundred times, because this failed once in five runs with
           # "apk_blob_cstr: symbol not found" on identical code.  A flake in
           # the loader is not a flake to work around: it has to be explained.
-          echo "--- apk --version x10"
-          for run in $(seq 1 10); do
+          # `--version` is the control: it relocates the same five libraries
+          # and then does nothing, so a failure here is the loader, and a
+          # failure only in `apk update` is the write path.
+          echo "--- apk --version x200"
+          for run in $(seq 1 200); do
             ./build/guest-runner --root tests/guest/root \
               tests/guest/root/sbin/apk --version > /tmp/g4_apk.$run 2>&1
             status=$?
-            printf "run %2d exit=%d  %s\n" "$run" "$status" \
-              "$(head -1 /tmp/g4_apk.$run)"
             if [ "$status" -ne 0 ]; then
               echo "::error::run $run failed; full output follows"
               cat /tmp/g4_apk.$run
@@ -152,7 +153,8 @@ jobs:
             fi
             grep -q "apk-tools" /tmp/g4_apk.$run
           done
-          echo "G4 ok: ld.so loaded, libc relocated, apk ran ten times"
+          rm -f /tmp/g4_apk.*
+          echo "G4 ok: ld.so loaded, libc relocated, apk ran 200 times"
 
       # G5 groundwork: apk's index path, against a repo that lives inside the
       # guest root (no network, no signature: --allow-untrusted).  This is the
