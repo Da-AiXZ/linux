@@ -7024,11 +7024,31 @@ static BOOL GuestPageRecordsFitRequest(uintptr_t page,
     return found;
 }
 
+/*
+ * 0.41.5 experiment: never release a small mapping.
+ *
+ * Everything mallocng hands out for a group is 16-128KB, and the failure is
+ * always "two live objects in one 32KB range".  If a group is unmapped while
+ * musl still believes it owns it, the address comes back for a different size
+ * class and the two allocations overlap -- exactly what the register dump
+ * showed.  Leaking these mappings costs about 45MB per apk run and removes
+ * that possibility from the picture entirely; if the failure rate drops to
+ * zero, the release path is where to look next.
+ */
+#define GUEST_LEAK_SMALL_MAPPINGS 1
+#define GUEST_LEAK_SMALL_LIMIT 0x20000
+
 static void GuestReleaseGuestPages(uintptr_t address, size_t length)
 {
     if (length == 0) {
         return;
     }
+#if GUEST_LEAK_SMALL_MAPPINGS
+    if (length <= GUEST_LEAK_SMALL_LIMIT) {
+        GuestMunmapKeptPages++;
+        return;
+    }
+#endif
     uintptr_t scanStart = GuestAlignDown(address);
     uintptr_t scanEnd = GuestAlignUp(address + length);
     uintptr_t requestStart = GuestAlignUp(address);
