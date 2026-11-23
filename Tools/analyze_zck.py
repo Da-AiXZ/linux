@@ -147,15 +147,24 @@ LINE_BUILD = re.compile(r"=====\s*build\s+(\S+)\s*\((\S+)\)")
 LINE_LIBZ = re.compile(r"\[guest\]\s+libz\s+selected=(\S+)\s+size=(\d+)")
 LINE_RUN = re.compile(r"#####\s*RUN\s+(\d+)/(\d+)\s+status=(-?\d+)\s*(\S*)")
 LINE_INIT2 = re.compile(r"\[zspy\]\s+init2\s+.*state=(0x[0-9a-fA-F]+)")
-LINE_ZCK = re.compile(
-    r"\[zck\]\s+call=(\d+)\s+check=([0-9a-fA-F]+)\s+outcrc=([0-9a-fA-F]+)"
-    r"\s+total_out=(\d+)")
-LINE_FAIL = re.compile(
-    r"\[zspy\]\s+fail\s+ret=(-?\d+)\s+total_in=(\d+)\s+total_out=(\d+)"
-    r".*?msg=(.*)$")
-LINE_ZOUT = re.compile(r"\[zout\]\s+outcrc=([0-9a-fA-F]+)(?:\s+trailer=(\S+))?"
-                       r"\s+total_out=(\d+)")
 LINE_GAP = re.compile(r"\[zgap\]")
+
+
+def fields(line):
+    """key=value tokens of one log line, tolerant of extra fields.
+
+    The [zck] format grew over time (this_out/state_total/out/out_start were
+    added after total_out), so matching a fixed word order silently drops
+    every line on newer builds.
+    """
+    found = {}
+    for token in line.split():
+        if "=" not in token:
+            continue
+        key, _, value = token.partition("=")
+        if key and key not in found:
+            found[key] = value
+    return found
 
 
 class Stream(object):
@@ -201,25 +210,31 @@ def parse(path):
         if current is None:
             continue
         if "[zck]" in line:
-            match = LINE_ZCK.search(line)
-            if match:
-                current.calls.append((int(match.group(1)),
-                                      int(match.group(2), 16),
-                                      int(match.group(3), 16),
-                                      int(match.group(4))))
+            values = fields(line)
+            if {"call", "check", "outcrc", "total_out"} <= set(values):
+                current.calls.append((int(values["call"]),
+                                      int(values["check"], 16),
+                                      int(values["outcrc"], 16),
+                                      int(values["total_out"])))
                 continue
         if "[zout]" in line:
-            match = LINE_ZOUT.search(line)
-            if match:
-                current.end_crc = int(match.group(1), 16)
-                current.end_out = int(match.group(3))
+            values = fields(line)
+            if "outcrc" in values and "total_out" in values:
+                current.end_crc = int(values["outcrc"], 16)
+                current.end_out = int(values["total_out"])
                 continue
         if "[zspy] fail" in line:
-            match = LINE_FAIL.search(line)
-            if match:
-                current.fail = (int(match.group(1)), int(match.group(3)),
-                                match.group(4).strip())
-                continue
+            values = fields(line)
+            message = ""
+            if "msg=" in line:
+                message = line.split("msg=", 1)[1].strip()
+            try:
+                current.fail = (int(values.get("ret", "0")),
+                                int(values.get("total_out", "0")),
+                                message)
+            except ValueError:
+                current.fail = (0, 0, message)
+            continue
         if LINE_GAP.search(line):
             current.gaps += 1
     return build, libz, runs, streams

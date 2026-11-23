@@ -697,7 +697,7 @@
         NSString *failed = self.repeatFailedRuns.count != 0
             ? [self.repeatFailedRuns componentsJoinedByString:@","]
             : @"none";
-        [self appendLog:[NSString stringWithFormat:
+        [self appendLogNow:[NSString stringWithFormat:
             @"##### SELF-TEST DONE total=%ld failed=%ld failed_runs=%@ libz=%@",
             (long)self.repeatTotal, (long)self.repeatFailures, failed,
             self.zlibVariant ?: @"bundle default"]];
@@ -743,7 +743,7 @@
             strongSelf.repeatFailures++;
             [strongSelf.repeatFailedRuns addObject:@(strongSelf.repeatIndex)];
         }
-        [strongSelf appendLog:[NSString stringWithFormat:
+        [strongSelf appendLogNow:[NSString stringWithFormat:
             @"##### RUN %ld/%ld status=%d %@",
             (long)strongSelf.repeatIndex, (long)strongSelf.repeatTotal, status,
             failed ? @"FAIL" : @"PASS"]];
@@ -863,6 +863,23 @@
         [self.logBuffer appendString:entry];
         [self scheduleLogRender];
     });
+}
+
+/*
+ * Append and paint right now, on the caller's (main) thread.  The verdict
+ * lines need this: endRun uploads logPayload synchronously, so a line queued
+ * with dispatch_async would be missing from the upload that is supposed to
+ * carry it.
+ */
+- (void)appendLogNow:(NSString *)line
+{
+    if (self.repeating && [self isNoiseLine:line]) {
+        return;
+    }
+    NSString *stamp = [self.formatter stringFromDate:[NSDate date]];
+    [self.logBuffer appendString:
+        [NSString stringWithFormat:@"[%@] %@\n", stamp, line ?: @""]];
+    [self renderLog];
 }
 
 - (void)scheduleLogRender

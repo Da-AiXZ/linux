@@ -888,34 +888,85 @@ static BOOL GuestEnableJIT(void)
  * instrumented libz knows the address.  The store lands at state + 0x20
  * (offsetof(struct inflate_state, check) on LP64).
  */
-static volatile int GuestWatchArmed = 0;
+static int GuestWatchArmed = 0;
 static int GuestWatchEnabled = 0;
+static int GuestWatchSlots = 0;
+static int GuestWatchStepping = 0;
+static unsigned GuestWatchHits = 0;
+static unsigned GuestWatchForeign = 0;
 static uintptr_t GuestWatchAddress = 0;
+static uintptr_t GuestWatchLegitPc = 0;
 
-static int GuestSetDebugWatch(uint64_t address, int enable)
+static int GuestDebugStateRead(arm_debug_state64_t *state)
 {
-    arm_debug_state64_t state;
     mach_msg_type_number_t count = ARM_DEBUG_STATE64_COUNT;
-    memset(&state, 0, sizeof(state));
+    memset(state, 0, sizeof(*state));
     kern_return_t result = thread_get_state(mach_thread_self(),
                                             ARM_DEBUG_STATE64,
-                                            (thread_state_t)&state,
+                                            (thread_state_t)state,
                                             &count);
-    if (result != KERN_SUCCESS) {
-        return (int)result;
+    return result == KERN_SUCCESS ? 0 : (int)result;
+}
+
+static int GuestDebugStateWrite(arm_debug_state64_t *state)
+{
+    kern_return_t result = thread_set_state(mach_thread_self(),
+                                            ARM_DEBUG_STATE64,
+                                            (thread_state_t)state,
+                                            ARM_DEBUG_STATE64_COUNT);
+    return result == KERN_SUCCESS ? 0 : (int)result;
+}
+
+/*
+ * Arm (or disarm) the watchpoint and, optionally, the single-step bit.
+ *
+ * zlib itself stores to state->check twice per inflate() call, so a hit is
+ * only interesting when the pc is NOT that site.  To let the guest continue
+ * past the expected store, the handler disarms the watchpoint, sets
+ * MDSCR_EL1.SS, and re-arms from the resulting step trap.  Both bits are
+ * read back, because a silently ignored write would leave the thread either
+ * unwatched or single-stepping forever.
+ */
+static int GuestSetDebugWatch(uint64_t address, int enable, int step)
+{
+    arm_debug_state64_t state;
+    if (GuestDebugStateRead(&state) != 0) {
+        return -1;
     }
     state.__wvr[0] = address;
     /* DBGWCR_EL1: E=1, LSC=2 (store), BAS=0xff (8 bytes), MASK=0. */
     state.__wcr[0] = enable
         ? ((1ULL << 0) | (2ULL << 3) | (0xFFULL << 5))
         : 0;
-    count = ARM_DEBUG_STATE64_COUNT;
-    result = thread_set_state(mach_thread_self(),
-                              ARM_DEBUG_STATE64,
-                              (thread_state_t)&state,
-                              count);
-    return (int)result;
+    if (step) {
+        state.__mdscr_el1 |= 1ULL;
+    } else {
+        state.__mdscr_el1 &= ~1ULL;
+    }
+    if (GuestDebugStateWrite(&state) != 0) {
+        return -2;
+    }
+
+    arm_debug_state64_t back;
+    if (GuestDebugStateRead(&back) != 0) {
+        return -3;
+    }
+    if (((back.__wcr[0] & 1ULL) != 0) != (enable != 0)) {
+        return -4;
+    }
+    if (((back.__mdscr_el1 & 1ULL) != 0) != (step != 0)) {
+        return -5;
+    }
+    return 0;
 }
+
+/*
+ * EC values from ESR_EL1.ISS: 0x32 = software step, 0x33 = watchpoint.
+ * Anything else is a real trap the guest should not see; report and stop.
+ */
+#define GUEST_ESR_EC(esr) (((esr) >> 26) & 0x3f)
+#define GUEST_EC_STEP 0x32
+#define GUEST_EC_WATCH 0x33
 
 static void GuestTrapHandler(int signalNumber,
                              siginfo_t *information,
@@ -933,19 +984,63 @@ static void GuestTrapHandler(int signalNumber,
         far = (uint64_t)state->uc_mcontext->__es.__far;
         esr = (uint32_t)state->uc_mcontext->__es.__esr;
     }
+
+    if (GUEST_ESR_EC(esr) == GUEST_EC_STEP) {
+        /* The store we let through has executed; watch it again. */
+        GuestWatchStepping = 0;
+        if (GuestWatchArmed) {
+            GuestSetDebugWatch((uint64_t)GuestWatchAddress, 1, 0);
+        }
+        return;
+    }
+
+    GuestWatchHits++;
     char where[128];
     GuestDescribeAddress((uintptr_t)pc, where, sizeof(where));
-    GuestLog("[dbg] watchpoint hit signal=%d pc=0x%llx lr=0x%llx"
-             " far=0x%llx esr=0x%x watch=0x%lx pc in %s\n",
-             signalNumber,
-             (unsigned long long)pc,
-             (unsigned long long)lr,
-             (unsigned long long)far,
-             (unsigned)esr,
-             (unsigned long)GuestWatchAddress,
-             where);
-    GuestSetDebugWatch(0, 0);
-    GuestWatchArmed = 0;
+    if (GuestWatchLegitPc == 0) {
+        GuestWatchLegitPc = pc;
+        GuestLog("[dbg] watch hit #1 (baseline site) pc=0x%llx lr=0x%llx"
+                 " esr=0x%x in %s\n",
+                 (unsigned long long)pc,
+                 (unsigned long long)lr,
+                 (unsigned)esr,
+                 where);
+    } else if (pc == GuestWatchLegitPc) {
+        /* The expected UPDATE_CHECK store; stay quiet. */
+    } else {
+        GuestWatchForeign++;
+        GuestLog("[dbg] FOREIGN write #%u pc=0x%llx lr=0x%llx far=0x%llx"
+                 " esr=0x%x watch=0x%lx hits=%u in %s\n",
+                 GuestWatchForeign,
+                 (unsigned long long)pc,
+                 (unsigned long long)lr,
+                 (unsigned long long)far,
+                 (unsigned)esr,
+                 (unsigned long)GuestWatchAddress,
+                 GuestWatchHits,
+                 where);
+    }
+
+    if (GuestWatchHits > 400 || GuestWatchForeign > 8) {
+        GuestWatchArmed = 0;
+        GuestSetDebugWatch(0, 0, 0);
+        GuestLog("[dbg] watch stopped hits=%u foreign=%u\n",
+                 GuestWatchHits,
+                 GuestWatchForeign);
+        return;
+    }
+
+    int result = GuestSetDebugWatch((uint64_t)GuestWatchAddress, 0, 1);
+    if (result != 0) {
+        GuestWatchArmed = 0;
+        GuestSetDebugWatch(0, 0, 0);
+        GuestLog("[dbg] watch cannot single-step kr=%d, disabled"
+                 " (signal=%d)\n",
+                 result,
+                 signalNumber);
+        return;
+    }
+    GuestWatchStepping = 1;
 }
 
 static void GuestArmWatchpoint(uintptr_t address)
@@ -957,10 +1052,12 @@ static void GuestArmWatchpoint(uintptr_t address)
     sigemptyset(&action.sa_mask);
     sigaction(SIGTRAP, &action, NULL);
 
-    int result = GuestSetDebugWatch((uint64_t)address, 1);
+    /* A new object: point the watchpoint at it, keep the pc baseline. */
     GuestWatchAddress = address;
+    int result = GuestSetDebugWatch((uint64_t)address, 1, 0);
     GuestWatchArmed = (result == 0);
-    GuestLog("[dbg] watchpoint addr=0x%lx kr=%d armed=%d\n",
+    GuestLog("[dbg] watch #%d addr=0x%lx kr=%d armed=%d\n",
+             GuestWatchSlots,
              (unsigned long)address,
              result,
              GuestWatchArmed);
@@ -972,8 +1069,10 @@ static void GuestArmWatchpoint(uintptr_t address)
  */
 static void GuestScanForInflateState(const char *text, size_t length)
 {
-    static int attempted = 0;
-    if (attempted || !GuestWatchEnabled || text == NULL || length < 24) {
+    if (!GuestWatchEnabled || text == NULL || length < 24) {
+        return;
+    }
+    if (GuestWatchSlots >= 8) {
         return;
     }
     const char *magic = "[zspy] init2";
@@ -990,6 +1089,44 @@ static void GuestScanForInflateState(const char *text, size_t length)
         return;
     }
     size_t offset = (size_t)(found - text);
+
+    /*
+     * Every .gz in this workload is a two-member file: the 1KB signature and
+     * then the index.  zspy numbers the streams in order, so even numbers are
+     * the index members -- the only ones big enough to matter.  Arming on the
+     * signature's state would watch memory that inflateEnd frees a moment
+     * later, and malloc's own writes there would look like the bug.
+     */
+    unsigned streams = 0;
+    int haveStreams = 0;
+    const char *streamKey = "streams=";
+    for (at = offset; at + 8 <= length && at < offset + 64; at++) {
+        if (memcmp(text + at, streamKey, 8) != 0) {
+            continue;
+        }
+        size_t cursor = at + 8;
+        unsigned value = 0;
+        size_t digits = 0;
+        while (cursor < length && digits < 4) {
+            char character = text[cursor];
+            if (character < '0' || character > '9') {
+                break;
+            }
+            value = value * 10 + (unsigned)(character - '0');
+            cursor++;
+            digits++;
+        }
+        if (digits != 0) {
+            streams = value;
+            haveStreams = 1;
+        }
+        break;
+    }
+    if (haveStreams && (streams % 2) != 0) {
+        GuestLog("[dbg] watch skip stream=%u (signature member)\n", streams);
+        return;
+    }
+
     const char *key = "state=0x";
     const size_t keyLength = 8;
     for (at = offset; at + keyLength <= length; at++) {
@@ -1018,7 +1155,7 @@ static void GuestScanForInflateState(const char *text, size_t length)
         if (digits < 8 || value == 0) {
             return;
         }
-        attempted = 1;
+        GuestWatchSlots++;
         GuestArmWatchpoint((uintptr_t)(value + 0x20));
         return;
     }
