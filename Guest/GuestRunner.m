@@ -517,7 +517,7 @@ static void GuestSignalHandler(int signalNumber,
          * registers name src/dst/bound, and x0 is zlib's z_stream.  Print
          * both instead of inferring the buffer size from the mapping.
          */
-        for (int base = 8; base <= 28; base += 7) {
+        for (int base = 0; base <= 28; base += 7) {
             int count = 28 - base + 1;
             if (count > 7) {
                 count = 7;
@@ -545,6 +545,29 @@ static void GuestSignalHandler(int signalNumber,
             if (used > 0) {
                 text[used++] = '\n';
                 GuestWriteAll(STDOUT_FILENO, text, (size_t)used);
+            }
+            /*
+             * 0.40.35: the faulting instruction is what names the pointer, so
+             * ship the raw encoding of the window around pc.  The matching
+             * libz is identified by its sha256 in the build report; guessing
+             * from a different build's disassembly is how the register/direction
+             * reading went wrong last round.
+             */
+            {
+                int wrote = snprintf(text, sizeof(text), "[guest] code");
+                for (int index = 0; index < 8; index++) {
+                    uint32_t word = *(volatile uint32_t *)(pc - 0x10 + (uint64_t)index * 4);
+                    int room = (int)sizeof(text) - wrote;
+                    if (room <= 12) {
+                        break;
+                    }
+                    wrote += snprintf(text + wrote, (size_t)room,
+                                      " %08x", (unsigned)word);
+                }
+                if (wrote > 0 && (size_t)wrote + 1 < sizeof(text)) {
+                    text[wrote++] = '\n';
+                    GuestWriteAll(STDOUT_FILENO, text, (size_t)wrote);
+                }
             }
         }
         {

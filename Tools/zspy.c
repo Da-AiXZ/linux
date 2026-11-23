@@ -102,6 +102,9 @@ static uLong zspyLastCheck;
 static unsigned zspyCheckReports;
 static Bytef zspyShadow[132 * 1024];
 static uInt zspyShadowLen;
+static unsigned zspyShadowChecks;
+static unsigned zspyShadowChanged;
+static unsigned zspyShadowSkipped;
 static uInt zspyPrevLeft;
 static Bytef *zspyOutStart;
 static const Bytef *zspyPrevIn;
@@ -144,6 +147,9 @@ static void zspyReset(void)
     zspyCheckReports = 0;
     zspyChunkPtr = NULL;
     zspyShadowLen = 0;
+    zspyShadowChecks = 0;
+    zspyShadowChanged = 0;
+    zspyShadowSkipped = 0;
 }
 
 static void zspyState(const void *state);
@@ -188,19 +194,23 @@ static void zspyReport(zspy_stream *stream, int result, uInt before)
             (const unsigned long *)((char *)stream->state + 0x28);
         uLong check = *checkField;
         int gzipWrapped = (*(const int *)((const char *)stream->state + 16)) & 2;
-        if (gzipWrapped && check != zspyOutCrc) {
-            /* Observation only: never write zlib's state back. */
-            if (zspyCheckReports < 12) {
-                zspyCheckReports++;
-                zspyLog("[zck] call=%u check=%08lx outcrc=%08lx"
-                        " this_out=%lu total_out=%lu state_total=%lu\n",
-                        zspyCalls,
-                        (unsigned long)check,
-                        (unsigned long)zspyOutCrc,
-                        (unsigned long)(stream->next_out - zspyOutStart),
-                        (unsigned long)stream->total_out,
-                        (unsigned long)*totalField);
-            }
+        /*
+         * 0.40.35: zspyOutCrc has been proven wrong against the file (it
+         * disagreed while check matched the real CRC at two prefixes), so it
+         * is no longer a verdict -- only aux data.  Print every call's check
+         * with its own output counters; the comparison against the file is
+         * done offline, where the member and the prefix are unambiguous.
+         */
+        if (gzipWrapped && zspyCheckReports < 500) {
+            zspyCheckReports++;
+            zspyLog("[zck] call=%u check=%08lx this_out=%lu"
+                    " total_out=%lu state_total=%lu outcrc=%08lx\n",
+                    zspyCalls,
+                    (unsigned long)check,
+                    (unsigned long)(stream->next_out - zspyOutStart),
+                    (unsigned long)stream->total_out,
+                    (unsigned long)*totalField,
+                    (unsigned long)zspyOutCrc);
         }
         zspyLastCheck = (uLong)*checkField;
     }
@@ -212,8 +222,11 @@ static void zspyReport(zspy_stream *stream, int result, uInt before)
      * enough to tell an 8-byte canary from a page reuse from a 4KB overwrite.
      * Observation only: the copy is never written back.
      */
-    if (zspyChunkPtr != NULL && zspyShadowLen != 0) {
+    if (zspyChunkPtr == NULL || zspyShadowLen == 0) {
+        zspyShadowSkipped++;
+    } else {
         uInt length = zspyShadowLen;
+        zspyShadowChecks++;
         const Bytef *live = zspyChunkPtr;
         uInt index;
         uInt first = length;
@@ -230,8 +243,10 @@ static void zspyReport(zspy_stream *stream, int result, uInt before)
             uInt from = first >= 32 ? first - 32 : 0;
             uInt to = first + 32 < length ? first + 32 : length;
             uInt at;
-            zspyLog("[zmd] first=+%u diffs=%u len=%u base=0x%lx"
+            zspyShadowChanged++;
+            zspyLog("[zmd] gen=%u first=+%u diffs=%u len=%u base=0x%lx"
                     " block=+%u call=%u\n",
+                    zspyChunks ? zspyChunks - 1 : 0,
                     first, diffs, length,
                     (unsigned long)(uintptr_t)zspyChunkPtr,
                     first & ~4095u, zspyCalls);
@@ -250,6 +265,8 @@ static void zspyReport(zspy_stream *stream, int result, uInt before)
     }
 
     if (result < 0 || result == 2) {
+        zspyLog("[zmd] summary checks=%u changed=%u skipped=%u\n",
+                zspyShadowChecks, zspyShadowChanged, zspyShadowSkipped);
         zspyLog("[zspy] fail ret=%d total_in=%lu total_out=%lu"
                 " avail_in=%u avail_out=%u chunk=%u crc=%08lx calls=%u"
                 " msg=%s\n",
@@ -284,6 +301,8 @@ static void zspyReport(zspy_stream *stream, int result, uInt before)
         return;
     }
     if (result == 1) { /* Z_STREAM_END */
+        zspyLog("[zmd] summary checks=%u changed=%u skipped=%u\n",
+                zspyShadowChecks, zspyShadowChanged, zspyShadowSkipped);
         zspyLog("[zout] outcrc=%08lx total_out=%lu\n",
                 (unsigned long)zspyOutCrc,
                 (unsigned long)stream->total_out);
