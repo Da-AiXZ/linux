@@ -375,3 +375,21 @@ v2 的做法是让影子页表**退化成恒等映射**：guest 页大小 = 宿�
 
 所以顺序是：先保留 `b` + 岛（快），真撞到 128 MiB 上限再换 `brk`（无限）。
 两者可以共存：岛够得着的站点用 `b`，够不着的用 `brk`，patch 表里记着用的是哪种。
+
+### 14.6 已落地的 syscall 集合（G3 结束时）
+
+表驱动，未列出的返回 `ENOSYS` 并按编号计数打印一次（所以"缺什么"是日志能回答的问题，
+不是猜的）。截至 G3，静态 busybox 的六条命令用到并已实现：
+
+| 类别 | 调用 |
+|---|---|
+| 文件 | `openat` `close` `read` `write` `readv` `writev` `lseek` `fstat` `newfstatat` |
+| 目录 | `getdents64`（每个 fd 一个独立 `DIR*`，`telldir`/`seekdir` 做缓冲回退） |
+| 进程 | `brk` `mmap` `munmap` `mprotect` `madvise` `set_tid_address` `prlimit64` `sched_getaffinity` `nanosleep` |
+| 身份 | `getpid` `getppid` `getuid` `geteuid` `getgid` `getegid` `gettid` `getgroups` `umask` |
+| 时间 | `clock_gettime` `getrandom` `uname` `ioctl(TIOCGWINSZ)` |
+| 路径 | `getcwd` `chdir` `fchdir` `readlinkat` `faccessat` `fcntl(F_GETFL)` `dup` |
+| 信号 | `rt_sigaction` `rt_sigprocmask` `rt_sigreturn` `sigaltstack`（接受但无状态：单线程同步执行模型） |
+
+**已知缺口**：`sendfile`（71）。busybox 的 `cat` 会先试它，失败自动回落 `read`/`write`，
+输出正确。补它的收益要等有人真的依赖零拷贝，届时一并做 `splice`。

@@ -15,10 +15,20 @@ v1（`../App`、`../Guest`、`../Helper`）已冻结为只读参照。新代码�
 | `src/vspace.c` | 页表、first-fit 分配器、mmap/munmap/mprotect/mremap/madvise/claim |
 | `include/v2/elf.h` · `src/elf.c` | ELF64 解析、段映射、按页归并权限、装入后一次性封权 |
 | `include/v2/patch.h` · `src/patch.c` | `svc`/`mrs`/`msr` 扫描、per-site 32B stub、跳板岛分配与封装 |
+| `include/v2/cpu.h` · `src/entry_aarch64.c` | 272 字节寄存器帧 + 裸入口：保存 31 个寄存器、调调度器、`br` 回 guest |
+| `src/syscall.c` | 表驱动 syscall：文件、目录、stat、内存、时间、身份、`writev`/`readv` |
+| `include/v2/stack.h` · `src/stack.c` | 初始栈：argv/envp/auxv 向下构造，最后只平移指针数组以对齐 16 |
+| `include/v2/proc.h` · `src/proc.c` | fd 表、按 fd 记住规范化路径的**词法**翻译（`..` 爬不出 root） |
+| `src/host_darwin.c` | 唯一知道自己是 Darwin 的文件（`mmap`/`mprotect`/`vm_page_size`） |
+| `src/runner.c` | 预留 → 装载 RW → 打补丁 → 按页封权 → 建栈 → 进入；带故障报告 |
+| `app/` | iOS App：装完自动跑 → 自动上传 → 长轮询命令；右上角「…」菜单 |
 | `tools/vspace_model.py` | 地址空间的**规范模型**，生成对拍轨迹 |
 | `tools/vspace_c_port.py` | `src/vspace.c` 的逐行转写，没编译器时先跑一遍轨迹 |
 | `tests/test_vspace.c` | 假宿主（断言"永不重复 commit"）+ 轨迹重放 + 随机不变量 |
 | `tests/test_elf.c` | 合成 aarch64 ELF：解析 → 装载 → 打补丁 → 封权 → 检查 stub |
+| `tests/test_stack.c` | 按内核的方式读回 argc/argv/envp/auxv，断言 tag 的**编号**与值 |
+| `tests/guest/hello` | 2.5 KB 的 aarch64 Linux ET_DYN（纯汇编，write + exit） |
+| `tests/guest/busybox` | 1.3 MB 的静态 PIE busybox（zig + musl 构建，见 `BUSYBOX.md`） |
 | `tests/trace/*.tsv` | 模型生成的轨迹（返回值 + 页表哈希逐操作比对） |
 
 模型先跑通、再移植成 C —— 语义先可执行，代码再跟上：
@@ -31,9 +41,10 @@ model ok: 60 seeds, 18000 operations, invariants held
 ## 跑测试
 
 ```
-make test      # Linux/macOS：ASan + UBSan；地址空间 + ELF/补丁
-make model     # 只跑 Python 参考模型
-make traces    # 重新生成轨迹（改了语义才需要）
+make test        # Linux/macOS：ASan + UBSan；地址空间 + ELF/补丁 + 栈
+make guest-test  # macOS/aarch64：真的执行一个 aarch64 Linux ELF
+make model       # 只跑 Python 参考模型
+make traces      # 重新生成轨迹（改了语义才需要）
 ```
 
 测试全部在不依赖设备的情况下运行，CI 里 `ubuntu-latest` 与 `macos-latest` 各跑一遍。
