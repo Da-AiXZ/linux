@@ -22,6 +22,7 @@ v1 的教训之一是"日志看着像证据，其实仪器本身坏了"，所以
 | **真执行 guest**：`hello`（aarch64 Linux，ET_DYN） | GitHub `macos-latest`（arm64），7 s | ✅ 打印 `hello from guest`，走完整装载→补丁→syscall→exit |
 | **真机执行 guest**：同一份 `hello` | iPad（iOS 16.6.1，TrollStore），0.01 s | ✅ `hello from guest` + `guest exited status=0`（0.1.2） |
 | **真机完整回路**：上传 → 长轮询 → 命令 → 再运行 → 回传 | 同上，00:33:00 与 00:33:18 两次上传 | ✅ 服务器 `ping from 192.168.144.55`、两条日志入库、命令被取走并 ack |
+| **真机 G3**：busybox 六条命令（0.1.4） | iPad iOS 16.6.1，02:47，七次装载 | ✅ 全部 status=0，输出见 `tests/guest/BUSYBOX.md` |
 | 跳板偏移（`ldr` 字面量） | 汇编器 + 解码断言 | ✅ `58000090 580000b1 d61f0200 d4200000`，读 +16 / +24 |
 
 断言内容包括：每一步之后"宿主视角"与"页表"逐页相等、永不重复 commit、
