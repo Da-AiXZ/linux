@@ -248,6 +248,7 @@ static void GuestDescribeAddress(uintptr_t address,
 static unsigned GuestMunmapSharedPages;
 static unsigned GuestMunmapReleasedPages;
 static unsigned GuestMunmapKeptPages;
+static unsigned GuestReleaseStrictKept;
 static unsigned GuestMappingChecks;
 static unsigned GuestMappingUnbacked;
 /*
@@ -6978,8 +6979,6 @@ static BOOL GuestPageIsRuntime(uintptr_t page)
  * page that had been in active use.  Inspect the records against the request
  * before touching either.
  */
-static unsigned GuestReleaseStrictKept = 0;
-
 static BOOL GuestPageRecordsFitRequest(uintptr_t page,
                                        uintptr_t requestStart,
                                        uintptr_t requestEnd)
