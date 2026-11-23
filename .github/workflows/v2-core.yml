@@ -1,0 +1,55 @@
+name: v2-core
+
+# The v1 workflow (build.yml) needs eight minutes, Xcode and a device to tell
+# you anything.  This one answers "is the address space still correct" in
+# seconds, on two platforms, with sanitizers.
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'v2/**'
+      - '.github/workflows/v2-core.yml'
+  pull_request:
+    paths:
+      - 'v2/**'
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          cc --version
+          python3 --version
+
+      - name: Reference model
+        working-directory: v2
+        run: python3 tools/vspace_model.py --check 60 --ops 300 --pages 2048
+
+      - name: Build and run L1 (trace + random, ASan/UBSan)
+        working-directory: v2
+        run: make test
+
+      # ARCH-v2 §10: a module that grows past 1200 lines is a module that has
+      # started absorbing things that belong somewhere else.  v1's answer was
+      # one file with 8659 lines and 144 branches.
+      - name: Module size budget
+        working-directory: v2
+        run: |
+          set -eu
+          for file in src/*.c include/v2/*.h; do
+            lines=$(wc -l < "$file")
+            echo "$lines  $file"
+            if [ "$lines" -gt 1200 ]; then
+              echo "::error file=$file::module exceeds 1200 lines ($lines)"
+              exit 1
+            fi
+          done

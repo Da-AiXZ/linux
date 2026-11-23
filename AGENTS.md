@@ -1,5 +1,10 @@
 # AGENTS.md
 
+> **2026-11-23 起：本项目进入 v2 重写。** v1（即本文件以下描述的 0.42.0）已冻结为只读
+> 参照。新工程在 `v2/`，入口 `v2/README.md`；判决见 `v2/docs/REVIEW-v1.md`，设计见
+> `v2/docs/ARCH-v2.md`。以下内容仍然有效，但只作为**平台约束与历史证据**阅读——
+> 其中关于地址空间实现的部分已被 v2 取代，不要再照着改。
+
 代码仓库。项目背景、当前状态、真机日志、决策与路线在私有工作区
 [Da-AiXZ/linux-workspace](https://github.com/Da-AiXZ/linux-workspace)。动手前按顺序读：
 `AGENTS.md` → `docs/STATUS.md` → `docs/ROADMAP.md` → `docs/DECISIONS.md`，历史细节查

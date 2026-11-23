@@ -1,5 +1,11 @@
 # Linux Probe
 
+> **2026-11-23：项目进入 v2 重写。** 本文描述的是 v1（0.42.0），已冻结为只读参照
+> （tag `v1-final`）。新工程在 [`v2/`](v2/)，判决见
+> [v2/docs/REVIEW-v1.md](v2/docs/REVIEW-v1.md)，设计见
+> [v2/docs/ARCH-v2.md](v2/docs/ARCH-v2.md)，验证状态见
+> [v2/docs/VERIFICATION.md](v2/docs/VERIFICATION.md)。
+
 在 iPadOS 上以**原生速度**运行 Linux 用户态的实验工程。
 
 目标设备：**iPad Pro 2021（M1，arm64e），iPadOS 16.6.1**，通过 **TrollStore 2** 安装（不上架 App Store）。

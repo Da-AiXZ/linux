@@ -1,10 +1,10 @@
 name: build
 
+# v1 is frozen as of 2026-11-23 (tag `v1-final`).  This workflow used to run on
+# every push to main and cost eight minutes to produce an IPA that nobody
+# installs any more; v2 has its own workflow (v2-core.yml).  Keep this one
+# manual so a v1 IPA can still be rebuilt on demand.
 on:
-  push:
-    branches: [ main ]
-    paths-ignore:
-      - '**.md'
   workflow_dispatch:
 
 jobs:
