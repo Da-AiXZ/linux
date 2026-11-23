@@ -997,6 +997,21 @@ static void GuestTrapHandler(int signalNumber,
     GuestWatchHits++;
     char where[128];
     GuestDescribeAddress((uintptr_t)pc, where, sizeof(where));
+    uint64_t registers[23];
+    memset(registers, 0, sizeof(registers));
+    if (state != NULL && state->uc_mcontext != NULL) {
+        for (int index = 0; index < 23; index++) {
+            registers[index] = (uint64_t)state->uc_mcontext->__ss.__x[index];
+        }
+    }
+    /*
+     * A foreign store is the whole point of this build, so print the
+     * argument and callee-saved registers.  memset's caller is
+     * apk_array_resize, so at the trap x19..x22 still hold
+     * {new pointer, new count, old count, item size} and x0..x2 hold
+     * {dest, value, length} -- enough to say exactly which apk array
+     * landed on inflate_state and how it got there.
+     */
     if (GuestWatchLegitPc == 0) {
         GuestWatchLegitPc = pc;
         GuestLog("[dbg] watch hit #1 (baseline site) pc=0x%llx lr=0x%llx"
@@ -1019,6 +1034,22 @@ static void GuestTrapHandler(int signalNumber,
                  (unsigned long)GuestWatchAddress,
                  GuestWatchHits,
                  where);
+        GuestLog("[dbg] foreign regs x0=0x%llx x1=0x%llx x2=0x%llx"
+                 " x3=0x%llx x19=0x%llx x20=0x%llx x21=0x%llx x22=0x%llx\n",
+                 (unsigned long long)registers[0],
+                 (unsigned long long)registers[1],
+                 (unsigned long long)registers[2],
+                 (unsigned long long)registers[3],
+                 (unsigned long long)registers[19],
+                 (unsigned long long)registers[20],
+                 (unsigned long long)registers[21],
+                 (unsigned long long)registers[22]);
+        GuestLog("[dbg] foreign state at watch-0x20:"
+                 " %016llx %016llx %016llx %016llx\n",
+                 (unsigned long long)*(uint64_t *)(GuestWatchAddress - 0x20),
+                 (unsigned long long)*(uint64_t *)(GuestWatchAddress - 0x18),
+                 (unsigned long long)*(uint64_t *)(GuestWatchAddress - 0x10),
+                 (unsigned long long)*(uint64_t *)(GuestWatchAddress - 0x08));
     }
 
     if (GuestWatchHits > 400 || GuestWatchForeign > 8) {
@@ -1032,12 +1063,16 @@ static void GuestTrapHandler(int signalNumber,
 
     int result = GuestSetDebugWatch((uint64_t)GuestWatchAddress, 0, 1);
     if (result != 0) {
+        static int reported = 0;
         GuestWatchArmed = 0;
         GuestSetDebugWatch(0, 0, 0);
-        GuestLog("[dbg] watch cannot single-step kr=%d, disabled"
-                 " (signal=%d)\n",
-                 result,
-                 signalNumber);
+        if (reported < 1) {
+            reported = 1;
+            GuestLog("[dbg] watch cannot single-step kr=%d, disabled"
+                     " (signal=%d)\n",
+                     result,
+                     signalNumber);
+        }
         return;
     }
     GuestWatchStepping = 1;
@@ -6673,6 +6708,25 @@ static uint64_t GuestHandleMmap(uint64_t hint,
             return (uint64_t)(-error);
         }
         GuestVerifyMapping(target, mapLength, "anon map");
+        {
+            /*
+             * The kernel never hands out a range that is already mapped, so
+             * a conflict here means one of our own records describes live
+             * memory that this call is about to reuse -- i.e. two live
+             * allocations at one address, which is what apk's array landing
+             * on inflate_state would look like.
+             */
+            uintptr_t conflict = GuestMmapConflictEnd(target, mapLength);
+            static unsigned conflicts = 0;
+            if (conflict != 0 && conflicts < 20) {
+                conflicts++;
+                GuestLog("[ovl] anon 0x%lx..0x%lx overlaps a live record"
+                         " up to 0x%lx\n",
+                         (unsigned long)target,
+                         (unsigned long)(target + mapLength),
+                         (unsigned long)conflict);
+            }
+        }
         GuestRememberMmap(target, mapLength);
         GuestCanaryPlace(target, requested, mapLength);
         GuestRecordMmapSize(requested);
@@ -6967,6 +7021,17 @@ static uint64_t GuestHandleMremap(uintptr_t oldAddress,
     GuestReleaseGuestPages(oldAddress, oldMapLength);
     GuestVerifyMapping((uintptr_t)map, newMapLength, "mremap");
     GuestRememberMmap((uintptr_t)map, newMapLength);
+    {
+        static unsigned traced = 0;
+        if (traced < 30) {
+            traced++;
+            GuestLog("[guest] mremap 0x%lx len=0x%lx -> 0x%lx len=0x%lx\n",
+                     (unsigned long)oldAddress,
+                     (unsigned long)oldMapLength,
+                     (unsigned long)(uintptr_t)map,
+                     (unsigned long)newMapLength);
+        }
+    }
     GuestCanaryPlace((uintptr_t)map, newLength, newMapLength);
     return (uint64_t)(uintptr_t)map;
 }

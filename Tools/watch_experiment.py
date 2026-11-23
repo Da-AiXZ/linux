@@ -83,6 +83,10 @@ def main():
                         help="how many SELF-TEST DONE shards to wait for")
     parser.add_argument("--timeout", type=int, default=45 * 60)
     parser.add_argument("--quiet-every", type=int, default=60)
+    parser.add_argument("--until", action="append", default=[],
+                        help="exit as soon as a new log contains this text")
+    parser.add_argument("--max-logs", type=int, default=0,
+                        help="also exit after this many matching logs")
     parser.add_argument("--logs", default=LOGS, help="override the log directory")
     parser.add_argument("--verdict", default=VERDICT,
                         help="override the verdict file")
@@ -100,6 +104,9 @@ def main():
     shards = {}
     runs_seen = 0
     last_note = 0.0
+    matched = []
+    considered = 0
+    hit = None
 
     print("[watch] build=%s expect=%d logs=%d waiting for the device..."
           % (options.build, options.expect, len(seen)))
@@ -117,6 +124,16 @@ def main():
             info = summarise(path)
             if info is None or options.build not in info["build"]:
                 continue
+            considered += 1
+            text = read(path)
+            for pattern in options.until:
+                if pattern in text:
+                    hit = (pattern, path, text)
+                    print("[watch] PATTERN %r in %s" %
+                          (pattern, os.path.basename(path)))
+                    break
+            if hit is not None:
+                break
             if info["runs"]:
                 runs_seen += 1
                 tag = info["libz"] or "?"
@@ -132,6 +149,11 @@ def main():
                        done["failed_runs"]))
             sys.stdout.flush()
 
+        if hit is not None:
+            break
+        if options.max_logs and considered >= options.max_logs:
+            print("[watch] reached --max-logs %d" % options.max_logs)
+            break
         if len(shards) >= options.expect:
             break
         if time.time() - last_note > options.quiet_every:
@@ -142,6 +164,24 @@ def main():
         time.sleep(2)
 
     lines = []
+    if options.until:
+        lines.append("===== watch result (build %s) =====" % options.build)
+        lines.append("logs considered: %d" % considered)
+        if hit is not None:
+            lines.append("matched: %s (%s)" % (hit[0], os.path.basename(hit[1])))
+            for line in hit[2].splitlines():
+                if "[dbg]" in line:
+                    lines.append("  " + line.strip())
+        else:
+            lines.append("matched: none")
+        lines.append("SUMMARY matched=%s logs=%d" %
+                     (hit[0] if hit is not None else "none", considered))
+        with open(verdict_path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+        print()
+        print("\n".join(lines))
+        return 0 if hit is not None else 2
+
     lines.append("===== 0.41.0 A/B verdict =====")
     lines.append("generated %s" % datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     if not shards:
