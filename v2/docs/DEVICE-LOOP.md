@@ -138,9 +138,22 @@ detach（拿到 `CS_DEBUGGED`），`V2ViewController` 只负责显示日志。
 [app] server=http://192.168.144.180:8765
 [v2] patch svc=2 mrs=0 msr=0
 hello from guest
-[app] guest exited status=0        ← 0.1.2 起；0.1.1 这里是 killed by signal 10
-[app] uploaded id=2026…-auto-0.1.2.3.log
+[app] guest exited status=0
+=== busybox ===
+$ busybox ls /
+etc
+…
+=== dynamic ===
+$ dynamic busybox echo
+dynamic-busybox-ok
+$ apk --version
+apk-tools 2.14.13, compiled for aarch64.
+[app] uploaded id=2026…-auto-0.1.5.6.log
 ```
+
+0.1.5 起，`Helpers/root` 里的整棵树（musl、apk、openssl、zlib）在首次启动时被复制到
+`Documents/root`——**包内是只读的，而 G5 的 `apk` 要写**。按文件长度决定是否复制，
+所以升级会替换库文件，但不会每次启动都重写一遍。
 
 服务器侧同时出现 `ping from 192.168.144.x`。
 
