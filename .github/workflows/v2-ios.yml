@@ -1,0 +1,78 @@
+name: v2-ios
+
+# Builds the v2 IPA: the small app plus the real guest runner, signed the way
+# TrollStore expects.  Dispatch-only -- it costs eight minutes and only matters
+# when there is something to install on the device.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ipa:
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          brew install xcodegen >/dev/null
+          brew install ldid >/dev/null || true
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Build
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project LinuxProbe.xcodeproj \
+            -scheme V2 \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            ARCHS=arm64 \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package
+        run: |
+          set -eux
+          APP=build/Build/Products/Release-iphoneos/V2Probe.app
+          HELPER=build/Build/Products/Release-iphoneos/guest-runner-v2
+          test -d "$APP"
+          test -f "$HELPER"
+          mkdir -p "$APP/Helpers"
+          cp "$HELPER" "$APP/Helpers/guest-runner"
+          cp v2/tests/guest/hello "$APP/Helpers/hello"
+          chmod +x "$APP/Helpers/guest-runner"
+
+          ldid -Sv2/app/V2Runner.entitlements "$APP/Helpers/guest-runner"
+          ldid -Sv2/app/V2.entitlements "$APP/V2Probe"
+
+          codesign --force --sign - \
+            --entitlements v2/app/V2Runner.entitlements \
+            "$APP/Helpers/guest-runner"
+          codesign --force --sign - --entitlements v2/app/V2.entitlements \
+            "$APP/V2Probe"
+          # The .app itself must be signed last, with the app's entitlements,
+          # or the helper's permissions are thrown away (v1 learned this the
+          # hard way: every entitlement came back empty).
+          codesign --force --sign - --entitlements v2/app/V2.entitlements "$APP"
+
+          rm -rf Payload V2Probe.ipa
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry V2Probe.ipa Payload
+          shasum -a 256 V2Probe.ipa | tee sha256.txt
+          ls -l V2Probe.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: V2Probe-ipa
+          path: |
+            V2Probe.ipa
+            sha256.txt

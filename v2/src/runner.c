@@ -11,6 +11,10 @@
  */
 #if defined(__APPLE__) && defined(__aarch64__)
 
+#include <TargetConditionals.h>
+#if TARGET_OS_IPHONE
+#include <sys/ptrace.h>
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -84,6 +88,15 @@ static uint8_t *read_file(const char *path, size_t *length)
 
 int main(int argc, char **argv)
 {
+#if TARGET_OS_IPHONE
+    /*
+     * Anonymous PROT_EXEC needs CS_DEBUGGED on iOS.  PT_TRACE_ME is the only
+     * way to get it without a jailbreak entitlement; the app, not this
+     * process, is the tracer, and it detaches after the handshake.
+     * On macOS this call would stop the process instead, hence the guard.
+     */
+    ptrace(PT_TRACE_ME, 0, 0, 0);
+#endif
     const char *root = ".";
     const char *elf_path = NULL;
     int guest_argc = 0;

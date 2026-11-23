@@ -92,6 +92,53 @@ targets:
         OTHER_LDFLAGS: "-framework Foundation -framework CoreFoundation"
         TARGETED_DEVICE_FAMILY: "1,2"
 
+  # ---------------------------------------------------------------- v2
+  # The v2 app is deliberately small: one screen, one button, and it runs the
+  # bundled guest on launch.  Everything interesting is in v2/src, which is
+  # also what CI exercises on macOS.
+  V2Probe:
+    type: application
+    platform: iOS
+    sources:
+      - path: v2/app
+        excludes:
+          - "Info.plist"
+          - "*.entitlements"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.daixz.linux.v2
+        PRODUCT_NAME: V2Probe
+        INFOPLIST_FILE: v2/app/Info.plist
+        CODE_SIGN_ENTITLEMENTS: v2/app/V2.entitlements
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: NO
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        OTHER_LDFLAGS: "-framework UIKit -framework Foundation"
+
+  V2RunnerHelper:
+    type: tool
+    platform: iOS
+    sources:
+      - path: v2/src/vspace.c
+      - path: v2/src/elf.c
+      - path: v2/src/patch.c
+      - path: v2/src/proc.c
+      - path: v2/src/stack.c
+      - path: v2/src/syscall.c
+      - path: v2/src/entry_aarch64.c
+      - path: v2/src/host_darwin.c
+      - path: v2/src/runner.c
+    settings:
+      base:
+        PRODUCT_NAME: guest-runner-v2
+        PRODUCT_BUNDLE_IDENTIFIER: com.daixz.linux.v2.runner
+        MACH_O_TYPE: mh_execute
+        SKIP_INSTALL: YES
+        CODE_SIGN_ENTITLEMENTS: v2/app/V2Runner.entitlements
+        HEADER_SEARCH_PATHS: $(SRCROOT)/v2/include
+        TARGETED_DEVICE_FAMILY: "1,2"
+
 schemes:
   Probe:
     build:
@@ -99,6 +146,16 @@ schemes:
         Probe: all
         ProbeHelper: all
         GuestRunner: all
+    run:
+      config: Debug
+    archive:
+      config: Release
+
+  V2:
+    build:
+      targets:
+        V2Probe: all
+        V2RunnerHelper: all
     run:
       config: Debug
     archive:
