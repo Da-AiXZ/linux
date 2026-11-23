@@ -2854,11 +2854,62 @@ static void GuestLogSyscallStats(void)
     GuestLog( "\n");
 }
 
+/*
+ * 0.40.36: check diverges at a random inflate call, so the interesting moment
+ * is a single write into a 4-byte field.  Keep the last 64 syscalls in a ring
+ * and dump it when zlib reports that its own CRC left the expected value --
+ * that turns "sometime during call 73" into "these syscalls preceded it".
+ */
+typedef struct {
+    uint32_t number;
+    uint32_t spare;
+    uint64_t a0;
+    uint64_t a1;
+    uint64_t a2;
+} GuestSyscallRingEntry;
+
+#define GUEST_SYSCALL_RING 64
+static GuestSyscallRingEntry GuestSyscallRing[GUEST_SYSCALL_RING];
+static unsigned GuestSyscallRingNext;
+static unsigned long long GuestSyscallRingSerial;
+
+static void GuestSyscallRingRecord(uint64_t number, const uint64_t *args)
+{
+    GuestSyscallRingEntry *entry = &GuestSyscallRing[GuestSyscallRingNext];
+    entry->number = (uint32_t)number;
+    entry->spare = 0;
+    entry->a0 = args[0];
+    entry->a1 = args[1];
+    entry->a2 = args[2];
+    GuestSyscallRingNext = (GuestSyscallRingNext + 1) % GUEST_SYSCALL_RING;
+    GuestSyscallRingSerial++;
+}
+
+static void GuestSyscallRingDump(const char *why)
+{
+    unsigned count = GuestSyscallRingSerial < GUEST_SYSCALL_RING
+        ? (unsigned)GuestSyscallRingSerial : GUEST_SYSCALL_RING;
+    GuestLog("[ring] %s entries=%u total=%llu\n",
+             why, count, GuestSyscallRingSerial);
+    for (unsigned index = 0; index < count; index++) {
+        unsigned at = (GuestSyscallRingNext + GUEST_SYSCALL_RING - count + index)
+            % GUEST_SYSCALL_RING;
+        GuestSyscallRingEntry *entry = &GuestSyscallRing[at];
+        GuestLog("[ring] %u nr=%u a0=0x%llx a1=0x%llx a2=0x%llx\n",
+                 index,
+                 entry->number,
+                 (unsigned long long)entry->a0,
+                 (unsigned long long)entry->a1,
+                 (unsigned long long)entry->a2);
+    }
+}
+
 static uint64_t GuestSyscallDispatchInner(uint64_t *args,
                                           uint64_t number,
                                           uint64_t returnAddress)
 {
     static unsigned int traceCount = 0;
+    GuestSyscallRingRecord(number, args);
     if (traceCount < 40) {
         traceCount++;
         GuestLog(
@@ -2898,6 +2949,18 @@ static uint64_t GuestSyscallDispatchInner(uint64_t *args,
             return GuestErrno();
         }
         GuestAccountSocket((int)args[0], result, YES);
+        if (result > 0 && (size_t)args[2] <= 4096 && args[1] != 0) {
+            const char *text = (const char *)(uintptr_t)args[1];
+            size_t length = (size_t)result;
+            for (size_t at = 0; at + 6 <= length; at++) {
+                if (text[at] == '[' && text[at + 1] == 'z' &&
+                    text[at + 2] == 'm' && text[at + 3] == 'a' &&
+                    text[at + 4] == 'r' && text[at + 5] == 'k') {
+                    GuestSyscallRingDump("zmark");
+                    break;
+                }
+            }
+        }
         return (uint64_t)result;
     }
     case 63: { /* read */

@@ -100,6 +100,7 @@ static uLong zspyOutCrc; /* gzip trailer uses crc32 starting at 0 */
 static const Bytef *zspyChunkPtr;
 static uLong zspyLastCheck;
 static unsigned zspyCheckReports;
+static int zspyMarked;
 static Bytef zspyShadow[132 * 1024];
 static uInt zspyShadowLen;
 static unsigned zspyShadowChecks;
@@ -145,6 +146,7 @@ static void zspyReset(void)
     zspyLastOffset = 0;
     zspyLastCheck = 0;
     zspyCheckReports = 0;
+    zspyMarked = 0;
     zspyChunkPtr = NULL;
     zspyShadowLen = 0;
     zspyShadowChecks = 0;
@@ -211,6 +213,16 @@ static void zspyReport(zspy_stream *stream, int result, uInt before)
                     (unsigned long)stream->total_out,
                     (unsigned long)*totalField,
                     (unsigned long)zspyOutCrc);
+            if (!zspyMarked && check != zspyOutCrc) {
+                /* 0.40.36: ask the runner to dump the syscall ring here. */
+                zspyMarked = 1;
+                zspyLog("[zmark] call=%u check=%08lx outcrc=%08lx"
+                        " total_out=%lu\n",
+                        zspyCalls,
+                        (unsigned long)check,
+                        (unsigned long)zspyOutCrc,
+                        (unsigned long)stream->total_out);
+            }
         }
         zspyLastCheck = (uLong)*checkField;
     }
