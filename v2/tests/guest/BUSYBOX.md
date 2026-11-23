@@ -53,3 +53,27 @@ G3: six applets, each hitting a different part of the syscall table.
 
 `tests/guest/root/` is the guest's `/` for those runs; the app builds the
 same fixture under `Documents/root` on the device.
+
+## Result (2026-11-24, macOS arm64 runner)
+
+```
+ls /            etc  hello.txt  sub
+cat /etc/motd   v2 guest rootfs
+uname -a        Linux v2 6.6.0-v2 #1 SMP aarch64 GNU/Linux
+ls -l            -rw-r--r--    1 0 0    26 Nov 23 18:01 /hello.txt
+id              uid=0(root) gid=0(root)
+pwd             /
+```
+
+Three defects stood between "it loads" and this output, all found by running:
+
+1. **AT_PHENT / AT_PHNUM tags were 11 / 10.** The real numbers are 4 and 5.
+   musl computes the load bias by walking the program headers looking for
+   PT_DYNAMIC; with a zero count it never entered the loop, kept base = 0 and
+   faulted relocating against address 0x280. `hello` never noticed because it
+   is pure assembly and reads no auxv.
+2. **`writev` was missing.** musl's stdio flushes through `writev` when more
+   than one buffer is pending, so every applet "ran" and printed nothing.
+3. **The runner's diagnostics went to stdout**, so `pwd` -- which should be
+   one line -- came back as five lines of `[v2] ...` plus "/". Diagnostics are
+   stderr now; the guest owns stdout.

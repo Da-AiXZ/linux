@@ -16,6 +16,8 @@ v1 的教训之一是"日志看着像证据，其实仪器本身坏了"，所以
 | 随机不变量 `--random 400 99` | 3 组 × 400 操作 | 通过，16 189 条断言 |
 | ELF 装载 + 补丁（合成 ELF） | 2 段 / 3 个站点 | 通过，93 条断言 |
 | 初始栈 argv/envp/auxv | 2 参数 / 2 环境变量 | 通过，156 条断言 |
+| 静态 busybox 六条命令 | `ls /` `cat` `uname -a` `ls -l` `id` `pwd` | ✅ macOS arm64 全过（见下） |
+| 初始栈 auxv 类型号 | AT_PHENT=4 / AT_PHNUM=5 | 通过，158 条断言 |
 | stub 机器码与汇编器逐字比对 | 4 条指令 + 2 个字面量 | 与 `zig cc -target aarch64` 输出完全相同 |
 | **真执行 guest**：`hello`（aarch64 Linux，ET_DYN） | GitHub `macos-latest`（arm64），7 s | ✅ 打印 `hello from guest`，走完整装载→补丁→syscall→exit |
 | **真机执行 guest**：同一份 `hello` | iPad（iOS 16.6.1，TrollStore），0.01 s | ✅ `hello from guest` + `guest exited status=0`（0.1.2） |
