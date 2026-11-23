@@ -86,6 +86,7 @@ jobs:
               # kbuild asks GNU ld for --warn-common; lld has no such option
               # and zig turns the unknown flag into a hard error.
               -Wl,--warn-common|-Wl,-warn-common) continue ;;
+              -Wl,-Map,*|-Wl,--Map,*) continue ;;
               *) out+=("$a") ;;
             esac
           done
