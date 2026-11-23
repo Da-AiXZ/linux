@@ -51,6 +51,7 @@ uint64_t v2_stack_build(v2_space *space, uint64_t top, int argc,
     uint64_t envp_address[V2_STACK_MAX_ARGS];
     uint64_t block_start;
     uint64_t block_length;
+    uint64_t array_top;
     uint64_t random[2] = {0x9E3779B97F4A7C15ULL, 0xC2B2AE3D27D4EB4FULL};
     uint64_t execfn_address;
     uint8_t backup[2048];
@@ -62,9 +63,6 @@ uint64_t v2_stack_build(v2_space *space, uint64_t top, int argc,
         stack_fail("argc/envc", (uint64_t)argc, (size_t)envc, 0);
         return 0;
     }
-
-    fprintf(stderr, "[v2] stack: top=0x%llx argc=%d envc=%d\n",
-            (unsigned long long)top, argc, envc);
 
     /* execfn goes highest: AT_EXECFN points at it and nothing moves it. */
     if (push_bytes(space, &cursor, aux->execfn, strlen(aux->execfn) + 1) != 0) {
@@ -91,6 +89,7 @@ uint64_t v2_stack_build(v2_space *space, uint64_t top, int argc,
     random[0] = cursor;
 
     cursor &= ~15ULL;
+    array_top = cursor;
 
     if (push_u64(space, &cursor, 0) != 0) {              /* AT_NULL */
         return 0;
@@ -166,39 +165,40 @@ uint64_t v2_stack_build(v2_space *space, uint64_t top, int argc,
     }
 
     /*
-     * argc is 8 bytes, so the block is 16-aligned only for some argc/envc
-     * combinations.  Shift the whole block down by 8 when needed instead of
-     * adding padding inside it -- padding would have to sit between argc and
-     * argv, which is not the layout the ABI describes.
+     * argc is 8 bytes, so the array is 16-aligned only for some argc/envc
+     * combinations.  Shift *the pointer array* down by 16 when needed, never
+     * the strings: the pointers inside the array point up into the strings,
+     * and moving those would invalidate every one of them (the first run of
+     * this test caught exactly that).
      */
     block_start = cursor;
-    block_length = top - cursor;
-    if ((cursor & 15ULL) != 0) {
-        if (block_length > sizeof(backup)) {
-            stack_fail("block too large", block_start, (size_t)block_length, 0);
+    block_length = array_top - cursor;
+    if ((cursor & 15ULL) == 0) {
+        return cursor;
+    }
+    if (block_length > sizeof(backup)) {
+        stack_fail("block too large", block_start, (size_t)block_length, 0);
+        return 0;
+    }
+    {
+        int status = v2_space_read(space, backup,
+                                   (const void *)(uintptr_t)block_start,
+                                   (size_t)block_length);
+
+        if (status != 0) {
+            stack_fail("read", block_start, (size_t)block_length, status);
             return 0;
         }
-        {
-            int status = v2_space_read(space, backup,
-                                       (const void *)(uintptr_t)block_start,
-                                       (size_t)block_length);
-
-            if (status != 0) {
-                stack_fail("read", block_start, (size_t)block_length, status);
-                return 0;
-            }
-        }
-        aligned = (cursor & ~15ULL) - 16;
-        {
-            int status = v2_space_write(space, (void *)(uintptr_t)aligned,
-                                        backup, (size_t)block_length);
-
-            if (status != 0) {
-                stack_fail("shift", aligned, (size_t)block_length, status);
-                return 0;
-            }
-        }
-        return aligned;
     }
-    return cursor;
+    aligned = (cursor & ~15ULL) - 16;
+    {
+        int status = v2_space_write(space, (void *)(uintptr_t)aligned, backup,
+                                    (size_t)block_length);
+
+        if (status != 0) {
+            stack_fail("shift", aligned, (size_t)block_length, status);
+            return 0;
+        }
+    }
+    return aligned;
 }

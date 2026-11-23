@@ -20,7 +20,7 @@ GUEST_SOURCES := src/vspace.c src/elf.c src/patch.c src/proc.c src/stack.c \
                  src/syscall.c src/entry_aarch64.c src/host_darwin.c \
                  src/runner.c
 
-all: $(BUILD)/test_vspace $(BUILD)/test_elf
+all: $(BUILD)/test_vspace $(BUILD)/test_elf $(BUILD)/test_stack
 
 $(BUILD)/test_vspace: $(SOURCES) tests/test_vspace.c $(HEADERS)
 	@mkdir -p $(BUILD)
@@ -30,7 +30,11 @@ $(BUILD)/test_elf: $(SOURCES) tests/test_elf.c $(HEADERS)
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) $(SANITIZE) -o $@ $(SOURCES) tests/test_elf.c
 
-test: $(BUILD)/test_vspace $(BUILD)/test_elf
+$(BUILD)/test_stack: $(SOURCES) src/stack.c tests/test_stack.c $(HEADERS)
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) $(SANITIZE) -o $@ $(SOURCES) src/stack.c tests/test_stack.c
+
+test: $(BUILD)/test_vspace $(BUILD)/test_elf $(BUILD)/test_stack
 	@$(BUILD)/test_vspace --trace tests/trace/basic.tsv \
 	                          tests/trace/tight.tsv \
 	                          tests/trace/wide.tsv
@@ -38,6 +42,7 @@ test: $(BUILD)/test_vspace $(BUILD)/test_elf
 	@$(BUILD)/test_vspace --random 400 99
 	@$(BUILD)/test_vspace --random 400 12345
 	@$(BUILD)/test_elf
+	@$(BUILD)/test_stack
 
 # Workstation build.  There is no MSVC and no Xcode on this machine, so zig cc
 # (installed on F:) cross-links the same files for Windows; the binaries run the
@@ -55,11 +60,16 @@ windows:
 	  $(ZIG) cc -target x86_64-windows-gnu -std=c11 -O1 -g -Iinclude \
 	  -Wall -Wextra -Werror -Wshadow -o $(BUILD)/test_elf.exe \
 	  $(SOURCES) tests/test_elf.c
+	ZIG_GLOBAL_CACHE_DIR=$(ZIGCACHE) ZIG_LOCAL_CACHE_DIR=$(ZIGCACHE)/local \
+	  $(ZIG) cc -target x86_64-windows-gnu -std=c11 -O1 -g -Iinclude \
+	  -Wall -Wextra -Werror -Wshadow -o $(BUILD)/test_stack.exe \
+	  $(SOURCES) src/stack.c tests/test_stack.c
 	@$(BUILD)/test_vspace.exe --trace tests/trace/basic.tsv \
 	                              tests/trace/tight.tsv \
 	                              tests/trace/wide.tsv
 	@$(BUILD)/test_vspace.exe --random 400 1
 	@$(BUILD)/test_elf.exe
+	@$(BUILD)/test_stack.exe
 
 traces:
 	@python3 tools/vspace_model.py --trace tests/trace/basic.tsv --seed 1  --ops 400 --pages 2048
@@ -91,6 +101,6 @@ guest-test: $(BUILD)/guest-runner
 	@echo "guest ok: $$(grep -c 'hello from guest' $(BUILD)/guest.out) line(s)"
 
 clean:
-	@rm -f $(BUILD)/test_vspace $(BUILD)/test_elf $(BUILD)/guest-runner
+	@rm -f $(BUILD)/test_vspace $(BUILD)/test_elf $(BUILD)/test_stack $(BUILD)/guest-runner
 
 .PHONY: all test windows guest guest-test traces model port clean

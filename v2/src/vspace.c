@@ -562,6 +562,7 @@ long long v2_space_advise(v2_space *space, void *addr, size_t length,
 int v2_space_check(const v2_space *space, const void *addr, size_t length,
                    int need_prot)
 {
+    size_t offset;
     size_t first;
     size_t count;
 
@@ -571,15 +572,18 @@ int v2_space_check(const v2_space *space, const void *addr, size_t length,
     if (length == 0) {
         return 0;          /* no page is touched; matches Linux */
     }
-    if (!v2_is_aligned(space, addr)) {
-        return -V2_EFAULT;
-    }
     if ((uintptr_t)addr < (uintptr_t)space->base) {
         return -V2_EFAULT;
     }
-    first = (size_t)(((uintptr_t)addr - (uintptr_t)space->base) /
-                     space->page_size);
-    count = v2_pages_for(length, space->page_size);
+    /*
+     * A range check is not an mmap: the address does not have to be page
+     * aligned, only the range has to be inside the mapping.  Requiring
+     * alignment here rejected every write into the middle of the initial
+     * stack (v2_stack_build found it in one run).
+     */
+    offset = (size_t)((uintptr_t)addr - (uintptr_t)space->base);
+    first = offset / space->page_size;
+    count = v2_pages_for(offset % space->page_size + length, space->page_size);
     if (first >= space->page_count || count > space->page_count - first) {
         return -V2_EFAULT;
     }
@@ -600,8 +604,7 @@ int v2_space_state_at(const v2_space *space, const void *addr)
 {
     size_t page;
 
-    if (space == NULL || !v2_is_aligned(space, addr) ||
-        (uintptr_t)addr < (uintptr_t)space->base) {
+    if (space == NULL || (uintptr_t)addr < (uintptr_t)space->base) {
         return -1;
     }
     page = (size_t)(((uintptr_t)addr - (uintptr_t)space->base) /

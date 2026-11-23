@@ -290,7 +290,7 @@ v2/
 |---|---|---|
 | **G1** | 地址空间 + 模型对拍 + CI | ✅ 2026-11-23 |
 | **G2a** | ELF 解析/装载 + 站点扫描 + per-site stub + 段权限归并 | ✅ 2026-11-23（合成 ELF，93 条断言；stub 机器码与汇编器逐字相同） |
-| **G2b** | 最小 syscall（write/exit/mmap/brk/open/read/close）+ 栈与 auxv | 下一步 |
+| **G2b** | 寄存器框架 + 入口跳板 + 最小 syscall + 初始栈 + runner | ✅ 2026-11-23（本机栈测试 156 条断言；真机执行待 CI） |
 | **G2c** | 第一个真程序：`pie-hello`（静态 PIE） | |
 | **G3** | 静态 busybox 六条命令（桌面先绿，再上真机） | |
 | **G4** | PT_INTERP + musl `ld.so` + `apk --version` | |
