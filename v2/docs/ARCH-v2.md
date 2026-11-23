@@ -294,7 +294,8 @@ v2/
 | **G2c** | 第一个真程序：`tests/guest/hello`（aarch64 Linux ET_DYN） | ✅ 2026-11-23，CI 上真实执行 |
 | **G3** | 静态 busybox 六条命令（桌面先绿，再上真机） | ✅ 2026-11-24，macOS arm64 + iPad（0.1.4） |
 | **G4** | PT_INTERP + musl `ld.so` + `apk --version` | ✅ 2026-11-24，macOS arm64；真机 0.1.5 |
-| **G5** | rootfs + `apk add` 本地 + `apk update` 本地 index ×200 | |
+| **G5a** | 本地仓库 + `apk update` ×200（死线） | 进行中：单次通过；200 次循环抓到间歇性符号解析失败 |
+| **G5b** | 本地 `apk add`（解包 + 依赖 + 数据库） | 未通过：libz `inflate_fast` 读到 NULL window |
 | **G6** | socket/TLS + 网络 `apk update` + `apk add bash` + `bash` | |
 | **G7** | fork/exec/线程 | |
 
@@ -419,3 +420,29 @@ v2 的做法是让影子页表**退化成恒等映射**：guest 页大小 = 宿�
 它自己注释写着 "we map too much, possibly even more than the length of the file"。
 最后一个 `PT_LOAD` 的尾页还带着 `.bss`。把 EOF 当错误（v1 的做法）就永远装不进 libc。
 EOF 之后保持零，正是 Linux 的行为。
+
+### 14.8 G5 的两个未解决问题（2026-11-24 记录）
+
+**G5b：`apk add` 在 libz 的 `inflate_fast` 里读到 NULL window。**
+寄存器现场说明了一切：`x2 = 0x1aea`（zlib 的 `op`）、`x7 = 0x10ca38026`（输出指针），
+而 `x1 = x7 - dist = 0x6516`。`0x8000 - 0x1aea = 0x6516` 精确成立，也就是说
+`from = window + wsize - op` 里 **`window == NULL` 而 `wsize == 0x8000`**。
+zlib 只在 `updatewindow()` 分配成功后才设 `wsize`，所以 `window` 是**事后**被写成 0 的——
+有人往 apk 的 inflate state 里写了 8 个零字节。只在大包（需要走 fast loop）时发生，
+小索引（`apk update`）不触发，所以它一直藏着。
+
+**G5a 的间歇性失败：符号解析偶发 `symbol not found`。**
+`apk update` 连跑 200 次，第 26 次在重定位阶段失败：
+
+```
+Error relocating /usr/lib/libcrypto.so.3: pthread_rwlock_init: symbol not found
+```
+
+同一份字节、同样的代码，前 25 次都通过。更早的一次是
+`apk_blob_cstr: symbol not found`（那是 libapk **自己**定义的符号）。
+两个失败都发生在 `ld.so` 解析符号时，且都与地址布局相关：成功与失败的 arena 基址
+互有重叠，所以不是简单的对齐问题。
+
+这两件事很可能同源：**某处在特定布局下写到不该写的地方**。下一步的做法不是继续读代码，
+而是把 `V2_VERIFY` 自检打开（映射后逐页与文件比对），让"映射错了"和"状态被写了"
+这两种可能被数据分开。
