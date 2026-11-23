@@ -17,6 +17,7 @@ v1 的教训之一是"日志看着像证据，其实仪器本身坏了"，所以
 | ELF 装载 + 补丁（合成 ELF） | 2 段 / 3 个站点 | 通过，93 条断言 |
 | 初始栈 argv/envp/auxv | 2 参数 / 2 环境变量 | 通过，156 条断言 |
 | stub 机器码与汇编器逐字比对 | 4 条指令 + 2 个字面量 | 与 `zig cc -target aarch64` 输出完全相同 |
+| **真执行 guest**：`hello`（aarch64 Linux，ET_DYN） | GitHub `macos-latest`（arm64），7 s | ✅ 打印 `hello from guest`，走完整装载→补丁→syscall→exit |
 
 断言内容包括：每一步之后"宿主视角"与"页表"逐页相等、永不重复 commit、
 地址对齐与边界、`check()` 与保护位一致、`munmap` 后必然 `EFAULT`。
