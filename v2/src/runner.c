@@ -98,6 +98,29 @@ static void v2_fault(int number, siginfo_t *info, void *context)
         fprintf(stderr, "[v2] addr = space + 0x%llx\n",
                 (unsigned long long)(address - space_base));
     }
+#if defined(__APPLE__)
+    /*
+     * The registers at the fault.  "addr=0x6516" alone says nothing about
+     * where that pointer came from; x0..x15 and lr usually make it obvious
+     * which argument was never filled in.
+     */
+    {
+        const struct __darwin_arm_thread_state64 *regs =
+            &state->uc_mcontext->__ss;
+
+        fprintf(stderr, "[v2] x0..x7  %016llx %016llx %016llx %016llx"
+                        " %016llx %016llx %016llx %016llx\n",
+                regs->__x[0], regs->__x[1], regs->__x[2], regs->__x[3],
+                regs->__x[4], regs->__x[5], regs->__x[6], regs->__x[7]);
+        fprintf(stderr, "[v2] x8..x15 %016llx %016llx %016llx %016llx"
+                        " %016llx %016llx %016llx %016llx\n",
+                regs->__x[8], regs->__x[9], regs->__x[10], regs->__x[11],
+                regs->__x[12], regs->__x[13], regs->__x[14], regs->__x[15]);
+        fprintf(stderr, "[v2] lr=%016llx sp=%016llx\n",
+                (unsigned long long)regs->__lr,
+                (unsigned long long)regs->__sp);
+    }
+#endif
     /* The instructions around pc, when they are inside the guest. */
     if (link_base != 0 && pc >= link_base && pc < link_end) {
         fprintf(stderr, "[v2] pc is inside the interpreter (+0x%llx)\n",

@@ -1103,12 +1103,15 @@ static struct {
     uint64_t site;
     uint64_t number;
     long long result;
+    uint64_t arg0;
+    uint64_t arg1;
 } trace[V2_TRACE_SIZE];
 static unsigned trace_count;
 
 void v2_syscall_dispatch(struct v2_cpu *cpu)
 {
     uint64_t site = cpu->pc;
+    uint64_t saved[2];
     struct v2_proc *proc = v2_current_process;
     const struct v2_patch_site *patch = NULL;
     uint64_t number;
@@ -1128,6 +1131,8 @@ void v2_syscall_dispatch(struct v2_cpu *cpu)
     }
 
     number = cpu->x[8];
+    saved[0] = cpu->x[0];
+    saved[1] = cpu->x[1];
     if (number < 320 && table[number].fn != NULL) {
         result = table[number].fn(cpu, proc);
     } else {
@@ -1135,9 +1140,15 @@ void v2_syscall_dispatch(struct v2_cpu *cpu)
     }
     cpu->x[0] = (uint64_t)result;
 
-    trace[trace_count % V2_TRACE_SIZE].site = site;
-    trace[trace_count % V2_TRACE_SIZE].number = number;
-    trace[trace_count % V2_TRACE_SIZE].result = result;
+    {
+        unsigned slot = trace_count % V2_TRACE_SIZE;
+
+        trace[slot].site = site;
+        trace[slot].number = number;
+        trace[slot].result = result;
+        trace[slot].arg0 = saved[0];
+        trace[slot].arg1 = saved[1];
+    }
     trace_count++;
 }
 
@@ -1149,8 +1160,26 @@ void v2_syscall_dump_trace(void)
     for (unsigned index = 0; index < total; index++) {
         unsigned slot = (trace_count - total + index) % V2_TRACE_SIZE;
 
-        fprintf(stderr, "  site=0x%llx nr=%llu -> %lld\n",
-                (unsigned long long)trace[slot].site,
-                (unsigned long long)trace[slot].number, trace[slot].result);
+        /*
+         * Arguments only where they carry meaning: an mmap without its
+         * address or an unlinkat without its path is not evidence.
+         */
+        switch (trace[slot].number) {
+        case 215:  /* munmap */
+        case 222:  /* mmap   */
+            fprintf(stderr, "  site=0x%llx nr=%llu(0x%llx, 0x%llx) -> 0x%llx\n",
+                    (unsigned long long)trace[slot].site,
+                    (unsigned long long)trace[slot].number,
+                    (unsigned long long)trace[slot].arg0,
+                    (unsigned long long)trace[slot].arg1,
+                    (unsigned long long)trace[slot].result);
+            break;
+        default:
+            fprintf(stderr, "  site=0x%llx nr=%llu -> %lld\n",
+                    (unsigned long long)trace[slot].site,
+                    (unsigned long long)trace[slot].number,
+                    trace[slot].result);
+            break;
+        }
     }
 }
