@@ -33,6 +33,11 @@ extern _Thread_local uint64_t v2_tls_shadow;
 
 void v2_syscall_dispatch(struct v2_cpu *cpu);
 
+/* Print the last V2_TRACE_SIZE syscalls to stderr (fault reports). */
+void v2_syscall_dump_trace(void);
+
+#define V2_TRACE_SIZE 32
+
 /* Never returns: sets sp and jumps to pc. */
 void v2_guest_enter(uint64_t pc, uint64_t sp);
 

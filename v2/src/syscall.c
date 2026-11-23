@@ -856,6 +856,18 @@ static const struct v2_sysent table[320] = {
     [278] = {"getrandom", sys_getrandom},
 };
 
+/*
+ * The last few syscalls, kept because the interesting failure is almost
+ * always "the guest took a wild branch somewhere after call N".  A fault
+ * handler prints this ring, which turns a bare SIGSEGV into a story.
+ */
+static struct {
+    uint64_t site;
+    uint64_t number;
+    long long result;
+} trace[V2_TRACE_SIZE];
+static unsigned trace_count;
+
 void v2_syscall_dispatch(struct v2_cpu *cpu)
 {
     uint64_t site = cpu->pc;
@@ -884,4 +896,23 @@ void v2_syscall_dispatch(struct v2_cpu *cpu)
         result = log_unsupported(number);
     }
     cpu->x[0] = (uint64_t)result;
+
+    trace[trace_count % V2_TRACE_SIZE].site = site;
+    trace[trace_count % V2_TRACE_SIZE].number = number;
+    trace[trace_count % V2_TRACE_SIZE].result = result;
+    trace_count++;
+}
+
+void v2_syscall_dump_trace(void)
+{
+    unsigned total = trace_count < V2_TRACE_SIZE ? trace_count : V2_TRACE_SIZE;
+
+    fprintf(stderr, "[v2] last %u syscall(s):\n", total);
+    for (unsigned index = 0; index < total; index++) {
+        unsigned slot = (trace_count - total + index) % V2_TRACE_SIZE;
+
+        fprintf(stderr, "  site=0x%llx nr=%llu -> %lld\n",
+                (unsigned long long)trace[slot].site,
+                (unsigned long long)trace[slot].number, trace[slot].result);
+    }
 }

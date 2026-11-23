@@ -14,10 +14,12 @@
 #include <TargetConditionals.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/ucontext.h>
 #include <unistd.h>
 
 #include "v2/cpu.h"
@@ -55,6 +57,68 @@ static void die(const char *what, const char *detail)
     fprintf(stderr, "guest-runner: %s%s%s\n", what,
             detail != NULL ? ": " : "", detail != NULL ? detail : "");
     exit(1);
+}
+
+/* ------------------------------------------------------------- faults */
+
+static uint64_t image_base;
+static uint64_t image_end;
+static uint64_t space_base;
+static uint64_t space_end;
+
+/*
+ * The guest runs inside this process, so a guest fault *is* a host fault.
+ * Without a handler, a SIGSEGV in a megabyte of third-party code says
+ * "somewhere"; with one, the report names the guest pc, the address it
+ * touched and the syscalls it made just before.
+ */
+static void v2_fault(int number, siginfo_t *info, void *context)
+{
+    ucontext_t *state = (ucontext_t *)context;
+    uint64_t pc = 0;
+    uint64_t address = (uint64_t)(uintptr_t)info->si_addr;
+
+#if defined(__APPLE__)
+    pc = (uint64_t)state->uc_mcontext->__ss.__pc;
+#endif
+    fprintf(stderr, "\n[v2] FAULT signal=%d addr=0x%llx pc=0x%llx\n", number,
+            (unsigned long long)address, (unsigned long long)pc);
+    if (image_base != 0 && pc >= image_base && pc < image_end) {
+        fprintf(stderr, "[v2] pc = image + 0x%llx\n",
+                (unsigned long long)(pc - image_base));
+    } else if (space_base != 0 && pc >= space_base && pc < space_end) {
+        fprintf(stderr, "[v2] pc = space + 0x%llx (heap or stack)\n",
+                (unsigned long long)(pc - space_base));
+    } else {
+        fprintf(stderr, "[v2] pc is outside the guest\n");
+    }
+    if (space_base != 0 && address >= space_base && address < space_end) {
+        fprintf(stderr, "[v2] addr = space + 0x%llx\n",
+                (unsigned long long)(address - space_base));
+    }
+    /* The instructions around pc, when they are inside the guest. */
+    if (space_base != 0 && pc >= space_base + 16 && pc < space_end) {
+        const uint32_t *words = (const uint32_t *)(uintptr_t)(pc - 16);
+
+        fprintf(stderr, "[v2] code: %08x %08x  [%08x] %08x %08x\n",
+                words[0], words[1], words[2], words[3], words[4]);
+    }
+    v2_syscall_dump_trace();
+    _exit(128 + number);
+}
+
+static void install_fault_handlers(void)
+{
+    struct sigaction action;
+
+    memset(&action, 0, sizeof(action));
+    action.sa_sigaction = v2_fault;
+    action.sa_flags = SA_SIGINFO;
+    sigemptyset(&action.sa_mask);
+    sigaction(SIGSEGV, &action, NULL);
+    sigaction(SIGBUS, &action, NULL);
+    sigaction(SIGILL, &action, NULL);
+    sigaction(SIGFPE, &action, NULL);
 }
 
 static uint8_t *read_file(const char *path, size_t *length)
@@ -103,6 +167,7 @@ int main(int argc, char **argv)
      */
     ptrace(V2_PT_TRACE_ME, 0, NULL, 0);
 #endif
+    install_fault_handlers();
     const char *root = ".";
     const char *elf_path = NULL;
     int guest_argc = 0;
@@ -276,6 +341,11 @@ int main(int argc, char **argv)
     v2_current_process = &proc;
     v2_current_patcher = &patcher;
     v2_tls_shadow = 0;
+
+    image_base = load.start;
+    image_end = load.start + load.span;
+    space_base = (uint64_t)(uintptr_t)v2_space_base(space);
+    space_end = space_base + v2_space_length(space);
 
     printf("[v2] enter\n");
     fflush(stdout);
