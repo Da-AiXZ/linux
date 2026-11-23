@@ -101,6 +101,8 @@ static const Bytef *zspyChunkPtr;
 static uLong zspyLastCheck;
 static unsigned zspyCheckReports;
 static int zspyMarked;
+static uLong zspyEntryCheck;
+static int zspyEntryValid;
 static Bytef zspyShadow[132 * 1024];
 static uInt zspyShadowLen;
 static unsigned zspyShadowChecks;
@@ -147,6 +149,8 @@ static void zspyReset(void)
     zspyLastCheck = 0;
     zspyCheckReports = 0;
     zspyMarked = 0;
+    zspyEntryValid = 0;
+    zspyEntryCheck = 0;
     zspyChunkPtr = NULL;
     zspyShadowLen = 0;
     zspyShadowChecks = 0;
@@ -228,6 +232,7 @@ static void zspyReport(zspy_stream *stream, int result, uInt before)
             }
         }
         zspyLastCheck = (uLong)*checkField;
+        zspyEntryCheck = *checkField;
     }
 
     /*
@@ -504,6 +509,28 @@ int inflate(zspy_stream *stream, int flush)
             zspyState(stream->state);
         }
     }
+    /*
+     * 0.40.38: zlib runs no code between two inflate() calls, so a check that
+     * differs from the value it returned last time was written from outside in
+     * that gap.  Compare at entry, before zlib can touch anything, and mark it:
+     * the runner dumps its syscall ring on the marker, which narrows "check is
+     * wrong at call 32" to "these syscalls ran between 31 and 32".
+     */
+    if (stream->state != NULL) {
+        uLong current = *(const unsigned long *)((const char *)stream->state + 0x20);
+        int gz = (*(const int *)((const char *)stream->state + 16)) & 2;
+        if (gz && zspyEntryValid && current != zspyEntryCheck) {
+            zspyLog("[zgap] call=%u before=%08lx now=%08lx total_out=%lu\n",
+                    zspyCalls,
+                    (unsigned long)zspyEntryCheck,
+                    (unsigned long)current,
+                    (unsigned long)stream->total_out);
+            zspyLog("[zmark] gap call=%u\n", zspyCalls);
+        }
+        zspyEntryCheck = current;
+        zspyEntryValid = 1;
+    }
+
     zspyOutStart = stream->next_out;
     result = z_inflate(stream, flush);
     /*
