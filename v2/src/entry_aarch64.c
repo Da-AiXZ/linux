@@ -197,6 +197,46 @@ __attribute__((naked, noreturn, used)) void v2_guest_enter(
         /* A fresh Linux process starts with neutral floating point control. */
         "msr  fpcr, xzr\n"
         "msr  fpsr, xzr\n"
+        /*
+         * And with zeroed vector registers.  The general registers were fixed
+         * first; these were not, so every guest began with whatever SIMD state
+         * the host had, spilled it to its own stack, and the spilled words
+         * differed between runs -- which is what the stack comparison kept
+         * finding, one random-looking doubleword at a time.
+         */
+        "movi v0.16b, #0\n"
+        "movi v1.16b, #0\n"
+        "movi v2.16b, #0\n"
+        "movi v3.16b, #0\n"
+        "movi v4.16b, #0\n"
+        "movi v5.16b, #0\n"
+        "movi v6.16b, #0\n"
+        "movi v7.16b, #0\n"
+        "movi v8.16b, #0\n"
+        "movi v9.16b, #0\n"
+        "movi v10.16b, #0\n"
+        "movi v11.16b, #0\n"
+        "movi v12.16b, #0\n"
+        "movi v13.16b, #0\n"
+        "movi v14.16b, #0\n"
+        "movi v15.16b, #0\n"
+        "movi v16.16b, #0\n"
+        "movi v17.16b, #0\n"
+        "movi v18.16b, #0\n"
+        "movi v19.16b, #0\n"
+        "movi v20.16b, #0\n"
+        "movi v21.16b, #0\n"
+        "movi v22.16b, #0\n"
+        "movi v23.16b, #0\n"
+        "movi v24.16b, #0\n"
+        "movi v25.16b, #0\n"
+        "movi v26.16b, #0\n"
+        "movi v27.16b, #0\n"
+        "movi v28.16b, #0\n"
+        "movi v29.16b, #0\n"
+        "movi v30.16b, #0\n"
+        "movi v31.16b, #0\n"
+
         "msr  nzcv, xzr\n"
         "mov  x17, xzr\n"
         "br   x16\n");
