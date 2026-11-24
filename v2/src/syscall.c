@@ -21,6 +21,7 @@
 #include "v2/fsops.h"
 #include "v2/patch.h"
 #include "v2/proc.h"
+#include "v2/systrace.h"
 #include "v2/sysnames.h"
 #include "v2/vmops.h"
 #include "v2/vspace.h"
@@ -1112,89 +1113,13 @@ static const struct v2_sysent table[320] = {
     [278] = {"getrandom", sys_getrandom},
 };
 
-/*
- * The last few syscalls, kept because the interesting failure is almost
- * always "the guest took a wild branch somewhere after call N".  A fault
- * handler prints this ring, which turns a bare SIGSEGV into a story.
- */
-static struct {
-    uint64_t site;
-    uint64_t number;
-    long long result;
-    uint64_t arg0;
-    uint64_t arg1;
-} trace[V2_TRACE_SIZE];
-static unsigned trace_count;
-
-/*
- * A full trace, opt-in through the environment.  The ring above answers "what
- * was the guest doing when it died"; this answers "where did this run start to
- * differ from that one", which is a different question and needs every call,
- * not the last thirty-two.  Everything else this guest sees is deterministic
- * (the image is a file, getrandom is fixed-seed, the address space is built
- * from a fixed base), so with the clock frozen two runs have the same inputs
- * and the first line that differs is a real divergence.
- */
-#define V2_TRACE_LINES_MAX 300000
-static FILE *trace_file;
-static long trace_lines;
-static int trace_opened;
-
-static void trace_close(void)
-{
-    if (trace_file != NULL) {
-        fflush(trace_file);
-        fclose(trace_file);
-        trace_file = NULL;
-    }
-}
-
-static void trace_open(void)
-{
-    static char buffer[1 << 20];
-    const char *path = getenv("V2_SYSCALL_LOG");
-
-    trace_opened = 1;
-    if (path == NULL || path[0] == '\0') {
-        return;
-    }
-    trace_file = fopen(path, "w");
-    if (trace_file == NULL) {
-        fprintf(stderr, "[v2] cannot write a syscall log to %s\n", path);
-        return;
-    }
-    setvbuf(trace_file, buffer, _IOFBF, sizeof(buffer));
-    atexit(trace_close);
-}
-
-static void trace_record(uint64_t site, uint64_t number, long long result,
-                         const uint64_t args[6])
-{
-    if (!trace_opened) {
-        trace_open();
-    }
-    if (trace_file == NULL || trace_lines >= V2_TRACE_LINES_MAX) {
-        return;
-    }
-    fprintf(trace_file,
-            "%ld %s(0x%llx 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx) "
-            "site=0x%llx -> %lld\n",
-            trace_lines,
-            number < 320 && table[number].name != NULL ? table[number].name
-                                                       : "unknown",
-            (unsigned long long)args[0], (unsigned long long)args[1],
-            (unsigned long long)args[2], (unsigned long long)args[3],
-            (unsigned long long)args[4], (unsigned long long)args[5],
-            (unsigned long long)site, result);
-    trace_lines++;
-}
-
 void v2_syscall_dispatch(struct v2_cpu *cpu)
 {
     uint64_t site = cpu->pc;
-    uint64_t saved[2];
     struct v2_proc *proc = v2_current_process;
     const struct v2_patch_site *patch = NULL;
+    const char *name = "unknown";
+    uint64_t args[6];
     uint64_t number;
     long long result;
 
@@ -1211,67 +1136,22 @@ void v2_syscall_dispatch(struct v2_cpu *cpu)
         return;
     }
 
+    /*
+     * x0..x5 are the arguments and the handler owns them, so they are copied
+     * out first: after the call x0 is the result and the rest are whatever the
+     * handler left behind.  A trace that records those is a trace of the
+     * handler, not of the call.
+     */
     number = cpu->x[8];
-    saved[0] = cpu->x[0];
-    saved[1] = cpu->x[1];
-    {
-        uint64_t args[6];
-
-        for (int index = 0; index < 6; index++) {
-            args[index] = cpu->x[index];
-        }
-        if (number < 320 && table[number].fn != NULL) {
-            result = table[number].fn(cpu, proc);
-        } else {
-            result = log_unsupported(number);
-        }
-        cpu->x[0] = (uint64_t)result;
-        trace_record(site, number, result, args);
+    for (int index = 0; index < 6; index++) {
+        args[index] = cpu->x[index];
     }
-
-    {
-        unsigned slot = trace_count % V2_TRACE_SIZE;
-
-        trace[slot].site = site;
-        trace[slot].number = number;
-        trace[slot].result = result;
-        trace[slot].arg0 = saved[0];
-        trace[slot].arg1 = saved[1];
+    if (number < 320 && table[number].fn != NULL) {
+        name = table[number].name;
+        result = table[number].fn(cpu, proc);
+    } else {
+        result = log_unsupported(number);
     }
-    trace_count++;
-}
-
-void v2_syscall_dump_trace(void)
-{
-    unsigned total = trace_count < V2_TRACE_SIZE ? trace_count : V2_TRACE_SIZE;
-
-    if (trace_file != NULL) {
-        fflush(trace_file);
-    }
-    fprintf(stderr, "[v2] last %u syscall(s):\n", total);
-    for (unsigned index = 0; index < total; index++) {
-        unsigned slot = (trace_count - total + index) % V2_TRACE_SIZE;
-
-        /*
-         * Arguments only where they carry meaning: an mmap without its
-         * address or an unlinkat without its path is not evidence.
-         */
-        switch (trace[slot].number) {
-        case 215:  /* munmap */
-        case 222:  /* mmap   */
-            fprintf(stderr, "  site=0x%llx nr=%llu(0x%llx, 0x%llx) -> 0x%llx\n",
-                    (unsigned long long)trace[slot].site,
-                    (unsigned long long)trace[slot].number,
-                    (unsigned long long)trace[slot].arg0,
-                    (unsigned long long)trace[slot].arg1,
-                    (unsigned long long)trace[slot].result);
-            break;
-        default:
-            fprintf(stderr, "  site=0x%llx nr=%llu -> %lld\n",
-                    (unsigned long long)trace[slot].site,
-                    (unsigned long long)trace[slot].number,
-                    trace[slot].result);
-            break;
-        }
-    }
+    cpu->x[0] = (uint64_t)result;
+    v2_trace_record(site, number, name, result, args);
 }

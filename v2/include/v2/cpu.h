@@ -11,6 +11,8 @@
 
 #include <stdint.h>
 
+#include "v2/systrace.h"
+
 struct v2_cpu {
     uint64_t x[31];    /* x0 .. x30, offset 0 .. 240 */
     uint64_t sp;       /* 248: the guest's stack pointer at the site */
@@ -32,11 +34,6 @@ extern struct v2_patcher *v2_current_patcher;
 extern _Thread_local uint64_t v2_tls_shadow;
 
 void v2_syscall_dispatch(struct v2_cpu *cpu);
-
-/* Print the last V2_TRACE_SIZE syscalls to stderr (fault reports). */
-void v2_syscall_dump_trace(void);
-
-#define V2_TRACE_SIZE 32
 
 /* Never returns: sets sp and jumps to pc. */
 void v2_guest_enter(uint64_t pc, uint64_t sp);

@@ -178,7 +178,7 @@ static void v2_fault(int number, siginfo_t *info, void *context)
         fprintf(stderr, "[v2] code: %08x %08x [%08x] %08x %08x   (pc-8..pc+8)\n",
                 words[0], words[1], words[2], words[3], words[4]);
     }
-    v2_syscall_dump_trace();
+    v2_trace_dump();
     _exit(128 + number);
 }
 
