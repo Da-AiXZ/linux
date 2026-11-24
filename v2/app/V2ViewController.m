@@ -422,53 +422,84 @@
         }
 
         /*
-         * Twenty shots per launch.  The flake is ~1% on the desktop but was
-         * 1/1 here once, so one launch is worth twenty samples -- and only a
-         * failing shot keeps its full log, or the upload becomes noise nobody
-         * reads.
+         * One launch, one comparison.  0.1.10 settled that the failure is
+         * layout sensitive rather than a rate: with V2_VERIFY off it fails 197
+         * of 200, with it on it fails 1 of 200 -- the check's 4 MB moves every
+         * library, so it was hiding the bug rather than observing it.
+         *
+         * So the question is no longer "how often" but "which change to the
+         * layout moves it".  Three groups, ten shots each, one variable apart:
+         *
+         *   baseline  no verify, no guard   expect ~10 of 10 to fail
+         *   guard     no verify, V2_GUARD=1 the experiment: one empty page
+         *             after every mapping.  If some code writes past the end
+         *             of a mapping, that write now faults and the log says
+         *             `GUARD PAGE` with the pc that did it.  If instead the
+         *             failures vanish with no guard hit, nothing was written
+         *             out of bounds and the trigger is the adjacency itself.
+         *   control   verify on, no guard   the quiet configuration; ~0
+         *             failures here means the build is sane.
          */
-        [text appendString:@"\n=== apk x20 ===\n"];
-        int passed = 0;
-        int failed = 0;
-        for (int attempt = 0; attempt < 20; attempt++) {
+        NSString *apkPath = apk;
+        NSString *apkRoot = dynamicRoot;
+        __block int lastStatus = 0;
+        NSString *(^oneShot)(void) = ^NSString *{
             NSMutableString *piece = [NSMutableString string];
-            int shot = [V2Runner runGuest:apk root:dynamicRoot
-                                     args:@[@"--version"] timeout:30
-                                   output:piece];
-            if (shot == 0 && [piece rangeOfString:@"apk-tools"].location
-                                != NSNotFound) {
-                passed++;
-            } else {
-                failed++;
-                [text appendFormat:@"\n--- shot %d status=%d ---\n%@",
-                                    attempt + 1, shot, piece];
-            }
-        }
-        [text appendFormat:@"[app] apk x20 passed=%d failed=%d\n", passed,
-                            failed];
+            lastStatus = [V2Runner runGuest:apkPath root:apkRoot
+                                       args:@[@"--version"] timeout:30
+                                     output:piece];
+            return piece;
+        };
+        struct {
+            const char *name;
+            int verify;
+            int guard;
+        } groups[3] = {
+            {"baseline: no verify, no guard", 0, 0},
+            {"guard: no verify, V2_GUARD=1", 0, 1},
+            {"control: verify on", 1, 0},
+        };
 
-        /* Same shots with the verification off: it allocates and it changes
-         * the timing, so it may be the thing hiding the failure. */
-        setenv("V2_NO_VERIFY", "1", 1);
-        [text appendString:@"\n=== apk x200, no verify ===\n"];
-        int raw_pass = 0;
-        int raw_fail = 0;
-        for (int attempt = 0; attempt < 200; attempt++) {
-            NSMutableString *piece = [NSMutableString string];
-            int shot = [V2Runner runGuest:apk root:dynamicRoot
-                                     args:@[@"--version"] timeout:30
-                                   output:piece];
-            if (shot == 0 && [piece rangeOfString:@"apk-tools"].location
-                                != NSNotFound) {
-                raw_pass++;
+        for (int group = 0; group < 3; group++) {
+            int passed = 0;
+            int failed = 0;
+            NSString *header = [NSString stringWithFormat:@"\n=== %s (x10) ===\n",
+                                groups[group].name];
+
+            if (groups[group].verify) {
+                unsetenv("V2_NO_VERIFY");
             } else {
-                raw_fail++;
-                [text appendFormat:@"\n--- raw shot %d status=%d ---\n%@",
-                                    attempt + 1, shot, piece];
+                setenv("V2_NO_VERIFY", "1", 1);
+            }
+            if (groups[group].guard) {
+                setenv("V2_GUARD", "1", 1);
+            } else {
+                unsetenv("V2_GUARD");
+            }
+            [text appendString:header];
+            [self append:header];
+            for (int attempt = 0; attempt < 10; attempt++) {
+                NSString *piece = oneShot();
+                if (lastStatus == 0 &&
+                    [piece rangeOfString:@"apk-tools"].location != NSNotFound) {
+                    passed++;
+                } else {
+                    failed++;
+                    [text appendFormat:@"\n--- %s shot %d status=%d ---\n%@",
+                                        groups[group].name, attempt + 1,
+                                        lastStatus, piece];
+                }
+            }
+            {
+                NSString *summary = [NSString stringWithFormat:
+                    @"[app] %s passed=%d failed=%d\n", groups[group].name,
+                    passed, failed];
+                [text appendString:summary];
+                [self append:summary];
             }
         }
-        [text appendFormat:@"[app] apk x200 passed=%d failed=%d\n", raw_pass,
-                            raw_fail];
+        unsetenv("V2_GUARD");
+        unsetenv("V2_NO_VERIFY");
     } else {
         NSString *note = [NSString stringWithFormat:
             @"[app] G4 skipped: no apk at %@\n", apk];
