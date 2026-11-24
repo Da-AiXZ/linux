@@ -36,18 +36,17 @@
 #endif
 
 /*
- * 256 KiB, sixteen-byte aligned, in BSS.  The dispatcher plus a syscall handler
- * plus a directory listing is nowhere near that; the size exists so that a
- * future handler with a large local cannot quietly walk off the end.
+ * 256 KiB, sixteen-byte aligned.  The dispatcher plus a handler plus a directory
+ * listing is nowhere near that; the size exists so a future handler with a large
+ * local cannot quietly walk off the end.
+ *
+ * Declared in C rather than reserved with `.space` inside a top-level asm block:
+ * that puts the bytes in __TEXT, which is executable and *not writable*, so the
+ * first push faults.  It took a CI run to notice, and the fault it produced
+ * looked exactly like the bug this file exists to fix.
  */
-/* The symbol is the *top*: the stack grows down into the space above it. */
-__asm__(
-    ".p2align 4\n"
-    ".space 262144\n"
-    ".globl " V2_ASM(v2_host_stack_top) "\n"
-    V2_ASM(v2_host_stack_top) ":\n");
-
-extern char v2_host_stack_top[];
+#define V2_HOST_STACK_SIZE 262144
+unsigned char v2_host_stack[V2_HOST_STACK_SIZE] __attribute__((aligned(16)));
 
 __attribute__((naked, used)) void v2_syscall_entry(void)
 {
@@ -75,8 +74,10 @@ __attribute__((naked, used)) void v2_syscall_entry(void)
         "mrs  x9, nzcv\n"
         "str  x9, [sp, #264]\n"
         "mov  x19, sp\n"
-        "adrp x10, " V2_ASM(v2_host_stack_top) "@PAGE\n"
-        "add  x10, x10, " V2_ASM(v2_host_stack_top) "@PAGEOFF\n"
+        "adrp x10, " V2_ASM(v2_host_stack) "@PAGE\n"
+        "add  x10, x10, " V2_ASM(v2_host_stack) "@PAGEOFF\n"
+        "mov  x11, #" "262144" "\n"
+        "add  x10, x10, x11\n"
         "mov  sp, x10\n"
         "mov  x0, x19\n"
         V2_CALL(v2_syscall_dispatch)
