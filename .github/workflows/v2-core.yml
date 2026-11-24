@@ -67,32 +67,20 @@ jobs:
   # The guest is aarch64 Linux; the only host that can execute it is aarch64.
   # This job is the whole point of the rewrite: a real ELF runs, through the
   # real syscall path, in ten seconds and without a device.
+  # A free arm64 Linux runner: no macOS queue, four vCPUs, and the host ABI is
+  # the guest's own -- no reserved x18, 4 KiB pages, a madvise that really
+  # discards.  The loader, the entry code and the address space are exercised
+  # here on every push.
+  #
+  # The syscall layer still carries Darwin-shaped semantics (a `uname` that
+  # prints nothing, `id` dereferencing a null the host never gave it), so the
+  # steps that need a working libc are non-blocking outside a dispatch: on a
+  # push they are a to-do list, on a dispatch they are the gate.  The Darwin leg
+  # below runs the same steps and is always strict.
   guest:
-    # Two hosts, one set of steps.
-    #
-    #   ubuntu-24.04-arm -- a free arm64 runner: no queue, four vCPUs, and the
-    #     host ABI is the guest's own (no reserved x18, 4 KiB pages, a madvise
-    #     that really discards).  The loader, the entry code and the address
-    #     space are exercised here on every push.
-    #   macos-15 -- the device's ABI, pinned.  Its runner pool is small, so it
-    #     runs on dispatch only; the nightly v2-flake keeps the strict reading.
-    #
-    # The syscall layer still carries Darwin-shaped semantics (a `uname` that
-    # prints nothing, `id` dereferencing a null the host never returned), so the
-    # steps that need a working libc are non-blocking on Linux and blocking on
-    # macOS.  The marker disappears when they pass on both.
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04-arm
-            strict: false
-          - os: macos-15
-            strict: true
-    if: matrix.os != 'macos-15' || github.event_name == 'workflow_dispatch'
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 20
-    steps:
+    steps: &guest_steps
       - uses: actions/checkout@v4
 
       - name: Host architecture
@@ -151,7 +139,7 @@ jobs:
       # ls -l, getuid and /etc/passwd for id, getcwd for pwd.
       - name: Static busybox through the loader
         # Temporary: expected red on Linux until the syscall layer is portable.
-        continue-on-error: ${{ !matrix.strict }}
+        continue-on-error: ${{ github.event_name != 'workflow_dispatch' }}
         working-directory: v2
         run: |
           set -eu
@@ -187,7 +175,7 @@ jobs:
       # (G3) never exercised any of this.
       - name: Dynamic linking (ld.so + libc)
         # Temporary: expected red on Linux until the syscall layer is portable.
-        continue-on-error: ${{ !matrix.strict }}
+        continue-on-error: ${{ github.event_name != 'workflow_dispatch' }}
         id: dynamic
         working-directory: v2
         # V2_VERIFY makes every file mapping compare itself against the file.
@@ -286,7 +274,7 @@ jobs:
       # temp files, renames -- so it is also the first test of fsops.c.
       - name: apk update against a local repository
         # Temporary: expected red on Linux until the syscall layer is portable.
-        continue-on-error: ${{ !matrix.strict }}
+        continue-on-error: ${{ github.event_name != 'workflow_dispatch' }}
         working-directory: v2
         run: |
           set +e
@@ -769,3 +757,13 @@ jobs:
         if: steps.add.outcome == 'failure'
         run: |
           echo "::warning::apk add is still failing (G5b) -- libz inflate reads a NULL window"
+
+  # The same steps on the device's ABI, pinned so the image cannot move under a
+  # comparison.  Its runner pool is small and the queue is the reason this
+  # workflow used to take ten minutes to answer a thirty-second question, so it
+  # runs on dispatch.  The strict nightly reading is v2-flake.yml.
+  guest-darwin:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps: *guest_steps
