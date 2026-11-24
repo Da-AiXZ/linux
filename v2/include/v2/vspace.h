@@ -197,4 +197,14 @@ int v2_space_state_at(const v2_space *space, const void *addr);
 uint64_t v2_space_hash(const v2_space *space);
 int v2_space_verify(const v2_space *space);
 
+/*
+ * V2_CHECK_SPACE=1: after every operation, assert that the page table is still
+ * a table the state machine could have produced, and that the canary past the
+ * page array is intact.  A table that has been written through is the one way
+ * this design can still alias two mappings, so the check exists to catch it at
+ * the operation rather than at the symptom.
+ */
+extern int v2_check_space;
+void v2_space_check_now(v2_space *space, const char *what);
+
 #endif /* V2_VSPACE_H */

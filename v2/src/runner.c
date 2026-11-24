@@ -449,6 +449,10 @@ int main(int argc, char **argv)
         }
         fprintf(stderr, "[v2] guard: one page after every mapping\n");
     }
+    if (getenv("V2_CHECK_SPACE") != NULL) {
+        v2_check_space = 1;
+        fprintf(stderr, "[v2] space check: every operation is verified\n");
+    }
     fprintf(stderr, "[v2] space 0x%llx..0x%llx page=0x%zx\n",
            (unsigned long long)(uintptr_t)v2_space_base(space),
            (unsigned long long)((uintptr_t)v2_space_base(space) +

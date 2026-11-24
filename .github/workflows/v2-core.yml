@@ -298,6 +298,37 @@ jobs:
           fi
           echo "guard: no mapping was written past its end in $guard_fail failing runs"
 
+      # The last way this design can still alias two mappings is the page table
+      # itself being written through -- by our own code, or by a guest write our
+      # mapping logic placed badly.  V2_CHECK_SPACE asserts after every single
+      # operation that the table is one the state machine could have produced,
+      # and that the canary past the array is intact.  A hundred and fifty runs
+      # of the harshest configuration (no verification, which is where the
+      # device fails every time) is enough to say whether that ever happens.
+      - name: Space table accused after every operation
+        working-directory: v2
+        run: |
+          set +e
+          corrupted=0
+          failed=0
+          for run in $(seq 1 150); do
+            V2_CHECK_SPACE=1 ./build/guest-runner --root tests/guest/root \
+              tests/guest/root/sbin/apk --version > /tmp/g_space.log 2>&1
+            status=$?
+            [ "$status" -ne 0 ] && failed=$((failed + 1))
+            if grep -q "SPACE CORRUPT" /tmp/g_space.log; then
+              corrupted=$((corrupted + 1))
+              echo "--- run $run ---"
+              grep -A2 -B2 "SPACE CORRUPT" /tmp/g_space.log
+            fi
+          done
+          echo "space check: corrupted=$corrupted of 150 runs, $failed runs failed"
+          if [ "$corrupted" -ne 0 ]; then
+            echo "::error::the page table was written through -- this is aliasing"
+            exit 1
+          fi
+          echo "space check: the table survived 150 runs unchanged in every invariant"
+
       # The gate v1 died on -- two hundred runs, each a fresh process, so the
       # loader runs two hundred times.  This step answers two separate
       # questions:

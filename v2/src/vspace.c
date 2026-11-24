@@ -15,7 +15,37 @@
  */
 #include "v2/vspace.h"
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+/*
+ * V2_CHECK_SPACE=1 turns the page table into a thing that accuses itself.
+ *
+ * Every invariant in this file is a claim about one array; if anything writes
+ * past the end of that array -- ours, or a guest write that our own mapping
+ * logic mis-placed -- the table becomes the lie that produces aliasing.  v1
+ * died of exactly that and could not see it, because its records were spread
+ * over four structures and none of them asserted anything.
+ *
+ * A canary after the array catches an overwrite; verify() catches a state the
+ * state machine cannot produce.  Both are cheap enough to run after every
+ * operation in a diagnostic build, which is where the flake has to be caught:
+ * at the operation that did it, not three thousand syscalls later.
+ */
+int v2_check_space;
+
+#define V2_CANARY_BYTES 64
+static const uint8_t v2_canary[V2_CANARY_BYTES] = {
+    0xA5, 0x5A, 0xC3, 0x3C, 0x96, 0x69, 0x0F, 0xF0,
+    0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+    0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00,
+    0x7E, 0x81, 0x2D, 0xD2, 0x4B, 0xB4, 0xE7, 0x18,
+    0x3A, 0xC5, 0x6F, 0x90, 0x0C, 0xF3, 0x5D, 0xA2,
+    0xB8, 0x47, 0x1E, 0xE1, 0x94, 0x6B, 0xD0, 0x2F,
+    0xF1, 0x0E, 0x8C, 0x73, 0x25, 0xDA, 0x61, 0x9E,
+    0x4A, 0xB5, 0xC7, 0x38, 0xE3, 0x1C, 0x52, 0xAD
+};
 
 struct v2_space {
     struct v2_host host;
@@ -29,6 +59,7 @@ struct v2_space {
     size_t cursor;         /* next-fit hint, in pages */
     size_t guard_pages;    /* diagnostic pages kept empty after each map */
     uint8_t *pages;
+    size_t pages_bytes;    /* what was allocated: pages + the canary */
     /*
      * Guard marks live beside the page array instead of inside it: a guard
      * page is FREE -- it is not committed and it is not an island -- so
@@ -211,13 +242,16 @@ int v2_space_create(v2_space **out, const struct v2_host *host,
     }
     space->base = (uint8_t *)base;
 
-    space->pages = (uint8_t *)host->alloc(host->ctx, pages);
+    space->pages = (uint8_t *)host->alloc(host->ctx,
+                                          pages + V2_CANARY_BYTES);
     if (space->pages == NULL) {
         host->release(host->ctx, base, space->length);
         host->dealloc(host->ctx, space, sizeof(*space));
         return -V2_ENOMEM;
     }
+    space->pages_bytes = pages + V2_CANARY_BYTES;
     memset(space->pages, V2_PAGE_FREE, pages);
+    memcpy(space->pages + pages, v2_canary, V2_CANARY_BYTES);
 
     if (island_stride != 0 && island_size != 0) {
         for (size_t offset = 0; offset < space->length;
@@ -257,7 +291,7 @@ void v2_space_destroy(v2_space *space)
                             space->page_count);
     }
     space->host.release(space->host.ctx, space->base, space->length);
-    space->host.dealloc(space->host.ctx, space->pages, space->page_count);
+    space->host.dealloc(space->host.ctx, space->pages, space->pages_bytes);
     space->host.dealloc(space->host.ctx, space, sizeof(*space));
 }
 
@@ -510,6 +544,7 @@ long long v2_space_map(v2_space *space, void *hint, size_t length, int prot,
         }
     }
     v2_arm_guards(space, first + count, guard);
+    v2_space_check_now(space, "mmap");
     return (long long)(uintptr_t)(space->base + first * space->page_size);
 }
 
@@ -572,6 +607,7 @@ long long v2_space_unmap(v2_space *space, void *addr, size_t length)
     if (first < space->cursor) {
         space->cursor = first > space->alloc_start ? first : space->alloc_start;
     }
+    v2_space_check_now(space, "munmap");
     return 0;
 }
 
@@ -621,6 +657,7 @@ long long v2_space_protect(v2_space *space, void *addr, size_t length,
         space->pages[page] =
             (uint8_t)(V2_PAGE_MAPPED | (prot & V2_PAGE_PROT_MASK));
     }
+    v2_space_check_now(space, "mprotect");
     return 0;
 }
 
@@ -697,6 +734,7 @@ long long v2_space_remap(v2_space *space, void *addr, size_t old_length,
         space->cursor =
             old_first > space->alloc_start ? old_first : space->alloc_start;
     }
+    v2_space_check_now(space, "mremap");
     return (long long)(uintptr_t)(space->base + first * space->page_size);
 }
 
@@ -755,6 +793,7 @@ long long v2_space_advise(v2_space *space, void *addr, size_t length,
             }
         }
     }
+    v2_space_check_now(space, "madvise");
     return 0;
 }
 
@@ -825,33 +864,71 @@ uint64_t v2_space_hash(const v2_space *space)
     return hash;
 }
 
-int v2_space_verify(const v2_space *space)
+/*
+ * -1 and the offending page, for the diagnostic path.  verify() answers "is
+ * this table possible?"; this also answers "where did it stop being possible",
+ * which is the only form of the answer that leads anywhere.
+ */
+static int v2_first_bad(const v2_space *space, size_t *where)
 {
     if (space == NULL || space->pages == NULL) {
-        return -1;
+        *where = 0;
+        return -3;
     }
     for (size_t page = 0; page < space->page_count; page++) {
         int state = space->pages[page];
         if (!(state == V2_PAGE_FREE || state == V2_PAGE_RESERVED ||
               (state >= V2_PAGE_MAPPED &&
                state <= (V2_PAGE_MAPPED | V2_PAGE_PROT_MASK)))) {
+            *where = page;
             return -1;
         }
         if ((state & V2_PAGE_RESERVED) != 0 &&
             (state & V2_PAGE_MAPPED) != 0) {
+            *where = page;
             return -1;
         }
-        /* A guard page is a promise: it is never committed.  If it were,
-         * "the write faulted" would become "the write landed". */
         if (v2_page_is_guard(space, page) && state != V2_PAGE_FREE) {
-            return -1;
+            *where = page;
+            return -2;
         }
     }
     if (space->alloc_start > space->cursor ||
         space->cursor > space->page_count) {
-        return -1;
+        *where = space->cursor;
+        return -3;
     }
     return 0;
+}
+
+void v2_space_check_now(v2_space *space, const char *what)
+{
+    size_t where = 0;
+    int why;
+
+    if (!v2_check_space || space == NULL) {
+        return;
+    }
+    why = v2_first_bad(space, &where);
+    if (why != 0) {
+        fprintf(stderr, "[v2] SPACE CORRUPT after %s: page %zu, reason %d, "
+                        "state 0x%02x\n",
+                what, where, why, (unsigned)space->pages[where]);
+        abort();
+    }
+    if (memcmp(space->pages + space->page_count, v2_canary,
+               V2_CANARY_BYTES) != 0) {
+        fprintf(stderr, "[v2] SPACE CORRUPT after %s: canary past the page "
+                        "array was overwritten\n", what);
+        abort();
+    }
+}
+
+int v2_space_verify(const v2_space *space)
+{
+    size_t where = 0;
+
+    return v2_first_bad(space, &where) == 0 ? 0 : -1;
 }
 
 int v2_space_read(const v2_space *space, void *destination,
