@@ -345,6 +345,7 @@ jobs:
             shift
             failed=0
             counted=0
+            where=""
             for run in $(seq 1 150); do
               env "$@" ./build/guest-runner --root tests/guest/root \
                 tests/guest/root/sbin/apk --version > /tmp/g_am.log 2>&1
@@ -352,9 +353,13 @@ jobs:
                 continue
               fi
               counted=$((counted + 1))
-              grep -q "Error relocating\|FAULT" /tmp/g_am.log && failed=$((failed + 1))
+              if grep -q "Error relocating\|FAULT" /tmp/g_am.log; then
+                failed=$((failed + 1))
+                where="$where $run"
+                cp /tmp/g_am.log "/tmp/g_where.$failed.log"
+              fi
             done
-            echo "$label: $failed of $counted failed"
+            echo "$label: $failed of $counted failed at runs:$where"
           }
           measure "kernel's address (the shipping configuration)" V2_SPACE_BASE=0x0
           measure "fixed benign address 0x7000000000" V2_SPACE_BASE=0x7000000000
