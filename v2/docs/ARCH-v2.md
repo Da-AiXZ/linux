@@ -656,3 +656,51 @@ Error relocating /var/mobile/Documents/root/sbin/apk: apk_db_repository_check: s
 `next`/`deps` 走一遍，打印每个节点的 name / syms / strings / nbuckets。链上缺一节，
 或者某个指针为空，会直接看见。另一个必须同时验的变量是 `V2_VERIFY` 的 4 MB 分配——
 它能把失败率从"几乎必现"压到 1%，说明失败与堆布局强相关，这条线索不能丢。
+
+#### 门禁的口径，以及 197/200（2026-11-24 16:50）
+
+`v2-core` 在 `f085f48` 上红了：200 次里 11 次失败，越过 5% 上限。**这不是回归，是门禁的口径错了：**
+
+- 5% 是拿 `V2_VERIFY=1` 的 1.1% 定的（200 × 1.1% = 2.2 次，5% ≈ 均值 + 5σ）；
+- 而"apk update two hundred times"是**另一个 shell**，没有继承普查步骤里的
+  `export V2_VERIFY=1`，它跑的是 verify **off**；
+- verify off 的实测速率 5.5%（11/200），天花板必然被顶破。
+
+两处修正：两个步骤都把模式写成 step 级 `env: V2_VERIFY: "1"`，不再靠 shell 继承；
+`v2-flake.yml` 显式声明它跑的是**出厂配置**（verify off：桌面 5.5%、真机 98.5%），
+因为那才是真正发出去的布局。
+
+真机上 verify off 的 200 发里 197 发失败，且符号固定（libcrypto 的 `getnameinfo`）。
+所以它**不是随机发生的**，是在这个布局下必现；"1%"那个数字是仪器把布局挪开之后测出来的。
+一个变量能让速率差 5 倍（桌面）到 200 倍（真机），它就不是细节，是实验条件。
+
+#### 两个仪器：V2_GUARD 与 V2_SPACE_BASE（2026-11-24 17:00）
+
+结论已缩到"字节对、指针错"，那么下一个问题只剩一个：**是有人写到映射外面去了，
+还是这个布局本身让 ld.so 算错？**
+
+`V2_GUARD=1`：每次 first-fit 分配之后留一页空洞——不 commit、不交给分配器、
+**不进页表状态机**（记在旁边的 `guards[]` 里），所以三条轨迹的哈希与模型对拍一个字节都不变。
+越界写会撞在 PROT_NONE 上，故障处理器打出 `GUARD PAGE` 和写者的 `pc`。
+
+v1 做过同样的事却没成，原因写在 workspace 的 `BUG-index-io-error.md`：v1 的 `mapLength`
+按 16 KB 取整而 mallocng 按 4 KB 申请，四分之三的映射末尾留着 4–12 KB slack，越界写先落
+slack。**v2 的 guest 页 == 宿主页，一页就是边界，没有 slack。**
+
+判读只有三种结果，一次真机发射就能分开：
+
+| 现场 | 含义 | 下一步 |
+|---|---|---|
+| 出现 `GUARD PAGE` | 有人越界写；`pc` 就是写者 | 按 pc 定位，bug 收敛 |
+| 无 guard 命中、失败消失 | 没越界；触发条件是相邻布局本身 | 查 ld.so 的堆/`dso` 与库的相对位置 |
+| 无 guard 命中、失败照旧 | 与映射末尾无关 | 回到 `dso` 链 |
+
+`V2_SPACE_BASE=0x...`：把 1 GiB arena 钉在指定基址，让真机那次失败的**绝对**布局在桌面复现。
+失败样本的 arena 基址本身是变的（`0x101800000` / `0x11a800000` / `0x103800000`），
+所以绝对基址不是变量——但"同一个相对布局、随时可重放"仍然是这个 bug 从被等待变成被
+追捕的关键，也正是 G4 判据所要求的"同一个失败能被自动复现"。
+
+`V2_GUARD` 的正确性由 `tests/test_vspace.c` 的 `guard_test` 与 `--guard-random` 守住：
+guard 页永远不被交出、永远不被 commit（`v2_space_verify` 会拒绝 committed 的 guard 页）、
+`MAP_FIXED` 显式要点这页时让位。本机（Windows，zig）实测：轨迹 20 168 条断言、
+随机 2 组 31 993 条、guard 随机 3 组 15 235 条全绿，三条轨迹哈希未变。
