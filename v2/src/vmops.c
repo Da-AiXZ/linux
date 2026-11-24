@@ -111,12 +111,34 @@ void v2_verify_dump(void)
                           want) != 0) {
             continue;
         }
-        for (size_t at = 0; at < want; at++) {
-            if (file[at] != verify_guest[at]) {
-                if (differences == 0) {
-                    first_difference = at;
+        /*
+         * Only executable pages.  musl's first mapping of a library covers the
+         * whole span with the lowest segment's protection, which for a shared
+         * object is the executable one -- so the range we snapshot always
+         * contains the data segments too, and relocation legitimately rewrites
+         * those.  The page table knows which pages are actually code.
+         */
+        {
+            size_t page = v2_space_page_size(v2_current_process->space);
+
+            for (size_t base = 0; base < want; base += page) {
+                int state = v2_space_state_at(
+                    v2_current_process->space,
+                    (const void *)(uintptr_t)(verify_snapshot[index].address +
+                                              base));
+                size_t limit = base + page < want ? base + page : want;
+
+                if ((state & V2_PROT_EXEC) == 0) {
+                    continue;
                 }
-                differences++;
+                for (size_t at = base; at < limit; at++) {
+                    if (file[at] != verify_guest[at]) {
+                        if (differences == 0) {
+                            first_difference = at;
+                        }
+                        differences++;
+                    }
+                }
             }
         }
         fprintf(stderr, "[v2] image %s at 0x%llx: %s",
