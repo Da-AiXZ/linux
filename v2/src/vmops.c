@@ -194,13 +194,6 @@ long long v2_vm_mmap(struct v2_cpu *cpu, struct v2_proc *proc)
     if (result > 0 && fd >= 0) {
         /* Before patching, so the comparison is against the file as it is. */
         verify_mapping(proc, fd, offset, (uint64_t)result, (size_t)length);
-        if (v2_verify_mappings && verify_count < V2_VERIFY_SLOTS) {
-            verify_snapshot[verify_count].address = (uint64_t)result;
-            verify_snapshot[verify_count].length = (size_t)length;
-            verify_snapshot[verify_count].hash =
-                hash_range(proc, (uint64_t)result, (size_t)length);
-            verify_count++;
-        }
     }
     if (result > 0 && fd >= 0 && (prot & V2_PROT_EXEC) != 0 &&
         proc->patcher != NULL) {
@@ -221,6 +214,19 @@ long long v2_vm_mmap(struct v2_cpu *cpu, struct v2_proc *proc)
                 proc->fd_path[(int)cpu->x[4]], (unsigned long long)result,
                 (unsigned long long)length, (unsigned long long)prot,
                 proc->patcher->site_count - before);
+        /*
+         * Snapshot after patching, so the legitimate `svc` rewrites are part
+         * of the baseline.  Only executable mappings: relocation writes into
+         * .data/.got by design, but the symbol tables, the strings and the
+         * code all live here, and nothing should write here afterwards.
+         */
+        if (v2_verify_mappings && verify_count < V2_VERIFY_SLOTS) {
+            verify_snapshot[verify_count].address = (uint64_t)result;
+            verify_snapshot[verify_count].length = (size_t)length;
+            verify_snapshot[verify_count].hash =
+                hash_range(proc, (uint64_t)result, (size_t)length);
+            verify_count++;
+        }
     }
     return result;
 }
