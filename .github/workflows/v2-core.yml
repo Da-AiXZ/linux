@@ -305,58 +305,42 @@ jobs:
       # and that the canary past the array is intact.  A hundred and fifty runs
       # of the harshest configuration (no verification, which is where the
       # device fails every time) is enough to say whether that ever happens.
-      # Three failing runs have byte-identical *relative* layouts (0x10000 /
-      # 0x34000 / 0x48f8000 for the image, the interpreter and the stack), and so
-      # does every passing run, because the allocator is deterministic.  So the
-      # layout is not the variable -- the arena's absolute base is.  Pinning at
-      # 0x7000000000 worked and happened to pass twenty of twenty, which proves
-      # the mechanism and says nothing about the rate.
+      # Three failing runs have byte-identical *relative* layouts, so the
+      # allocator is not the variable: the absolute base is, and pinning it made
+      # four hundred runs pass where two hundred unpinned runs failed five times.
       #
-      # So sweep absolute bases 16 MiB apart from there, two runs each: a base
-      # that fails twice is a layout that fails on demand, which is the whole
-      # difference between hunting this bug and waiting for it.
-      - name: Sweep absolute bases for one that fails on demand
+      # Two reservation paths now differ by exactly one thing, so measure both
+      # halves instead of arguing: V2_PIN_KERNEL keeps the address the kernel
+      # chose but takes it with MAP_FIXED, and V2_SPACE_BASE pins a low address
+      # with the same mechanism the passing runs used.
+      #
+      #   kernel address + MAP_FIXED    fails  -> the address is what matters
+      #                                 passes -> the reservation method is
+      #   low address + MAP_FIXED       fails  -> the region is what matters
+      #                                 passes -> only the method was ever wrong
+      - name: Address or method, take them apart
         working-directory: v2
         run: |
           set +e
-          found=""
-          usable=0
-          for step in $(seq 0 199); do
-            base=$(printf '0x%x' $((0x7000000000 + step * 0x1000000)))
+          measure() {
+            label=$1
+            shift
             failed=0
-            refused=0
-            for run in 1 2; do
-              V2_SPACE_BASE=$base ./build/guest-runner --root tests/guest/root \
-                tests/guest/root/sbin/apk --version > /tmp/g_base.log 2>&1
-              if grep -q "falling back to an anonymous reservation" /tmp/g_base.log; then
-                refused=1
-                break
-              fi
-              grep -q "Error relocating" /tmp/g_base.log && failed=$((failed + 1))
+            runs=0
+            for run in $(seq 1 150); do
+              env "$@" ./build/guest-runner --root tests/guest/root \
+                tests/guest/root/sbin/apk --version > /tmp/g_am.log 2>&1
+              runs=$((runs + 1))
+              grep -q "Error relocating\|FAULT" /tmp/g_am.log && failed=$((failed + 1))
+              grep -q "falling back to an anonymous reservation\|V2_PIN_KERNEL could not" \
+                /tmp/g_am.log && runs=$((runs - 1))
             done
-            [ "$refused" -eq 1 ] && continue
-            usable=$((usable + 1))
-            if [ "$failed" -eq 2 ]; then
-              found=$base
-              cp /tmp/g_base.log /tmp/g_base_failing.log
-              break
-            fi
-          done
-          echo "sweep: $usable usable bases, first failing base=${found:-none}"
-          if [ -n "$found" ]; then
-            confirmed=0
-            for run in $(seq 1 20); do
-              V2_SPACE_BASE=$found ./build/guest-runner --root tests/guest/root \
-                tests/guest/root/sbin/apk --version > /tmp/g_confirm.log 2>&1
-              grep -q "Error relocating" /tmp/g_confirm.log && confirmed=$((confirmed + 1))
-            done
-            echo "confirm: $confirmed of 20 failed at V2_SPACE_BASE=$found"
-            if [ "$confirmed" -ge 10 ]; then
-              echo "::warning::G4-flake reproduces on demand at V2_SPACE_BASE=$found ($confirmed/20)"
-              grep -E "\\[v2\\] (space|load|interp|stack|exec map)" /tmp/g_confirm.log | head -12
-              grep -m1 "Error relocating" /tmp/g_confirm.log
-            fi
-          fi
+            echo "$label: $failed of $runs failed"
+          }
+          measure "unpinned (kernel address, mmap(NULL))" V2_SPACE_BASE=0x0
+          measure "kernel address taken with MAP_FIXED" V2_PIN_KERNEL=1
+          measure "low address 0x110000000 with MAP_FIXED" V2_SPACE_BASE=0x110000000
+          measure "low address 0x120000000 with MAP_FIXED" V2_SPACE_BASE=0x120000000
 
       - name: Space table accused after every operation
         working-directory: v2

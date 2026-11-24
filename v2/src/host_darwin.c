@@ -26,6 +26,35 @@ static int d_reserve(void *context, size_t length, void **base)
 
     (void)context;
     /*
+     * Two ways to reserve, and the difference between them turned out to
+     * matter: unpinned, the flake fires about once in forty runs; pinned at two
+     * hundred different addresses, four hundred runs in a row passed.  So the
+     * question "does the address matter, or the way it is taken?" is worth one
+     * experiment.
+     *
+     * V2_PIN_KERNEL=1 takes the kernel's address and then asks for that same
+     * address with MAP_FIXED: same address as the failing configuration, same
+     * mechanism as the passing one.  Whatever still differs afterwards is not
+     * either of those two things.
+     */
+    if (getenv("V2_PIN_KERNEL") != NULL) {
+        void *chosen = mmap(NULL, length, PROT_NONE,
+                            MAP_ANON | MAP_PRIVATE | MAP_NORESERVE, -1, 0);
+
+        if (chosen != MAP_FAILED) {
+            munmap(chosen, length);
+            map = mmap(chosen, length, PROT_NONE,
+                       MAP_ANON | MAP_PRIVATE | MAP_NORESERVE | MAP_FIXED, -1,
+                       0);
+            if (map != MAP_FAILED) {
+                *base = map;
+                return 0;
+            }
+        }
+        fprintf(stderr, "[v2] V2_PIN_KERNEL could not re-take the address it "
+                        "was given; falling back\n");
+    }
+    /*
      * V2_SPACE_BASE pins the arena so a failure seen on the device can be
      * reproduced on a desktop with the same absolute addresses.  The flake is
      * layout sensitive -- V2_VERIFY moves one library and the rate drops by an
