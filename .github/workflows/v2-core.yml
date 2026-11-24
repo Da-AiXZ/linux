@@ -152,6 +152,13 @@ jobs:
             ./build/guest-runner --root tests/guest/root tests/guest/busybox "$@"
           }
           run ls /          | tee /tmp/g3_ls
+          # TEMPORARY: why does ls print nothing?  One run, full syscall log.
+          V2_SYSCALL_LOG=/tmp/g3_trace.log ./build/guest-runner \
+            --root tests/guest/root tests/guest/busybox ls / \
+            > /tmp/g3_ls2 2>/tmp/g3_err2 || true
+          echo "ls bytes: $(wc -c < /tmp/g3_ls2) stderr: $(cat /tmp/g3_err2)"
+          echo "--- last 24 calls ---"
+          tail -24 /tmp/g3_trace.log || true
           run cat /etc/motd | tee /tmp/g3_cat
           run uname -a      | tee /tmp/g3_uname
           run ls -l /hello.txt | tee /tmp/g3_lsl
