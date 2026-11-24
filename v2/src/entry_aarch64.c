@@ -186,6 +186,19 @@ __asm__(
     "ldr  x10, [x19, #248]\n"
     "mov  sp, x10\n"
     "ldr  x16, [x19, #256]\n"
+    /*
+     * x20..x30 too, and before x19: they are callee-saved for the guest, the
+     * dispatcher is C, and a guest that keeps its thread pointer in x19..x28
+     * reads host leftovers otherwise -- musl does.  An earlier revision of this
+     * file restored x0..x19 and stopped, which cost a full decode of a fault at
+     * pc=0 with x20..x30 holding the dispatcher's values.
+     */
+    "ldp  x20, x21, [x19, #160]\n"
+    "ldp  x22, x23, [x19, #176]\n"
+    "ldp  x24, x25, [x19, #192]\n"
+    "ldp  x26, x27, [x19, #208]\n"
+    "ldp  x28, x29, [x19, #224]\n"
+    "ldr  x30, [x19, #240]\n"
     "ldp  x0, x1, [x19, #0]\n"
     "ldp  x2, x3, [x19, #16]\n"
     "ldp  x4, x5, [x19, #32]\n"
