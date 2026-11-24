@@ -68,7 +68,23 @@ static int d_reserve(void *context, size_t length, void **base)
     if (pin != NULL) {
         unsigned long long wanted = strtoull(pin, NULL, 0);
 
-        if (wanted != 0) {
+        /*
+         * Below 128 GiB this is not a diagnostic, it is a weapon.  MAP_FIXED
+         * there takes pages the host has already given to something else --
+         * measured the hard way: pinning at 0x120000000 made 144 of 150 runs
+         * die with SIGBUS inside the dynamic loader's memcpy, on a page the
+         * page table called free, because the reservation had been placed on
+         * top of the host's own heap.  That looks exactly like a bug in the
+         * guest and is entirely ours.
+         *
+         * A pin that cannot be trusted is refused rather than attempted, and
+         * says so, so a measurement never silently becomes an unpinned run.
+         */
+        if (wanted != 0 && wanted < 0x2000000000ULL) {
+            fprintf(stderr, "[v2] V2_SPACE_BASE=0x%llx refused: below 128 GiB "
+                            "a MAP_FIXED arena can land on the host's own heap\n",
+                    wanted);
+        } else if (wanted != 0) {
             map = mmap((void *)(uintptr_t)wanted, length, PROT_NONE,
                        MAP_ANON | MAP_PRIVATE | MAP_NORESERVE | MAP_FIXED, -1,
                        0);
