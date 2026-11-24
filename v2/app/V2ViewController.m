@@ -299,6 +299,14 @@
 
     [text appendFormat:@"[app] build=%@ device=%@\n", build,
                        [[UIDevice currentDevice] name]];
+    /*
+     * The version string comes from Info.plist, the code comes from the
+     * executable, and a release install replaces the first more reliably than
+     * the second: 0.1.11.12 uploaded a log containing sections that only exist
+     * in 0.1.10, because the plist was new and the binary was not.  A compile
+     * stamp is inside the code, so the two can never disagree again.
+     */
+    [text appendFormat:@"[app] appbuilt=%s %s\n", __DATE__, __TIME__];
     [text appendFormat:@"[app] model=%@ system=%@\n",
                        [[UIDevice currentDevice] model],
                        [[UIDevice currentDevice] systemVersion]];

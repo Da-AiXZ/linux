@@ -171,6 +171,28 @@ static void install_fault_handlers(void)
     sigaction(SIGFPE, &action, NULL);
 }
 
+/*
+ * The app's version string lives in Info.plist and can be replaced by an
+ * install that failed to replace the executable -- that is exactly what
+ * happened on 0.1.11.12, whose log announced a new version and ran the last
+ * version's code.  A stamp inside the binary is the only claim an install
+ * cannot fake, so the helper prints one.
+ *
+ * -Wdate-time exists because a timestamp makes builds unreproducible; that is
+ * the point here, so it is silenced for this one function and nowhere else.
+ */
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdate-time"
+#endif
+static const char *build_stamp(void)
+{
+    return __DATE__ " " __TIME__;
+}
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+
 static uint8_t *read_file(const char *path, size_t *length)
 {
     struct stat info;
@@ -231,6 +253,7 @@ static void verify_note_segments(const char *host_path,
 
 int main(int argc, char **argv)
 {
+    fprintf(stderr, "[v2] helper built %s\n", build_stamp());
 #if TARGET_OS_IPHONE
     /*
      * Anonymous PROT_EXEC needs CS_DEBUGGED on iOS.  PT_TRACE_ME is the only
