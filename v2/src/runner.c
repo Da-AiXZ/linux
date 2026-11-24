@@ -375,12 +375,26 @@ static uint64_t hash_guest_state(struct v2_space *space, size_t page_size,
     uint8_t chunk[4096];
     size_t pages = v2_space_page_count(space);
     uint8_t *base = (uint8_t *)v2_space_base(space);
+    size_t stride = v2_space_island_stride(space);
+    size_t island_size = v2_space_island_size(space);
 
     *mapped_pages = 0;
     *readable_pages = 0;
     for (size_t page = 0; page < pages; page++) {
         uint8_t *at = base + page * page_size;
         int state = v2_space_state_at(space, at);
+        size_t page_offset = page * page_size;
+
+        /*
+         * Trampoline islands are excluded on purpose: every per-site stub
+         * embeds the address of the host's syscall entry, which the host's own
+         * ASLR moves between runs.  That difference is by design and would
+         * drown the question this hash exists to answer -- whether the rest of
+         * what we hand the guest is the same every time.
+         */
+        if (stride != 0 && (page_offset % stride) < island_size) {
+            continue;
+        }
 
         /*
          * Every page's state goes in, mapped or not: a protection that differs
