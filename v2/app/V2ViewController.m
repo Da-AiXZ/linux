@@ -446,6 +446,29 @@
         }
         [text appendFormat:@"[app] apk x20 passed=%d failed=%d\n", passed,
                             failed];
+
+        /* Same shots with the verification off: it allocates and it changes
+         * the timing, so it may be the thing hiding the failure. */
+        setenv("V2_NO_VERIFY", "1", 1);
+        [text appendString:@"\n=== apk x100, no verify ===\n"];
+        int raw_pass = 0;
+        int raw_fail = 0;
+        for (int attempt = 0; attempt < 100; attempt++) {
+            NSMutableString *piece = [NSMutableString string];
+            int shot = [V2Runner runGuest:apk root:dynamicRoot
+                                     args:@[@"--version"] timeout:30
+                                   output:piece];
+            if (shot == 0 && [piece rangeOfString:@"apk-tools"].location
+                                != NSNotFound) {
+                raw_pass++;
+            } else {
+                raw_fail++;
+                [text appendFormat:@"\n--- raw shot %d status=%d ---\n%@",
+                                    attempt + 1, shot, piece];
+            }
+        }
+        [text appendFormat:@"[app] apk x100 passed=%d failed=%d\n", raw_pass,
+                            raw_fail];
     } else {
         NSString *note = [NSString stringWithFormat:
             @"[app] G4 skipped: no apk at %@\n", apk];

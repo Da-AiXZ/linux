@@ -76,7 +76,9 @@ extern int ptrace(int request, int pid, void *address, int data);
      * run, so every mapping proves itself against its file while we look.
      * `environ` is inherited, so this reaches the helper without an argv flag.
      */
-    setenv("V2_VERIFY", "1", 1);
+    if (getenv("V2_NO_VERIFY") == NULL) {
+        setenv("V2_VERIFY", "1", 1);
+    }
     pid_t child = 0;
     int status = posix_spawn(&child, helper.UTF8String, &actions, NULL, argv, environ);
     posix_spawn_file_actions_destroy(&actions);

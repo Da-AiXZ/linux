@@ -112,8 +112,8 @@ targets:
         CODE_SIGN_ENTITLEMENTS: v2/app/V2.entitlements
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO
-        MARKETING_VERSION: "0.1.8"
-        CURRENT_PROJECT_VERSION: "9"
+        MARKETING_VERSION: "0.1.9"
+        CURRENT_PROJECT_VERSION: "10"
         OTHER_LDFLAGS: "-framework UIKit -framework Foundation"
 
   V2RunnerHelper:
