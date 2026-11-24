@@ -16,6 +16,11 @@ on:
       - 'v2/**'
       - '!v2/docs/**'
   workflow_dispatch:
+    inputs:
+      space_base:
+        description: "Pin the arena base for this run (hex, e.g. 0x121800000)"
+        required: false
+        default: ""
 
 # Pushing ten commits in ten minutes should leave one run, not ten.  Without
 # this, every push keeps its own three runners busy and the tab fills with
@@ -82,6 +87,9 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 20
     env:
+      # A failing run's base, replayed.  Empty on a push; set by hand when a
+      # census names an address worth reproducing.
+      V2_SPACE_BASE: ${{ inputs.space_base }}
       # Every page handed to the guest must read as zero.  A page that comes
       # back dirty comes back dirty on every run, so this is a detector, not a
       # sample -- one run answers it.

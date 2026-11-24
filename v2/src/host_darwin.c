@@ -99,9 +99,32 @@ static int d_reserve(void *context, size_t length, void **base)
          * says so, so a measurement never silently becomes an unpinned run.
          */
         if (wanted != 0 && wanted < 0x2000000000ULL) {
-            fprintf(stderr, "[v2] V2_SPACE_BASE=0x%llx refused: below 128 GiB "
-                            "a MAP_FIXED arena can land on the host's own heap\n",
-                    wanted);
+            /*
+             * Below 128 GiB MAP_FIXED is a weapon: it takes pages the host has
+             * already given to something else (measured: 144 of 150 runs died
+             * in the loader's memcpy when the arena was pinned onto the host's
+             * heap).  But the failures that matter live down here -- macOS puts
+             * the arena at 4-5 GiB -- so the address has to be reproducible
+             * some other way.
+             *
+             * A hint is not a weapon.  mmap without MAP_FIXED asks the kernel
+             * for that address and accepts whatever it gives back; if it gives
+             * something else we say so and continue unpinned, which is a
+             * measurement we can trust because it cannot have taken anything.
+             */
+            void *hinted = mmap((void *)(uintptr_t)wanted, length, PROT_NONE,
+                                MAP_ANONYMOUS | MAP_PRIVATE | MAP_NORESERVE, -1,
+                                0);
+
+            if (hinted != MAP_FAILED && (uintptr_t)hinted == wanted) {
+                *base = hinted;
+                return 0;
+            }
+            if (hinted != MAP_FAILED) {
+                munmap(hinted, length);
+            }
+            fprintf(stderr, "[v2] V2_SPACE_BASE=0x%llx: the kernel declined the "
+                            "hint, running unpinned\n", wanted);
         } else if (wanted != 0) {
             map = mmap((void *)(uintptr_t)wanted, length, PROT_NONE,
                        MAP_ANONYMOUS | MAP_PRIVATE | MAP_NORESERVE | MAP_FIXED, -1,
