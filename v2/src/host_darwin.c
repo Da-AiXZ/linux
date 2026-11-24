@@ -1,23 +1,41 @@
+/* `<signal.h>` and `<sys/mman.h>` hide madvise/ucontext_t behind
+ * feature macros under -std=c11; musl is stricter about it than Apple. */
+#define _GNU_SOURCE 1
+
 /*
- * v2/host_darwin.c -- the only file that knows this is macOS.
+ * v2/host_darwin.c -- the platform boundary: mmap, mprotect, madvise, icache.
+ *
+ * The file is still named for Darwin because that is the platform the device
+ * runs, but the Linux arm64 path exists so the same runner can be exercised on
+ * `ubuntu-24.04-arm`: a free GitHub runner with no macOS queue, and a host ABI
+ * that is the guest's own.  Testing the loader on the platform it emulates is
+ * strictly better than testing it on a platform with a reserved x18, 16 KiB
+ * pages and a madvise that is only a hint.
  *
  * Pages are reserved PROT_NONE once and committed with mprotect, so a guest
  * mapping never shares a host page with a neighbour (the two are the same
  * size by construction).  No page is ever writable and executable at the same
  * time: code is written while the page is RW, then sealed RX.
  */
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(__linux__)
 
 #include "v2/host_darwin.h"
 
-#include <libkern/OSCacheControl.h>
-#include <mach/mach.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
+
+#if defined(__APPLE__)
+#include <libkern/OSCacheControl.h>
+#include <mach/mach.h>
+#endif
+
+#if !defined(MAP_ANONYMOUS) && defined(MAP_ANON)
+#define MAP_ANONYMOUS MAP_ANON
+#endif
 
 static int d_reserve(void *context, size_t length, void **base)
 {
@@ -39,12 +57,12 @@ static int d_reserve(void *context, size_t length, void **base)
      */
     if (getenv("V2_PIN_KERNEL") != NULL) {
         void *chosen = mmap(NULL, length, PROT_NONE,
-                            MAP_ANON | MAP_PRIVATE | MAP_NORESERVE, -1, 0);
+                            MAP_ANONYMOUS | MAP_PRIVATE | MAP_NORESERVE, -1, 0);
 
         if (chosen != MAP_FAILED) {
             munmap(chosen, length);
             map = mmap(chosen, length, PROT_NONE,
-                       MAP_ANON | MAP_PRIVATE | MAP_NORESERVE | MAP_FIXED, -1,
+                       MAP_ANONYMOUS | MAP_PRIVATE | MAP_NORESERVE | MAP_FIXED, -1,
                        0);
             if (map != MAP_FAILED) {
                 *base = map;
@@ -86,7 +104,7 @@ static int d_reserve(void *context, size_t length, void **base)
                     wanted);
         } else if (wanted != 0) {
             map = mmap((void *)(uintptr_t)wanted, length, PROT_NONE,
-                       MAP_ANON | MAP_PRIVATE | MAP_NORESERVE | MAP_FIXED, -1,
+                       MAP_ANONYMOUS | MAP_PRIVATE | MAP_NORESERVE | MAP_FIXED, -1,
                        0);
             if (map != MAP_FAILED) {
                 *base = map;
@@ -96,7 +114,7 @@ static int d_reserve(void *context, size_t length, void **base)
                             "back to an anonymous reservation\n", wanted);
         }
     }
-    map = mmap(NULL, length, PROT_NONE, MAP_ANON | MAP_PRIVATE | MAP_NORESERVE,
+    map = mmap(NULL, length, PROT_NONE, MAP_ANONYMOUS | MAP_PRIVATE | MAP_NORESERVE,
                -1, 0);
     if (map == MAP_FAILED) {
         return -1;
@@ -141,7 +159,7 @@ static int d_decommit(void *context, void *address, size_t length)
      * anonymous page is zero by definition.
      */
     map = mmap(address, length, PROT_NONE,
-               MAP_ANON | MAP_PRIVATE | MAP_FIXED | MAP_NORESERVE, -1, 0);
+               MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED | MAP_NORESERVE, -1, 0);
     if (map == MAP_FAILED) {
         return -1;
     }
@@ -194,7 +212,12 @@ static int d_read(void *context, void *destination, const void *source,
 static void d_flush(void *context, void *address, size_t length)
 {
     (void)context;
+#if defined(__APPLE__)
     sys_icache_invalidate(address, length);
+#else
+    /* On Linux the compiler knows how to publish newly written instructions. */
+    __builtin___clear_cache((char *)address, (char *)address + length);
+#endif
 }
 
 static void *d_alloc(void *context, size_t length)
@@ -231,4 +254,13 @@ struct v2_host v2_host_darwin(void)
     return host;
 }
 
-#endif /* __APPLE__ */
+/*
+ * One name the runner uses, so the runner never has to ask which platform it is
+ * on.  The table is identical; only four calls inside it differ.
+ */
+struct v2_host v2_host_native(void)
+{
+    return v2_host_darwin();
+}
+
+#endif /* __APPLE__ || __linux__ */

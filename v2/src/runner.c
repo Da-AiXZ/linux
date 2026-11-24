@@ -1,3 +1,7 @@
+/* `<signal.h>` and `<sys/mman.h>` hide madvise/ucontext_t behind
+ * feature macros under -std=c11; musl is stricter about it than Apple. */
+#define _GNU_SOURCE 1
+
 /*
  * v2/runner.c -- the host process that becomes the guest.
  *
@@ -9,9 +13,11 @@
  * RWX pages.  On iOS it still needs CS_DEBUGGED for anonymous PROT_EXEC; that
  * is the only reason ptrace(PT_TRACE_ME) stays in the picture.
  */
-#if defined(__APPLE__) && defined(__aarch64__)
+#if defined(__aarch64__) && (defined(__APPLE__) || defined(__linux__))
 
+#if defined(__APPLE__)
 #include <TargetConditionals.h>
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -35,7 +41,7 @@
  * The iOS SDK does not ship <sys/ptrace.h>; the declaration below is the one
  * v1 used and the one every jailbreak tool uses.  Request 0 is PT_TRACE_ME.
  */
-#if TARGET_OS_IPHONE
+#if defined(__APPLE__) && TARGET_OS_IPHONE
 extern int ptrace(int request, int pid, void *address, int data);
 #define V2_PT_TRACE_ME 0
 #endif
@@ -90,6 +96,8 @@ static void v2_fault(int number, siginfo_t *info, void *context)
 
 #if defined(__APPLE__)
     pc = (uint64_t)state->uc_mcontext->__ss.__pc;
+#elif defined(__linux__)
+    pc = (uint64_t)state->uc_mcontext.pc;
 #endif
     fprintf(stderr, "\n[v2] FAULT signal=%d addr=0x%llx pc=0x%llx\n", number,
             (unsigned long long)address, (unsigned long long)pc);
@@ -156,6 +164,39 @@ static void v2_fault(int number, siginfo_t *info, void *context)
         fprintf(stderr, "[v2] lr=%016llx sp=%016llx\n",
                 (unsigned long long)regs->__lr,
                 (unsigned long long)regs->__sp);
+    }
+#elif defined(__linux__)
+    /*
+     * Linux keeps the same registers in mcontext_t.regs[]; the names differ and
+     * so does the struct, so this is a second spelling of one report rather
+     * than a second report.
+     */
+    {
+        const mcontext_t *regs = &state->uc_mcontext;
+
+        fprintf(stderr, "[v2] x0..x7  %016llx %016llx %016llx %016llx"
+                        " %016llx %016llx %016llx %016llx\n",
+                (unsigned long long)regs->regs[0],
+                (unsigned long long)regs->regs[1],
+                (unsigned long long)regs->regs[2],
+                (unsigned long long)regs->regs[3],
+                (unsigned long long)regs->regs[4],
+                (unsigned long long)regs->regs[5],
+                (unsigned long long)regs->regs[6],
+                (unsigned long long)regs->regs[7]);
+        fprintf(stderr, "[v2] x8..x15 %016llx %016llx %016llx %016llx"
+                        " %016llx %016llx %016llx %016llx\n",
+                (unsigned long long)regs->regs[8],
+                (unsigned long long)regs->regs[9],
+                (unsigned long long)regs->regs[10],
+                (unsigned long long)regs->regs[11],
+                (unsigned long long)regs->regs[12],
+                (unsigned long long)regs->regs[13],
+                (unsigned long long)regs->regs[14],
+                (unsigned long long)regs->regs[15]);
+        fprintf(stderr, "[v2] lr=%016llx sp=%016llx\n",
+                (unsigned long long)regs->regs[30],
+                (unsigned long long)regs->sp);
     }
 #endif
     /* The instructions around pc, when they are inside the guest. */
@@ -250,7 +291,7 @@ static const char *build_stamp(void)
  */
 static void page_zero_selftest(size_t page_size)
 {
-    struct v2_host host = v2_host_darwin();
+    struct v2_host host = v2_host_native();
     struct v2_space *probe = NULL;
     uint8_t *bytes;
     unsigned long long first;
@@ -528,7 +569,7 @@ int main(int argc, char **argv)
         die("page size", "unexpected");
     }
 
-    host = v2_host_darwin();
+    host = v2_host_native();
     status = v2_space_create(&space, &host, V2_SPACE_SIZE, page_size,
                              V2_ISLAND_STRIDE, V2_ISLAND_SIZE);
     if (status != 0) {

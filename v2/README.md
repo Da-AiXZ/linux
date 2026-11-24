@@ -47,7 +47,9 @@ make model       # 只跑 Python 参考模型
 make traces      # 重新生成轨迹（改了语义才需要）
 ```
 
-测试全部在不依赖设备的情况下运行，CI 里 `ubuntu-latest` 与 `macos-latest` 各跑一遍。
+测试全部在不依赖设备的情况下运行。CI 里 L1 跑在 `ubuntu-latest`；需要真执行 aarch64 的
+`guest` 作业跑在 `ubuntu-24.04-arm`（免费、无需 macOS 队列，宿主 ABI 就是 guest 的 ABI）；
+Darwin（真机同构）由 `v2-flake.yml` 每晚在 `macos-15` 上跑一遍。
 
 本机（Windows，没有 make、没有 MSVC）用装在 F 盘的 zig 直接编译，见
 `docs/BUILD-LOCAL.md`。同一份 C 也交叉编译通过 `aarch64-linux-musl`、

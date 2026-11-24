@@ -6,6 +6,10 @@
  * here is the runtime patching in mmap: a library mapped by ld.so arrives
  * with raw `svc #0` in it.
  */
+
+/* -std=c11 hides pread behind feature macros. */
+#define _GNU_SOURCE 1
+
 #include "v2/cpu.h"
 
 #include <fcntl.h>

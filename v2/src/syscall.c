@@ -6,6 +6,9 @@
  * errno -- the numbers differ from Linux above 34, and a wrong errno made
  * musl's resolver give up in v1.
  */
+/* -std=c11 hides clock_gettime, DT_* and telldir behind feature macros. */
+#define _GNU_SOURCE 1
+
 #include "v2/cpu.h"
 
 #include <dirent.h>
@@ -478,12 +481,26 @@ static void encode_stat(const struct stat *info, uint8_t out[128])
     int32_t block_size = (int32_t)info->st_blksize;
     int32_t pad2 = 0;
     int64_t blocks = (int64_t)info->st_blocks;
-    int64_t atime = (int64_t)info->st_atimespec.tv_sec;
-    uint64_t atime_nsec = (uint64_t)info->st_atimespec.tv_nsec;
-    int64_t mtime = (int64_t)info->st_mtimespec.tv_sec;
-    uint64_t mtime_nsec = (uint64_t)info->st_mtimespec.tv_nsec;
-    int64_t ctime = (int64_t)info->st_ctimespec.tv_sec;
-    uint64_t ctime_nsec = (uint64_t)info->st_ctimespec.tv_nsec;
+    /*
+     * Darwin calls them st_*timespec, POSIX calls them st_*tim.  One spelling
+     * has to win in the source; the guest's struct stat layout below is Linux's
+     * and does not change.
+     */
+#if defined(__APPLE__)
+#define V2_ST_ATIME(s) ((s)->st_atimespec)
+#define V2_ST_MTIME(s) ((s)->st_mtimespec)
+#define V2_ST_CTIME(s) ((s)->st_ctimespec)
+#else
+#define V2_ST_ATIME(s) ((s)->st_atim)
+#define V2_ST_MTIME(s) ((s)->st_mtim)
+#define V2_ST_CTIME(s) ((s)->st_ctim)
+#endif
+    int64_t atime = (int64_t)V2_ST_ATIME(info).tv_sec;
+    uint64_t atime_nsec = (uint64_t)V2_ST_ATIME(info).tv_nsec;
+    int64_t mtime = (int64_t)V2_ST_MTIME(info).tv_sec;
+    uint64_t mtime_nsec = (uint64_t)V2_ST_MTIME(info).tv_nsec;
+    int64_t ctime = (int64_t)V2_ST_CTIME(info).tv_sec;
+    uint64_t ctime_nsec = (uint64_t)V2_ST_CTIME(info).tv_nsec;
 
     memset(out, 0, 128);
     memcpy(out + 0, &device, 8);

@@ -6,6 +6,10 @@
  * of that is one shape, so it is one helper (`resolve`) plus a handful of
  * two-line handlers.
  */
+
+/* -std=c11 hides symlink/lstat/fchmod behind feature macros. */
+#define _GNU_SOURCE 1
+
 #include "v2/cpu.h"
 
 #include <errno.h>

@@ -6,7 +6,8 @@
 
 #include "v2/vspace.h"
 
-/* mmap/mprotect/madvise/pread + icache, for macOS on aarch64. */
+/* mmap/mprotect/madvise/pread + icache, for macOS or Linux on aarch64. */
 struct v2_host v2_host_darwin(void);
+struct v2_host v2_host_native(void);
 
 #endif /* V2_HOST_DARWIN_H */
