@@ -76,7 +76,9 @@ extern int ptrace(int request, int pid, void *address, int data);
      * run, so every mapping proves itself against its file while we look.
      * `environ` is inherited, so this reaches the helper without an argv flag.
      */
-    if (getenv("V2_NO_VERIFY") == NULL) {
+    if (getenv("V2_NO_VERIFY") != NULL) {
+        unsetenv("V2_VERIFY");   /* 0.1.9 only stopped setting it; it was already set */
+    } else {
         setenv("V2_VERIFY", "1", 1);
     }
     pid_t child = 0;

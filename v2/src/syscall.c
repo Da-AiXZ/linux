@@ -213,6 +213,12 @@ static long long sys_writev(struct v2_cpu *cpu, struct v2_proc *proc)
                           8) != 0) {
             return total > 0 ? (long long)total : -V2_EFAULT;
         }
+        /*
+         * ld.so's error goes out through writev, not write: musl's stdio
+         * flushes through __stdio_write.  0.1.9's specimen proved it by
+         * failing with no register dump at all.
+         */
+        dump_relocation_state(cpu, proc, base, length);
         written = write_range(proc, host, base, length, &error);
         total += written;
         if (written < length) {

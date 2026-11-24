@@ -450,10 +450,10 @@
         /* Same shots with the verification off: it allocates and it changes
          * the timing, so it may be the thing hiding the failure. */
         setenv("V2_NO_VERIFY", "1", 1);
-        [text appendString:@"\n=== apk x100, no verify ===\n"];
+        [text appendString:@"\n=== apk x200, no verify ===\n"];
         int raw_pass = 0;
         int raw_fail = 0;
-        for (int attempt = 0; attempt < 100; attempt++) {
+        for (int attempt = 0; attempt < 200; attempt++) {
             NSMutableString *piece = [NSMutableString string];
             int shot = [V2Runner runGuest:apk root:dynamicRoot
                                      args:@[@"--version"] timeout:30
@@ -467,7 +467,7 @@
                                     attempt + 1, shot, piece];
             }
         }
-        [text appendFormat:@"[app] apk x100 passed=%d failed=%d\n", raw_pass,
+        [text appendFormat:@"[app] apk x200 passed=%d failed=%d\n", raw_pass,
                             raw_fail];
     } else {
         NSString *note = [NSString stringWithFormat:
