@@ -72,11 +72,12 @@ jobs:
   # discards.  The loader, the entry code and the address space are exercised
   # here on every push.
   #
-  # The syscall layer still carries Darwin-shaped semantics (a `uname` that
-  # prints nothing, `id` dereferencing a null the host never gave it), so the
-  # steps that need a working libc are non-blocking outside a dispatch: on a
-  # push they are a to-do list, on a dispatch they are the gate.  The Darwin leg
-  # below runs the same steps and is always strict.
+  # G3, G4 and the local apk update all run here.  The "Darwin-shaped syscall
+  # semantics" that once made them non-blocking on Linux were one register: the
+  # entry stub used x9 as the frame base and x9 is one of the registers it
+  # saves, so every syscall handed busybox back the frame address in place of
+  # its directory fd.  With that fixed the suite is green on both hosts, and
+  # both are gates.
   guest:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 20
@@ -138,8 +139,6 @@ jobs:
       # syscall table: getdents64 for ls, openat+read for cat, uname, stat for
       # ls -l, getuid and /etc/passwd for id, getcwd for pwd.
       - name: Static busybox through the loader
-        # Temporary: expected red on Linux until the syscall layer is portable.
-        continue-on-error: ${{ github.event_name != 'workflow_dispatch' }}
         working-directory: v2
         run: |
           set -eu
@@ -174,8 +173,6 @@ jobs:
       # libc.musl-aarch64.so.1 from /lib and relocates both sides.  Static PIE
       # (G3) never exercised any of this.
       - name: Dynamic linking (ld.so + libc)
-        # Temporary: expected red on Linux until the syscall layer is portable.
-        continue-on-error: ${{ github.event_name != 'workflow_dispatch' }}
         id: dynamic
         working-directory: v2
         # V2_VERIFY makes every file mapping compare itself against the file.
@@ -273,8 +270,6 @@ jobs:
       # first thing in the project that makes the guest *write* -- cache dirs,
       # temp files, renames -- so it is also the first test of fsops.c.
       - name: apk update against a local repository
-        # Temporary: expected red on Linux until the syscall layer is portable.
-        continue-on-error: ${{ github.event_name != 'workflow_dispatch' }}
         working-directory: v2
         run: |
           set +e
