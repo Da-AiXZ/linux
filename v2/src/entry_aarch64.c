@@ -92,62 +92,64 @@ struct v2_cpu v2_cpu_frame
 
 __asm__(
     V2_BEGIN(v2_syscall_entry)
-    V2_LEA("x9", v2_cpu_frame)
-    "stp  x0, x1, [x9, #0]\n"
-    "stp  x2, x3, [x9, #16]\n"
-    "stp  x4, x5, [x9, #32]\n"
-    "stp  x6, x7, [x9, #48]\n"
-    "stp  x8, x9, [x9, #64]\n"
-    "stp  x10, x11, [x9, #80]\n"
-    "stp  x12, x13, [x9, #96]\n"
-    "stp  x14, x15, [x9, #112]\n"
-    /* x16 is not saved: nothing reads it back, and its value is the host's. */
-    "str  x17, [x9, #136]\n"
-    "stp  x18, x19, [x9, #144]\n"
-    "stp  x20, x21, [x9, #160]\n"
-    "stp  x22, x23, [x9, #176]\n"
-    "stp  x24, x25, [x9, #192]\n"
-    "stp  x26, x27, [x9, #208]\n"
-    "stp  x28, x29, [x9, #224]\n"
-    "str  x30, [x9, #240]\n"
     /*
-     * x9 was saved at #72 above and is now reused as the base register.  The
-     * store read its base before it wrote, so the value in the frame is the
-     * guest's; the reload makes that independent of the reader knowing it.
+     * x16 addresses the frame, not x9.  x9 is one of the registers being saved,
+     * and a base register that is also a subject is a base register that has
+     * already overwritten it: the first version of this code stored the frame
+     * pointer into the guest's x9 slot on every syscall, and busybox keeps the
+     * directory fd in x9.  x16 is free here -- the stub loaded it to branch
+     * here and nothing reads it back.
      */
-    V2_LEA("x9", v2_cpu_frame)
+    V2_LEA("x16", v2_cpu_frame)
+    "stp  x0, x1, [x16, #0]\n"
+    "stp  x2, x3, [x16, #16]\n"
+    "stp  x4, x5, [x16, #32]\n"
+    "stp  x6, x7, [x16, #48]\n"
+    "stp  x8, x9, [x16, #64]\n"
+    "stp  x10, x11, [x16, #80]\n"
+    "stp  x12, x13, [x16, #96]\n"
+    "stp  x14, x15, [x16, #112]\n"
+    /* x16 is not saved: nothing reads it back, and its value is the host's. */
+    "str  x17, [x16, #136]\n"
+    "stp  x18, x19, [x16, #144]\n"
+    "stp  x20, x21, [x16, #160]\n"
+    "stp  x22, x23, [x16, #176]\n"
+    "stp  x24, x25, [x16, #192]\n"
+    "stp  x26, x27, [x16, #208]\n"
+    "stp  x28, x29, [x16, #224]\n"
+    "str  x30, [x16, #240]\n"
     "mov  x10, sp\n"
-    "str  x10, [x9, #248]\n"
-    "str  x17, [x9, #256]\n"
+    "str  x10, [x16, #248]\n"
+    "str  x17, [x16, #256]\n"
     "mrs  x10, nzcv\n"
-    "str  x10, [x9, #264]\n"
+    "str  x10, [x16, #264]\n"
     /*
      * The floating point and SIMD state, which the guest also owns.  A Linux
      * syscall preserves q0..q31, FPCR and FPSR; this trampoline preserved none
      * of them, so every call handed the guest back whatever the host's
      * formatting and copying code had left in those registers.
      */
-    "stp  q0, q1, [x9, #272]\n"
-    "stp  q2, q3, [x9, #304]\n"
-    "stp  q4, q5, [x9, #336]\n"
-    "stp  q6, q7, [x9, #368]\n"
-    "stp  q8, q9, [x9, #400]\n"
-    "stp  q10, q11, [x9, #432]\n"
-    "stp  q12, q13, [x9, #464]\n"
-    "stp  q14, q15, [x9, #496]\n"
-    "stp  q16, q17, [x9, #528]\n"
-    "stp  q18, q19, [x9, #560]\n"
-    "stp  q20, q21, [x9, #592]\n"
-    "stp  q22, q23, [x9, #624]\n"
-    "stp  q24, q25, [x9, #656]\n"
-    "stp  q26, q27, [x9, #688]\n"
-    "stp  q28, q29, [x9, #720]\n"
-    "stp  q30, q31, [x9, #752]\n"
+    "stp  q0, q1, [x16, #272]\n"
+    "stp  q2, q3, [x16, #304]\n"
+    "stp  q4, q5, [x16, #336]\n"
+    "stp  q6, q7, [x16, #368]\n"
+    "stp  q8, q9, [x16, #400]\n"
+    "stp  q10, q11, [x16, #432]\n"
+    "stp  q12, q13, [x16, #464]\n"
+    "stp  q14, q15, [x16, #496]\n"
+    "stp  q16, q17, [x16, #528]\n"
+    "stp  q18, q19, [x16, #560]\n"
+    "stp  q20, q21, [x16, #592]\n"
+    "stp  q22, q23, [x16, #624]\n"
+    "stp  q24, q25, [x16, #656]\n"
+    "stp  q26, q27, [x16, #688]\n"
+    "stp  q28, q29, [x16, #720]\n"
+    "stp  q30, q31, [x16, #752]\n"
     "mrs  x10, fpcr\n"
-    "str  x10, [x9, #784]\n"
+    "str  x10, [x16, #784]\n"
     "mrs  x10, fpsr\n"
-    "str  x10, [x9, #792]\n"
-    "mov  x19, x9\n"
+    "str  x10, [x16, #792]\n"
+    "mov  x19, x16\n"
     V2_LEA("x10", v2_host_stack)
     "mov  x11, #" "262144" "\n"
     "add  x10, x10, x11\n"
