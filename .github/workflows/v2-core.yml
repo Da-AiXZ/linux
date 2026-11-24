@@ -374,22 +374,24 @@ jobs:
             V2_HASH_ENTRY=1 V2_SPACE_BASE=0x7000000000 ./build/guest-runner \
               --root tests/guest/root tests/guest/root/sbin/apk --version \
               > /tmp/g_hash.log 2>&1
-            hash=$(sed -n 's/.*entry state \(hash=0x[0-9a-f]* pages=[0-9]*\).*/\1/p' \
+            hash=$(sed -n 's/.*entry state \(hash=0x[0-9a-f]*\).*/\1/p' \
+                   /tmp/g_hash.log | head -1)
+            counts=$(sed -n 's/.*\(mapped=[0-9]* readable=[0-9]*\).*/\1/p' \
                    /tmp/g_hash.log | head -1)
             result=ok
             if grep -q "Error relocating\|FAULT" /tmp/g_hash.log; then
               result=FAILED
               cp /tmp/g_hash.log "/tmp/g_hash_fail.$run.log"
             fi
-            echo "run $run $result $hash" >> /tmp/g_hashes.txt
+            echo "run $run $result $hash $counts" >> /tmp/g_hashes.txt
           done
           cat /tmp/g_hashes.txt
           echo "--- distinct entry states ---"
           sed 's/^run [0-9]* [A-Za-z]* //' /tmp/g_hashes.txt | sort | uniq -c
           for log in /tmp/g_hash_fail.*.log; do
             [ -f "$log" ] || continue
-            echo "--- $log ---"
-            grep -E "entry state|FAULT|Error relocating|page state|last [0-9]+ syscall" "$log"
+            echo "--- $log (tail) ---"
+            tail -24 "$log"
             break
           done
           echo "--- refused pins are counted separately ---"
