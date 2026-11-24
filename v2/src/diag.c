@@ -85,6 +85,15 @@ static void emit_registers(unsigned long index, const struct v2_cpu *cpu)
     v2_trace_put(line);
 }
 
+static uint64_t entry_x18;
+static uint64_t entry_pc;
+
+void v2_diag_entry(const struct v2_cpu *cpu)
+{
+    entry_x18 = cpu->x[18];
+    entry_pc = cpu->pc;
+}
+
 static int wants_words(unsigned long index)
 {
     static long wanted[32];
@@ -194,6 +203,16 @@ void v2_diag_boundary(const struct v2_cpu *cpu, unsigned long index)
      * was 47 when this was written.  Five lines per call, and the whole point is
      * that the first line that differs names a register.
      */
+    {
+        char line[128];
+
+        snprintf(line, sizeof(line),
+                 "boundary %lu x18 in=0x%llx out=0x%llx pc=0x%llx", index,
+                 (unsigned long long)entry_x18,
+                 (unsigned long long)cpu->x[18],
+                 (unsigned long long)entry_pc);
+        v2_trace_put(line);
+    }
     emit_registers(index, cpu);
     emit_words(index, space, page_size);
 }

@@ -24,4 +24,11 @@
  */
 void v2_diag_boundary(const struct v2_cpu *cpu, unsigned long index);
 
+/*
+ * Called before the handler runs, so the boundary report can show x18 as it
+ * arrived and as it left.  If a value changes across the host's own code path,
+ * the host wrote it; if it changed before the call, the guest did.
+ */
+void v2_diag_entry(const struct v2_cpu *cpu);
+
 #endif

@@ -1146,6 +1146,7 @@ void v2_syscall_dispatch(struct v2_cpu *cpu)
      * handler left behind.  A trace that records those is a trace of the
      * handler, not of the call.
      */
+    v2_diag_entry(cpu);
     number = cpu->x[8];
     for (int index = 0; index < 6; index++) {
         args[index] = cpu->x[index];
