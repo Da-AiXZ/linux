@@ -1,5 +1,7 @@
 #import "V2Runner.h"
 
+#include <stdlib.h>
+
 #import <signal.h>
 #import <errno.h>
 #import <spawn.h>
@@ -69,6 +71,12 @@ extern int ptrace(int request, int pid, void *address, int data);
         argv[argument_count++] = (char *)argument.UTF8String;
     }
     argv[argument_count] = NULL;
+    /*
+     * 0.1.7 is a diagnostic build: the flake reproduces on the first device
+     * run, so every mapping proves itself against its file while we look.
+     * `environ` is inherited, so this reaches the helper without an argv flag.
+     */
+    setenv("V2_VERIFY", "1", 1);
     pid_t child = 0;
     int status = posix_spawn(&child, helper.UTF8String, &actions, NULL, argv, environ);
     posix_spawn_file_actions_destroy(&actions);

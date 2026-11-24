@@ -116,6 +116,51 @@ static uint64_t write_range(struct v2_proc *proc, int host, uint64_t buffer,
     return done;
 }
 
+/*
+ * When ld.so gives up it prints "Error relocating ..." and exits 127 in the
+ * next handful of instructions, so the exit-time dump is already too late.
+ * This is the only moment the state exists: dump the registers and the top of
+ * the stack while the guest is still standing there.
+ *
+ * On the device the flake reproduces on the first run, which makes this cheap
+ * to iterate on; on the CI runner it fires once every ~500 runs and costs
+ * nothing when it does not.
+ */
+static void dump_relocation_state(struct v2_cpu *cpu, struct v2_proc *proc,
+                                  uint64_t address, uint64_t length)
+{
+    char text[256];
+    uint64_t words[16];
+    size_t want = length < sizeof(text) - 1 ? length : sizeof(text) - 1;
+
+    if (want == 0 ||
+        v2_space_read(proc->space, text, (const void *)(uintptr_t)address,
+                      want) != 0) {
+        return;
+    }
+    text[want] = 0;
+    if (strstr(text, "Error relocating") == NULL) {
+        return;
+    }
+    fprintf(stderr, "[v2] --- relocation error, registers at the write ---\n");
+    for (int index = 0; index < 31; index += 2) {
+        fprintf(stderr, "[v2] x%-2d=0x%016llx  x%-2d=0x%016llx\n", index,
+                (unsigned long long)cpu->x[index], index + 1,
+                (unsigned long long)cpu->x[index + 1]);
+    }
+    fprintf(stderr, "[v2] sp=0x%llx pc=0x%llx nzcv=0x%llx\n",
+            (unsigned long long)cpu->sp, (unsigned long long)cpu->pc,
+            (unsigned long long)cpu->nzcv);
+    if (v2_space_read(proc->space, words,
+                      (const void *)(uintptr_t)(cpu->sp & ~(uint64_t)7),
+                      sizeof(words)) == 0) {
+        for (int index = 0; index < 16; index++) {
+            fprintf(stderr, "[v2] [sp+%3d] 0x%016llx\n", index * 8,
+                    (unsigned long long)words[index]);
+        }
+    }
+}
+
 static long long sys_write(struct v2_cpu *cpu, struct v2_proc *proc)
 {
     int fd = (int)cpu->x[0];
@@ -126,6 +171,7 @@ static long long sys_write(struct v2_cpu *cpu, struct v2_proc *proc)
     if (host < 0) {
         return -V2_EBADF;
     }
+    dump_relocation_state(cpu, proc, cpu->x[1], cpu->x[2]);
     done = write_range(proc, host, cpu->x[1], cpu->x[2], &error);
     if (done == 0 && error != 0) {
         return error;
