@@ -12,6 +12,12 @@
  * x16 (IP0) is clobbered on the way back.  That is the one register the
  * guest ABI does not need preserved across a syscall: no compiler keeps a
  * value in x16/x17 across a call.
+ *
+ * The dispatcher runs on its own stack, not the guest's.  It used to run on the
+ * guest's, which put the host's return addresses a kilobyte below the guest's
+ * sp -- inside memory the guest is free to use and, on Linux, would have been
+ * zeros or its own leftovers.  A guest that reads an uninitialised local then
+ * reads whatever the host left behind, and that differs from run to run.
  */
 #include "v2/cpu.h"
 
@@ -22,6 +28,26 @@
 #else
 #define V2_CALL(name) "bl " #name "\n"
 #endif
+
+#if defined(__APPLE__)
+#define V2_ASM(name) "_" #name
+#else
+#define V2_ASM(name) #name
+#endif
+
+/*
+ * 256 KiB, sixteen-byte aligned, in BSS.  The dispatcher plus a syscall handler
+ * plus a directory listing is nowhere near that; the size exists so that a
+ * future handler with a large local cannot quietly walk off the end.
+ */
+/* The symbol is the *top*: the stack grows down into the space above it. */
+__asm__(
+    ".p2align 4\n"
+    ".space 262144\n"
+    ".globl " V2_ASM(v2_host_stack_top) "\n"
+    V2_ASM(v2_host_stack_top) ":\n");
+
+extern char v2_host_stack_top[];
 
 __attribute__((naked, used)) void v2_syscall_entry(void)
 {
@@ -48,9 +74,13 @@ __attribute__((naked, used)) void v2_syscall_entry(void)
         "str  x17, [sp, #256]\n"
         "mrs  x9, nzcv\n"
         "str  x9, [sp, #264]\n"
-        "mov  x0, sp\n"
-        "mov  x1, x17\n"
+        "mov  x19, sp\n"
+        "adrp x10, " V2_ASM(v2_host_stack_top) "@PAGE\n"
+        "add  x10, x10, " V2_ASM(v2_host_stack_top) "@PAGEOFF\n"
+        "mov  sp, x10\n"
+        "mov  x0, x19\n"
         V2_CALL(v2_syscall_dispatch)
+        "mov  sp, x19\n"
         "ldr  x9, [sp, #264]\n"
         "msr  nzcv, x9\n"
         "ldp  x0, x1, [sp, #0]\n"

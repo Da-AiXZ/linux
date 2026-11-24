@@ -184,11 +184,24 @@ static void v2_fault(int number, siginfo_t *info, void *context)
 
 static void install_fault_handlers(void)
 {
+    static char fault_stack[64 * 1024] __attribute__((aligned(16)));
     struct sigaction action;
+    stack_t alternate;
+
+    /*
+     * The handler must not run on the guest's stack either.  When a guest
+     * instruction faults, sp is the guest's, and a handler that pushes its own
+     * frames there writes host data into memory the guest can read -- the same
+     * mistake the dispatcher used to make, in a rarer path.
+     */
+    memset(&alternate, 0, sizeof(alternate));
+    alternate.ss_sp = fault_stack;
+    alternate.ss_size = sizeof(fault_stack);
+    sigaltstack(&alternate, NULL);
 
     memset(&action, 0, sizeof(action));
     action.sa_sigaction = v2_fault;
-    action.sa_flags = SA_SIGINFO;
+    action.sa_flags = SA_SIGINFO | SA_ONSTACK;
     sigemptyset(&action.sa_mask);
     sigaction(SIGSEGV, &action, NULL);
     sigaction(SIGBUS, &action, NULL);

@@ -355,7 +355,7 @@ jobs:
             failed=0
             counted=0
             where=""
-            for run in $(seq 1 150); do
+            for run in $(seq 1 300); do
               env "$@" ./build/guest-runner --root tests/guest/root \
                 tests/guest/root/sbin/apk --version > /tmp/g_am.log 2>&1
               if grep -q "refused\|falling back to an anonymous" /tmp/g_am.log; then
