@@ -305,61 +305,6 @@ jobs:
       # and that the canary past the array is intact.  A hundred and fifty runs
       # of the harshest configuration (no verification, which is where the
       # device fails every time) is enough to say whether that ever happens.
-      # Pinning the base of a *failing* run cannot work: that address was
-      # chosen by mmap and is owned by something else in the next process --
-      # the last attempt reported exactly that, twice.  What does work is
-      # pinning the arena somewhere nothing else wants and asking whether the
-      # resulting layout fails every time, because the outcome is a property of
-      # the layout: one base gave 20 passes in 20 runs.
-      #
-      # So: sweep bases 16 MiB apart across two island strides, six runs each.
-      # A layout that fails on request turns a 2%-per-run statistic into one
-      # case that can be bisected on a desktop, with no device and no luck.
-      - name: Sweep for a layout that fails on demand
-        working-directory: v2
-        run: |
-          set +e
-          found=""
-          tried=0
-          for step in $(seq 0 31); do
-            base=$(printf '0x%x' $((0x1000000000 + step * 0x1000000)))
-            failed=0
-            passed=0
-            refused=0
-            for run in $(seq 1 6); do
-              V2_SPACE_BASE=$base ./build/guest-runner --root tests/guest/root \
-                tests/guest/root/sbin/apk --version > /tmp/g_sweep.log 2>&1
-              if grep -q "falling back to an anonymous reservation" /tmp/g_sweep.log; then
-                refused=1
-                break
-              fi
-              if grep -q "Error relocating" /tmp/g_sweep.log; then
-                failed=$((failed + 1))
-                cp /tmp/g_sweep.log "/tmp/g_sweep_${step}_$failed.log"
-              else
-                passed=$((passed + 1))
-              fi
-            done
-            [ "$refused" -eq 1 ] && continue
-            tried=$((tried + 1))
-            if [ "$failed" -ne 0 ]; then
-              echo "layout $base: $failed of $((failed + passed)) failed  <-- reproducible"
-              found=$base
-              break
-            fi
-          done
-          echo "sweep: $tried usable layouts, first failing base=${found:-none}"
-          if [ -n "$found" ]; then
-            echo "::warning::G4-flake reproduces on demand at V2_SPACE_BASE=$found"
-            for log in /tmp/g_sweep_*_1.log; do
-              [ -f "$log" ] || continue
-              echo "--- $log ---"
-              grep -E "\\[v2\\] (space|stack|exec map|load|interp)" "$log" | head -12
-              grep -m1 "Error relocating" "$log"
-              break
-            done
-          fi
-
       - name: Space table accused after every operation
         working-directory: v2
         run: |
@@ -420,6 +365,7 @@ jobs:
           : > /tmp/g5_novel.txt
           : > /tmp/g5_evidence.txt
           : > /tmp/g5_faults.txt
+          : > /tmp/g5_layouts.txt
           # The open bug has four faces now, all measured, all the same family:
           # a symbol lookup that fails, a crash while printing that error, a
           # wild pointer, and apk reporting an index it could not read.  They
@@ -430,7 +376,6 @@ jobs:
           faces_fault=0
           faces_io=0
           faces_count=0
-          reproduced=""
           for run in $(seq 1 $runs); do
             if ! ./build/guest-runner --root /tmp/g5root /tmp/g5root/sbin/apk \
                  update --allow-untrusted --no-progress > /tmp/g5_loop.log 2>&1; then
@@ -442,30 +387,16 @@ jobs:
               elif grep -q "Error relocating .*: symbol not found" /tmp/g5_loop.log; then
                 known=$((known + 1))
                 faces_symbol=$((faces_symbol + 1))
-                # The device fails at one layout and passes at another, which
-                # says the trigger is a property of the layout rather than of
-                # the run.  If that is true here too, pinning the arena at this
-                # run's base should fail again on demand -- and a failure that
-                # reproduces on request is a bug that can be bisected instead
-                # of waited for.  One attempt per step, not per failure.
-                if [ -z "$reproduced" ]; then
-                  base=$(sed -n 's/.*\[v2\] space \(0x[0-9a-f]*\)\.\..*/\1/p' \
-                         /tmp/g5_loop.log | head -1)
-                  if [ -n "$base" ]; then
-                    V2_SPACE_BASE=$base ./build/guest-runner --root /tmp/g5root \
-                      /tmp/g5root/sbin/apk --version > /tmp/g_repro.log 2>&1 || true
-                    if grep -q "symbol not found" /tmp/g_repro.log; then
-                      reproduced=$base
-                      cp /tmp/g_repro.log /tmp/g_reproduced.log
-                      echo "reproduced at V2_SPACE_BASE=$base (run $run's layout)"
-                    elif grep -q "falling back to an anonymous reservation" \
-                         /tmp/g_repro.log; then
-                      echo "could not pin $base: that address was taken in the new process"
-                    else
-                      echo "pinned $base and it passed -- the trigger is not the arena base alone"
-                    fi
-                  fi
-                fi
+                # The whole layout, verbatim.  Two failures and one pass are
+                # enough to tell whether the difference is a relationship
+                # between mappings (which survives subtracting the base) or
+                # something that is not in the layout at all -- and the logs
+                # were already being collected and thrown away.
+                {
+                  echo "--- run $run ---"
+                  grep -E "\\[v2\\] (space|load|interp|stack|exec map)" /tmp/g5_loop.log
+                  grep -m1 "Error relocating" /tmp/g5_loop.log
+                } >> /tmp/g5_layouts.txt
                 if grep -q "every readable image page" /tmp/g5_loop.log; then
                   fired=$((fired + 1))
                   grep -E "every readable image page|differs at" /tmp/g5_loop.log \
@@ -497,10 +428,8 @@ jobs:
           # has a target and the offsets say where.  If no, the bytes are right
           # at the moment of failure and the fault is in what ld.so built out
           # of them.
-          if [ -n "$reproduced" ]; then
-            echo "::warning::G4-flake reproduces on demand at V2_SPACE_BASE=$reproduced"
-            grep -E "\[v2\] (space|load|interp|stack|exec map)" /tmp/g_reproduced.log | head -12
-          fi
+          echo "--- layouts of the failing runs ---"
+          cat /tmp/g_layouts.txt 2>/dev/null || true
           echo "in-failure comparison: fired=$fired silent=$silent"
           echo "faces: symbol=$faces_symbol fault=$faces_fault index-io=$faces_io no-count=$faces_count"
           cat /tmp/g5_evidence.txt 2>/dev/null || true
