@@ -8,6 +8,7 @@
  */
 #include "v2/cpu.h"
 
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,9 +28,11 @@ static size_t verify_capacity;
 
 #define V2_VERIFY_SLOTS 16
 static struct {
-    uint64_t address;
-    size_t length;
+    uint64_t address;      /* where it was mapped in the guest            */
+    uint64_t offset;       /* where it starts in the file                 */
+    size_t length;         /* how much of the mapping came from the file  */
     uint64_t hash;
+    char path[128];        /* the guest path, for reopening at dump time  */
 } verify_snapshot[V2_VERIFY_SLOTS];
 static int verify_count;
 
@@ -59,21 +62,71 @@ static uint64_t hash_range(struct v2_proc *proc, uint64_t address,
     return hash;
 }
 
+/*
+ * At exit, compare each executable image against the file it came from.
+ *
+ * This is the only comparison that means anything: the mapping is built in
+ * pieces (a whole-library reservation, then a MAP_FIXED per segment), so a
+ * hash taken mid-build always differs.  The file is the ground truth, and if
+ * a failing run shows an image that no longer matches it, the corruption is
+ * ours and the offset says where.
+ */
 void v2_verify_dump(void)
 {
+    char host_path[V2_PATH_MAX * 2];
+
     if (!v2_verify_mappings || v2_current_process == NULL) {
         return;
     }
     for (int index = 0; index < verify_count; index++) {
-        uint64_t now = hash_range(v2_current_process,
-                                  verify_snapshot[index].address,
-                                  verify_snapshot[index].length);
+        uint8_t *file = verify_file;
+        size_t want = verify_snapshot[index].length;
+        size_t done = 0;
+        size_t differences = 0;
+        uint64_t first_difference = 0;
+        int fd;
 
-        fprintf(stderr, "[v2] image 0x%llx len=0x%zx %s\n",
+        if (v2_proc_translate(v2_current_process, -100,
+                              verify_snapshot[index].path, host_path,
+                              sizeof(host_path)) != 0) {
+            continue;
+        }
+        fd = open(host_path, O_RDONLY);
+        if (fd < 0) {
+            continue;
+        }
+        while (done < want) {
+            ssize_t got = pread(fd, file + done, want - done,
+                                (off_t)(verify_snapshot[index].offset + done));
+
+            if (got <= 0) {
+                break;
+            }
+            done += (size_t)got;
+        }
+        close(fd);
+        if (done != want ||
+            v2_space_read(v2_current_process->space, verify_guest,
+                          (const void *)(uintptr_t)verify_snapshot[index].address,
+                          want) != 0) {
+            continue;
+        }
+        for (size_t at = 0; at < want; at++) {
+            if (file[at] != verify_guest[at]) {
+                if (differences == 0) {
+                    first_difference = at;
+                }
+                differences++;
+            }
+        }
+        fprintf(stderr, "[v2] image %s at 0x%llx: %s",
+                verify_snapshot[index].path,
                 (unsigned long long)verify_snapshot[index].address,
-                verify_snapshot[index].length,
-                now == verify_snapshot[index].hash ? "unchanged"
-                                                   : "CHANGED");
+                differences == 0 ? "matches the file\n" : "differs at 0x");
+        if (differences != 0) {
+            fprintf(stderr, "%llx (%zu of %zu bytes)\n",
+                    (unsigned long long)first_difference, differences, want);
+        }
     }
 }
 
@@ -221,10 +274,24 @@ long long v2_vm_mmap(struct v2_cpu *cpu, struct v2_proc *proc)
          * code all live here, and nothing should write here afterwards.
          */
         if (v2_verify_mappings && verify_count < V2_VERIFY_SLOTS) {
+            struct stat info;
+
             verify_snapshot[verify_count].address = (uint64_t)result;
+            verify_snapshot[verify_count].offset = offset;
             verify_snapshot[verify_count].length = (size_t)length;
             verify_snapshot[verify_count].hash =
                 hash_range(proc, (uint64_t)result, (size_t)length);
+            if (fstat(fd, &info) == 0 && info.st_size > 0 &&
+                offset < (uint64_t)info.st_size) {
+                size_t available = (size_t)((uint64_t)info.st_size - offset);
+
+                if (available < (size_t)length) {
+                    verify_snapshot[verify_count].length = available;
+                }
+            }
+            snprintf(verify_snapshot[verify_count].path,
+                     sizeof(verify_snapshot[verify_count].path), "%s",
+                     proc->fd_path[(int)cpu->x[4]]);
             verify_count++;
         }
     }

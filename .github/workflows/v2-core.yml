@@ -166,10 +166,10 @@ jobs:
                 mismatches=$((mismatches + 1))
                 message="$message | $(grep -m1 MISMATCH /tmp/g4_apk.log)"
               fi
-              # Did anything write into a library while the guest ran?
-              changed=$(grep -c "CHANGED" /tmp/g4_apk.log)
-              total=$(grep -c "unchanged\|CHANGED" /tmp/g4_apk.log)
-              message="$message | images changed=$changed/$total"
+              # Does every executable image still match its file?
+              differ=$(grep -c "differs at" /tmp/g4_apk.log)
+              matches=$(grep -c "matches the file" /tmp/g4_apk.log)
+              message="$message | images differ=$differ matches=$matches"
               echo "run $run exit=$status base=$base | $message" >> /tmp/flake.txt
               cp /tmp/g4_apk.log "/tmp/flake.$failures.log"
               if [ "$failures" -ge 5 ]; then
@@ -181,7 +181,7 @@ jobs:
           done
           echo "runs=$runs failures=$failures mismatches=$mismatches"
           echo "--- last passing run, for comparison ---"
-          grep -E "image 0x" /tmp/g4_pass.log 2>/dev/null | head -8 || true
+          grep -E "image .* at 0x" /tmp/g4_pass.log 2>/dev/null | head -6 || true
           cat /tmp/flake.txt || true
           if [ "$failures" -ne 0 ]; then
             echo "--- first failing run in full ---"
