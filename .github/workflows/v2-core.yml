@@ -26,11 +26,12 @@ concurrency:
 
 jobs:
   test:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    # One platform is enough.  These tests are the address space, the loader and
+    # the initial stack: C with no host API in the assertions, so the macOS leg
+    # asked the same question and cost a five-to-fifteen-minute runner queue on
+    # every push.  Apple's clang still compiles and runs this code in `guest`.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -67,17 +68,24 @@ jobs:
   # This job is the whole point of the rewrite: a real ELF runs, through the
   # real syscall path, in ten seconds and without a device.
   guest:
-    runs-on: macos-latest
+    # A free arm64 Linux runner: no macOS queue, and the host ABI is the guest's
+    # own -- no reserved x18, 4 KiB pages, a madvise that really discards.  The
+    # device (Darwin, 16 KiB pages) is covered nightly by v2-flake.yml.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
       - name: Host architecture
         run: |
           uname -m
-          if [ "$(uname -m)" != "arm64" ]; then
-            echo "::error::guest execution needs an arm64 runner"
-            exit 1
-          fi
+          case "$(uname -m)" in
+            arm64|aarch64) ;;
+            *)
+              echo "::error::guest execution needs an arm64 runner"
+              exit 1
+              ;;
+          esac
 
       - name: Build runner
         working-directory: v2
@@ -186,12 +194,19 @@ jobs:
           # (V2_VERIFY on: ~1.1%; off: 5.5% on the desktop, 98.5% on the
           # device).  Collecting the layout of each failure is worth more than
           # a single red X, so this keeps going and summarises.
-          echo "--- apk --version, census of up to 2000 runs, mappings verified"
+          # A push runs twenty; a dispatch runs the full census.  The census
+          # answers a research question -- which layout fails, and how -- and a
+          # push only has to answer "did this commit change that answer".
+          budget=20
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            budget=2000
+          fi
+          echo "--- apk --version, census of up to $budget runs, mappings verified"
           mismatches=0
           failures=0
           runs=0
           : > /tmp/flake.txt
-          for run in $(seq 1 2000); do
+          for run in $(seq 1 "$budget"); do
             runs=$run
             ./build/guest-runner --root tests/guest/root \
               tests/guest/root/sbin/apk --version > /tmp/g4_apk.log 2>&1
@@ -289,6 +304,10 @@ jobs:
       # -- and if a write really does cross a mapping end, the desktop catches
       # it too, with the pc, for the price of twenty spawns.
       - name: Guard pages -- smoke test and desktop A/B
+        # A research measurement, not a regression gate: it samples a rate that
+        # is already known and reported nightly.  On every push it turned a
+        # thirty-second answer into a fifteen-minute wait.
+        if: github.event_name == 'workflow_dispatch'
         working-directory: v2
         run: |
           set +e
@@ -530,6 +549,10 @@ jobs:
           echo "trace diff finished"
 
       - name: Space table accused after every operation
+        # A research measurement, not a regression gate: it samples a rate that
+        # is already known and reported nightly.  On every push it turned a
+        # thirty-second answer into a fifteen-minute wait.
+        if: github.event_name == 'workflow_dispatch'
         working-directory: v2
         run: |
           set +e
@@ -575,6 +598,10 @@ jobs:
       # The strict "200 of 200" gate lives there too, expected red until
       # G4-flake closes.
       - name: apk update two hundred times
+        # A research measurement, not a regression gate: it samples a rate that
+        # is already known and reported nightly.  On every push it turned a
+        # thirty-second answer into a fifteen-minute wait.
+        if: github.event_name == 'workflow_dispatch'
         working-directory: v2
         env:
           V2_VERIFY: "1"

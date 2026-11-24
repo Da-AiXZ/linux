@@ -7,9 +7,17 @@ name: build
 on:
   workflow_dispatch:
 
+# One build at a time; a second dispatch replaces the first instead of paying
+# for a second runner.
+concurrency:
+  group: build
+  cancel-in-progress: true
+
 jobs:
   build:
-    runs-on: macos-15-intel
+    # arm64, not Intel: the Intel image is a separate, scarcer pool, and an
+    # iphoneos build is a cross-compile either way.
+    runs-on: macos-15
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4

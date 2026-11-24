@@ -21,7 +21,12 @@ concurrency:
 
 jobs:
   strict:
-    runs-on: macos-latest
+    # Pinned, not -latest: the gate compares a rate against a layout, and a
+    # runner image that moves between macOS versions moves every library.  This
+    # is also the only job that still needs Darwin -- it is the device's ABI,
+    # and it is cheap to run at 03:17 when nobody is waiting for a runner.
+    runs-on: macos-15
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
