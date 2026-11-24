@@ -21,6 +21,10 @@
 
 int v2_verify_mappings;
 
+static uint8_t *verify_file;
+static uint8_t *verify_guest;
+static size_t verify_capacity;
+
 /*
  * Compare a freshly mapped file range against the file itself.  This is the
  * instrument for "some library looks wrong only sometimes": relocation
@@ -48,13 +52,28 @@ static void verify_mapping(struct v2_proc *proc, int host_fd, uint64_t offset,
     if (want > length) {
         want = length;
     }
-    file = (uint8_t *)malloc(want);
-    guest = (uint8_t *)malloc(want);
-    if (file == NULL || guest == NULL) {
-        free(file);
-        free(guest);
-        return;
+    /*
+     * One pair of buffers for the life of the process.  Allocating 4 MB twice
+     * per mapping was itself an experiment: with it, the relocation flake ran
+     * at 7.4%; the point of reusing the buffers is to find out whether the
+     * allocator was the perturbation or the comparison was.
+     */
+    if (want > verify_capacity) {
+        free(verify_file);
+        free(verify_guest);
+        verify_file = (uint8_t *)malloc(want);
+        verify_guest = (uint8_t *)malloc(want);
+        verify_capacity = (verify_file != NULL && verify_guest != NULL) ? want : 0;
+        if (verify_capacity == 0) {
+            free(verify_file);
+            free(verify_guest);
+            verify_file = NULL;
+            verify_guest = NULL;
+            return;
+        }
     }
+    file = verify_file;
+    guest = verify_guest;
     while (done < want) {
         ssize_t got = pread(host_fd, file + done, want - done,
                             (off_t)(offset + done));
@@ -78,8 +97,6 @@ static void verify_mapping(struct v2_proc *proc, int host_fd, uint64_t offset,
             }
         }
     }
-    free(file);
-    free(guest);
 }
 
 long long v2_vm_brk(struct v2_cpu *cpu, struct v2_proc *proc)
