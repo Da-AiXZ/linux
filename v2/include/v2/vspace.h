@@ -154,6 +154,23 @@ const struct v2_host *v2_space_host(const v2_space *space);
  */
 long long v2_space_claim(v2_space *space, void *addr, size_t length, int prot);
 
+/*
+ * Diagnostic: keep `pages` unused pages immediately after every first-fit
+ * allocation.  A guard page is never committed, stays PROT_NONE, and is never
+ * handed out by the allocator, so a write past the end of a mapping faults
+ * inside our own reservation instead of landing in the next mapping's first
+ * page -- which is the failure mode V2_VERIFY cannot see, because the bytes
+ * are written after the mapping was verified.
+ *
+ * The guard is a diagnostic, not a constraint: a mapping that only fits
+ * without one is still allowed, and a MAP_FIXED that names a guard page wins
+ * (the guest asked for that address explicitly).  Default off, so traces and
+ * the model comparison are unaffected.
+ */
+int v2_space_set_guard(v2_space *space, size_t pages);
+/* Non-zero when the page containing `addr` is currently a guard page. */
+int v2_space_guard_at(const v2_space *space, const void *addr);
+
 /* All return an address, 0, or a negative errno. */
 long long v2_space_map(v2_space *space, void *hint, size_t length, int prot,
                        int flags, int fd, long long offset);

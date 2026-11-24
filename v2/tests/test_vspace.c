@@ -402,7 +402,7 @@ static uint64_t next_random(struct random_state *state)
 }
 
 static int random_test(uint64_t seed, int operations, size_t pages,
-                       size_t page_size)
+                       size_t page_size, size_t guard_pages)
 {
     struct random_state random;
     struct fake fake;
@@ -416,6 +416,9 @@ static int random_test(uint64_t seed, int operations, size_t pages,
     host = fake_host(&fake);
     CHECK(v2_space_create(&space, &host, pages * page_size, page_size,
                           0x4000000, 0x10000) == 0);
+    if (guard_pages != 0) {
+        CHECK(v2_space_set_guard(space, guard_pages) == 0);
+    }
 
     for (int index = 0; index < operations; index++) {
         uint64_t pick = next_random(&random) % 100;
@@ -491,15 +494,82 @@ static int random_test(uint64_t seed, int operations, size_t pages,
 
     v2_space_destroy(space);
     fake_free(&fake);
-    printf("random seed=%-6llu ops=%-5d ok (%u checks)\n",
-           (unsigned long long)seed, operations, g_checks);
+    printf("random seed=%-6llu ops=%-5d gate=%-2zu ok (%u checks)\n",
+           (unsigned long long)seed, operations, guard_pages, g_checks);
     return 0;
+}
+
+/*
+ * The guard page is a diagnostic that has to be trustworthy in both
+ * directions: it must not be handed out to the next allocation, and it must
+ * never be committed.  Both are asserted here, because a guard that is
+ * silently reused would report "no boundary writes" for a mapping that no
+ * longer has a boundary.
+ */
+static void guard_test(size_t pages, size_t page_size)
+{
+    struct fake fake;
+    struct v2_host host;
+    struct v2_space *space = NULL;
+    uint8_t *base;
+    long long first;
+    long long second;
+    long long taken;
+
+    fake_init(&fake, pages, page_size);
+    host = fake_host(&fake);
+    CHECK(v2_space_create(&space, &host, pages * page_size, page_size, 0, 0) == 0);
+    CHECK(v2_space_set_guard(space, 1) == 0);
+    base = (uint8_t *)v2_space_base(space);
+
+    first = v2_space_map(space, NULL, 2 * page_size,
+                         V2_PROT_READ | V2_PROT_WRITE, V2_MAP_ANON, -1, 0);
+    CHECK(first > 0);
+    CHECK(v2_space_guard_at(space, base + 2 * page_size) == 1);
+    CHECK(v2_space_check(space, (void *)(uintptr_t)first, 2 * page_size,
+                         V2_PROT_WRITE) == 0);
+    /* One byte past the mapping is now a fault, not a neighbour's page. */
+    CHECK(v2_space_check(space, (void *)(uintptr_t)(first + 2 * page_size), 1,
+                         0) == -V2_EFAULT);
+    CHECK(v2_space_verify(space) == 0);
+    compare_host_and_space(space, &fake);
+
+    /* The next allocation must skip the guard, not consume it. */
+    second = v2_space_map(space, NULL, 2 * page_size,
+                          V2_PROT_READ | V2_PROT_WRITE, V2_MAP_ANON, -1, 0);
+    CHECK(second == first + 3 * (long long)page_size);
+    CHECK(v2_space_guard_at(space, base + 5 * page_size) == 1);
+    CHECK(v2_space_guard_at(space, base + 2 * page_size) == 1);
+    compare_host_and_space(space, &fake);
+
+    /* A guest that names the address wins: MAP_FIXED takes the guard back. */
+    taken = v2_space_map(space, (void *)(uintptr_t)(first + 2 * page_size),
+                         page_size, V2_PROT_READ, V2_MAP_ANON | V2_MAP_FIXED,
+                         -1, 0);
+    CHECK(taken == first + 2 * (long long)page_size);
+    CHECK(v2_space_guard_at(space, base + 2 * page_size) == 0);
+    CHECK(v2_space_verify(space) == 0);
+    compare_host_and_space(space, &fake);
+
+    /* Unmapping clears the mark with the pages. */
+    CHECK(v2_space_unmap(space, (void *)(uintptr_t)second, 2 * page_size) == 0);
+    CHECK(v2_space_guard_at(space, base + 5 * page_size) == 0);
+
+    /* Guards can be turned off again and the space stays consistent. */
+    CHECK(v2_space_set_guard(space, 0) == 0);
+    CHECK(v2_space_guard_at(space, base) == 0);
+    compare_host_and_space(space, &fake);
+
+    v2_space_destroy(space);
+    fake_free(&fake);
+    printf("guard  ok  one page after every mapping, never handed out\n");
 }
 
 int main(int argc, char **argv)
 {
     int status = 0;
 
+    guard_test(64, 0x1000);
     if (argc >= 3 && strcmp(argv[1], "--trace") == 0) {
         for (int index = 2; index < argc; index++) {
             status |= replay(argv[index]);
@@ -508,9 +578,22 @@ int main(int argc, char **argv)
         int operations = atoi(argv[2]);
         uint64_t seed = argc >= 4 ? strtoull(argv[3], NULL, 0) : 1;
 
-        status |= random_test(seed, operations, 2048, 0x4000);
-        status |= random_test(seed + 1, operations, 256, 0x4000);
-        status |= random_test(seed + 2, operations, 4096, 0x1000);
+        status |= random_test(seed, operations, 2048, 0x4000, 0);
+        status |= random_test(seed + 1, operations, 256, 0x4000, 0);
+        status |= random_test(seed + 2, operations, 4096, 0x1000, 0);
+    } else if (argc >= 3 && strcmp(argv[1], "--guard-random") == 0) {
+        /*
+         * The same driver with guards armed.  This is the case the device
+         * build runs, and the allocator has to keep every invariant with one
+         * page withheld after every mapping -- including when the space is
+         * nearly full and the guard has to be dropped for a mapping to fit.
+         */
+        int operations = atoi(argv[2]);
+        uint64_t seed = argc >= 4 ? strtoull(argv[3], NULL, 0) : 1;
+
+        status |= random_test(seed, operations, 2048, 0x4000, 1);
+        status |= random_test(seed + 1, operations, 256, 0x4000, 1);
+        status |= random_test(seed + 2, operations, 4096, 0x1000, 2);
     } else {
         fprintf(stderr,
                 "usage: %s --trace FILE... | --random OPS [SEED]\n", argv[0]);

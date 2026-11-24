@@ -43,6 +43,7 @@ test: $(BUILD)/test_vspace $(BUILD)/test_elf $(BUILD)/test_stack
 	@$(BUILD)/test_vspace --random 400 1
 	@$(BUILD)/test_vspace --random 400 99
 	@$(BUILD)/test_vspace --random 400 12345
+	@$(BUILD)/test_vspace --guard-random 400 7
 	@$(BUILD)/test_elf
 	@$(BUILD)/test_stack
 
@@ -70,6 +71,7 @@ windows:
 	                              tests/trace/tight.tsv \
 	                              tests/trace/wide.tsv
 	@$(BUILD)/test_vspace.exe --random 400 1
+	@$(BUILD)/test_vspace.exe --guard-random 400 1
 	@$(BUILD)/test_elf.exe
 	@$(BUILD)/test_stack.exe
 

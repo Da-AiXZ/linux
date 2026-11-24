@@ -27,8 +27,43 @@ struct v2_space {
     size_t island_stride;
     size_t alloc_start;    /* first page that may be handed out */
     size_t cursor;         /* next-fit hint, in pages */
+    size_t guard_pages;    /* diagnostic pages kept empty after each map */
     uint8_t *pages;
+    /*
+     * Guard marks live beside the page array instead of inside it: a guard
+     * page is FREE -- it is not committed and it is not an island -- so
+     * putting a fourth state in `pages` would break the model replay for
+     * every run, including the ones that do not use guards.
+     */
+    uint8_t *guards;
 };
+
+static int v2_page_is_guard(const v2_space *space, size_t page)
+{
+    return space->guards != NULL && space->guards[page] != 0;
+}
+
+static void v2_clear_guards(v2_space *space, size_t first, size_t count)
+{
+    if (space->guards == NULL) {
+        return;
+    }
+    for (size_t page = first; page < first + count && page < space->page_count;
+         page++) {
+        space->guards[page] = 0;
+    }
+}
+
+static void v2_arm_guards(v2_space *space, size_t first, size_t count)
+{
+    if (space->guards == NULL) {
+        return;
+    }
+    for (size_t page = first; page < first + count && page < space->page_count;
+         page++) {
+        space->guards[page] = 1;
+    }
+}
 
 static size_t v2_pages_for(size_t length, size_t page_size)
 {
@@ -62,7 +97,8 @@ static size_t v2_scan(const v2_space *space, size_t from, size_t to,
 
     *found = 0;
     for (size_t page = from; page < to; page++) {
-        if (space->pages[page] == V2_PAGE_FREE) {
+        if (space->pages[page] == V2_PAGE_FREE &&
+            !v2_page_is_guard(space, page)) {
             if (run == 0) {
                 start = page;
             }
@@ -102,6 +138,26 @@ static int v2_find_run(const v2_space *space, size_t count, size_t *out)
         return 1;
     }
     return 0;
+}
+
+/*
+ * First fit with room for the guard pages after the run.  When only a tight
+ * run exists the mapping still succeeds without a guard: the guard is a
+ * diagnostic, and letting it refuse a legal mapping would turn it into a
+ * constraint that changes behaviour.
+ */
+static int v2_find_run_guarded(const v2_space *space, size_t count,
+                               size_t *out, size_t *guard)
+{
+    size_t pages = space->guard_pages;
+
+    *guard = 0;
+    if (pages != 0 && count + pages <= space->page_count &&
+        v2_find_run(space, count + pages, out)) {
+        *guard = pages;
+        return 1;
+    }
+    return v2_find_run(space, count, out);
 }
 
 static int v2_commit(v2_space *space, size_t first, size_t count, int prot)
@@ -196,9 +252,61 @@ void v2_space_destroy(v2_space *space)
     if (space == NULL) {
         return;
     }
+    if (space->guards != NULL) {
+        space->host.dealloc(space->host.ctx, space->guards,
+                            space->page_count);
+    }
     space->host.release(space->host.ctx, space->base, space->length);
     space->host.dealloc(space->host.ctx, space->pages, space->page_count);
     space->host.dealloc(space->host.ctx, space, sizeof(*space));
+}
+
+int v2_space_set_guard(v2_space *space, size_t pages)
+{
+    if (space == NULL) {
+        return -V2_EINVAL;
+    }
+    if (pages == 0) {
+        if (space->guards != NULL) {
+            space->host.dealloc(space->host.ctx, space->guards,
+                                space->page_count);
+            space->guards = NULL;
+        }
+        space->guard_pages = 0;
+        return 0;
+    }
+    if (space->guards == NULL) {
+        space->guards = (uint8_t *)space->host.alloc(space->host.ctx,
+                                                    space->page_count);
+        if (space->guards == NULL) {
+            return -V2_ENOMEM;
+        }
+    }
+    memset(space->guards, 0, space->page_count);
+    space->guard_pages = pages;
+    /*
+     * Keep the allocation cursor off a guard that would otherwise be the very
+     * next page handed out, so the first mapping after this call also gets
+     * its guard instead of spending the existing one.
+     */
+    space->cursor = space->alloc_start;
+    return 0;
+}
+
+int v2_space_guard_at(const v2_space *space, const void *addr)
+{
+    size_t page;
+
+    if (space == NULL || space->guards == NULL ||
+        (uintptr_t)addr < (uintptr_t)space->base) {
+        return 0;
+    }
+    page = (size_t)(((uintptr_t)addr - (uintptr_t)space->base) /
+                    space->page_size);
+    if (page >= space->page_count) {
+        return 0;
+    }
+    return space->guards[page] != 0;
 }
 
 void *v2_space_base(const v2_space *space) { return space->base; }
@@ -238,6 +346,7 @@ long long v2_space_claim(v2_space *space, void *addr, size_t length, int prot)
             return -V2_EINVAL;
         }
     }
+    v2_clear_guards(space, first, count);
     if (v2_commit(space, first, count, prot) != 0) {
         return -V2_ENOMEM;
     }
@@ -249,6 +358,7 @@ long long v2_space_map(v2_space *space, void *hint, size_t length, int prot,
 {
     size_t count;
     size_t first = 0;
+    size_t guard = 0;
     int fixed = 0;
 
     if (space == NULL || length == 0) {
@@ -303,11 +413,13 @@ long long v2_space_map(v2_space *space, void *hint, size_t length, int prot,
             }
             v2_release_pages(space, first, count);
         }
+        /* The guest named this address, so it may take a guard page back. */
+        v2_clear_guards(space, first, count);
     } else {
-        if (!v2_find_run(space, count, &first)) {
+        if (!v2_find_run_guarded(space, count, &first, &guard)) {
             return -V2_ENOMEM;
         }
-        space->cursor = first + count;
+        space->cursor = first + count + guard;
         if (space->cursor >= space->page_count) {
             space->cursor = space->alloc_start;
         }
@@ -385,6 +497,7 @@ long long v2_space_map(v2_space *space, void *hint, size_t length, int prot,
             return -V2_ENOMEM;
         }
     }
+    v2_arm_guards(space, first + count, guard);
     return (long long)(uintptr_t)(space->base + first * space->page_size);
 }
 
@@ -416,6 +529,16 @@ long long v2_space_unmap(v2_space *space, void *addr, size_t length)
         }
     }
     v2_release_pages(space, first, count);
+    v2_clear_guards(space, first, count);
+    /*
+     * The page just past the range belongs to this mapping's guard when the
+     * unmap ends exactly at a mapping end.  Reclaim it, or a program that maps
+     * and unmaps in a loop loses one page per iteration to orphan guards.
+     */
+    if (first + count < space->page_count &&
+        v2_page_is_guard(space, first + count)) {
+        space->guards[first + count] = 0;
+    }
     if (first < space->cursor) {
         space->cursor = first > space->alloc_start ? first : space->alloc_start;
     }
@@ -478,6 +601,7 @@ long long v2_space_remap(v2_space *space, void *addr, size_t old_length,
     size_t count_new;
     size_t first;
     size_t old_first;
+    size_t guard = 0;
     int prot;
 
     if (space == NULL || old_length == 0 || new_length == 0 ||
@@ -495,10 +619,10 @@ long long v2_space_remap(v2_space *space, void *addr, size_t old_length,
     }
     count_old = v2_pages_for(old_length, space->page_size);
     count_new = v2_pages_for(new_length, space->page_size);
-    if (!v2_find_run(space, count_new, &first)) {
+    if (!v2_find_run_guarded(space, count_new, &first, &guard)) {
         return -V2_ENOMEM;
     }
-    space->cursor = first + count_new;
+    space->cursor = first + count_new + guard;
     if (space->cursor >= space->page_count) {
         space->cursor = space->alloc_start;
     }
@@ -538,6 +662,7 @@ long long v2_space_remap(v2_space *space, void *addr, size_t old_length,
     }
 
     v2_space_unmap(space, addr, count_old * space->page_size);
+    v2_arm_guards(space, first + count_new, guard);
     if (old_first < space->cursor) {
         space->cursor =
             old_first > space->alloc_start ? old_first : space->alloc_start;
@@ -670,6 +795,11 @@ int v2_space_verify(const v2_space *space)
         }
         if ((state & V2_PAGE_RESERVED) != 0 &&
             (state & V2_PAGE_MAPPED) != 0) {
+            return -1;
+        }
+        /* A guard page is a promise: it is never committed.  If it were,
+         * "the write faulted" would become "the write landed". */
+        if (v2_page_is_guard(space, page) && state != V2_PAGE_FREE) {
             return -1;
         }
     }
