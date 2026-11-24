@@ -33,6 +33,12 @@ jobs:
         working-directory: v2
         run: |
           set -eu
+          # Deliberately the shipping configuration: no V2_VERIFY.  The check
+          # allocates 4 MB and moves every library, which drops the rate from
+          # 5.5% to 1.1% on the desktop -- so measuring with it on would be
+          # measuring a layout that never ships.  The device is the same
+          # configuration and fails 197 of 200.
+          echo "mode: V2_VERIFY=unset (shipping layout), baseline 5.5%/run on macos-latest"
           rm -rf /tmp/g5root
           cp -R tests/guest/root /tmp/g5root
           failures=0
