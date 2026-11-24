@@ -32,6 +32,7 @@ static struct {
     uint64_t offset;       /* where it starts in the file                 */
     size_t length;         /* how much of the mapping came from the file  */
     uint64_t hash;
+    int host_path;         /* 1 when `path` is already a host path       */
     char path[128];        /* the guest path, for reopening at dump time  */
 } verify_snapshot[V2_VERIFY_SLOTS];
 static int verify_count;
@@ -86,9 +87,12 @@ void v2_verify_dump(void)
         uint64_t first_difference = 0;
         int fd;
 
-        if (v2_proc_translate(v2_current_process, -100,
-                              verify_snapshot[index].path, host_path,
-                              sizeof(host_path)) != 0) {
+        if (verify_snapshot[index].host_path) {
+            snprintf(host_path, sizeof(host_path), "%s",
+                     verify_snapshot[index].path);
+        } else if (v2_proc_translate(v2_current_process, -100,
+                                     verify_snapshot[index].path, host_path,
+                                     sizeof(host_path)) != 0) {
             continue;
         }
         fd = open(host_path, O_RDONLY);
@@ -226,6 +230,22 @@ static void verify_mapping(struct v2_proc *proc, int host_fd, uint64_t offset,
     }
 }
 
+void v2_verify_note_host(const char *host_path, uint64_t address,
+                         size_t length, uint64_t file_offset)
+{
+    if (!v2_verify_mappings || verify_count >= V2_VERIFY_SLOTS) {
+        return;
+    }
+    verify_snapshot[verify_count].address = address;
+    verify_snapshot[verify_count].offset = file_offset;
+    verify_snapshot[verify_count].length = length;
+    verify_snapshot[verify_count].hash = 0;
+    verify_snapshot[verify_count].host_path = 1;
+    snprintf(verify_snapshot[verify_count].path,
+             sizeof(verify_snapshot[verify_count].path), "%s", host_path);
+    verify_count++;
+}
+
 long long v2_vm_brk(struct v2_cpu *cpu, struct v2_proc *proc)
 {
     uint64_t requested = cpu->x[0];
@@ -311,6 +331,7 @@ long long v2_vm_mmap(struct v2_cpu *cpu, struct v2_proc *proc)
                     verify_snapshot[verify_count].length = available;
                 }
             }
+            verify_snapshot[verify_count].host_path = 0;
             snprintf(verify_snapshot[verify_count].path,
                      sizeof(verify_snapshot[verify_count].path), "%s",
                      proc->fd_path[(int)cpu->x[4]]);

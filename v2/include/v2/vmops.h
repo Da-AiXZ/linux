@@ -26,6 +26,14 @@ extern int v2_verify_mappings;
  */
 void v2_verify_dump(void);
 
+/*
+ * Register an image that the loader mapped itself (the program and its
+ * interpreter) so the same exit-time comparison covers it.  `host_path` is a
+ * host path: the loader has one, the guest does not.
+ */
+void v2_verify_note_host(const char *host_path, uint64_t address,
+                         size_t length, uint64_t file_offset);
+
 long long v2_vm_brk(struct v2_cpu *cpu, struct v2_proc *proc);
 long long v2_vm_mmap(struct v2_cpu *cpu, struct v2_proc *proc);
 long long v2_vm_munmap(struct v2_cpu *cpu, struct v2_proc *proc);

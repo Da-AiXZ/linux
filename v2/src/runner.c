@@ -319,6 +319,9 @@ int main(int argc, char **argv)
         die("load", error);
     }
     free(file);
+    /* Cover the images we mapped ourselves; V2_VERIFY compares them at exit. */
+    v2_verify_note_host(elf_path, load.start,
+                        load.span < file_length ? load.span : file_length, 0);
     jump_entry = load.entry;   /* the interpreter replaces this below */
     fprintf(stderr, "[v2] load base=0x%llx entry=0x%llx span=0x%llx\n",
            (unsigned long long)load.base, (unsigned long long)load.entry,
@@ -373,6 +376,10 @@ int main(int argc, char **argv)
                 image.interp, (unsigned long long)interp_load.base,
                 (unsigned long long)interp_load.entry,
                 (unsigned long long)interp_load.span);
+        v2_verify_note_host(host_path, interp_load.start,
+                            interp_load.span < interp_length ? interp_load.span
+                                                             : interp_length,
+                            0);
         jump_entry = interp_load.entry;
         aux_base_pending = interp_load.base;
     }
