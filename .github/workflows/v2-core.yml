@@ -365,7 +365,6 @@ jobs:
           : > /tmp/g5_novel.txt
           : > /tmp/g5_evidence.txt
           : > /tmp/g5_faults.txt
-          : > /tmp/g5_layouts.txt
           # The open bug has four faces now, all measured, all the same family:
           # a symbol lookup that fails, a crash while printing that error, a
           # wild pointer, and apk reporting an index it could not read.  They
@@ -387,16 +386,6 @@ jobs:
               elif grep -q "Error relocating .*: symbol not found" /tmp/g5_loop.log; then
                 known=$((known + 1))
                 faces_symbol=$((faces_symbol + 1))
-                # The whole layout, verbatim.  Two failures and one pass are
-                # enough to tell whether the difference is a relationship
-                # between mappings (which survives subtracting the base) or
-                # something that is not in the layout at all -- and the logs
-                # were already being collected and thrown away.
-                {
-                  echo "--- run $run ---"
-                  grep -E "\\[v2\\] (space|load|interp|stack|exec map)" /tmp/g5_loop.log
-                  grep -m1 "Error relocating" /tmp/g5_loop.log
-                } >> /tmp/g5_layouts.txt
                 if grep -q "every readable image page" /tmp/g5_loop.log; then
                   fired=$((fired + 1))
                   grep -E "every readable image page|differs at" /tmp/g5_loop.log \
