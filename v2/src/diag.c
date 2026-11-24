@@ -26,7 +26,7 @@
 
 /* A page is 4 KiB on x86 and 16 KiB on Apple silicon; one buffer covers both. */
 #define V2_DIAG_PAGE 16384
-#define V2_DIAG_PAGE_MAX 6000
+#define V2_DIAG_WORD_MAX 8000
 
 static long boundary_limit = -1;
 static long detail_limit = -1;
@@ -90,7 +90,7 @@ static void emit_registers(unsigned long index, const struct v2_cpu *cpu)
     v2_trace_put(line);
 }
 
-static void emit_regions(unsigned long index, v2_space *space, size_t page_size)
+static void emit_words(unsigned long index, v2_space *space, size_t page_size)
 {
     static uint8_t page[V2_DIAG_PAGE];
     uint8_t *base = (uint8_t *)v2_space_base(space);
@@ -98,15 +98,15 @@ static void emit_regions(unsigned long index, v2_space *space, size_t page_size)
     size_t emitted = 0;
 
     /*
-     * One line per page, not per region.  A region here is seventy megabytes of
-     * heap with the stack at the top of it, so one hash for the lot says "some
-     * page differs" and costs another round to narrow down; a hash per page
-     * names it the first time.
+     * Every non-zero word of every writable page, at the first boundary only.
+     *
+     * A hash per page found the page and could not say more; most of this memory
+     * is zero, so listing what is not zero is compact and, more to the point,
+     * diffable: the first word that differs is a byte offset in a named region,
+     * which is something that can be read rather than argued about.
      */
-    for (size_t which = 0; which < total && emitted < V2_DIAG_PAGE_MAX; which++) {
+    for (size_t which = 0; which < total && emitted < V2_DIAG_WORD_MAX; which++) {
         uint8_t *at = base + which * page_size;
-        uint64_t hash = 1469598103934665603ULL;
-        char line[96];
 
         if ((v2_space_state_at(space, at) &
              (V2_PAGE_MAPPED | V2_PROT_WRITE)) !=
@@ -118,18 +118,24 @@ static void emit_regions(unsigned long index, v2_space *space, size_t page_size)
         }
         for (size_t offset = 0; offset + 8 <= page_size; offset += 8) {
             uint64_t word;
+            char line[64];
 
             memcpy(&word, page + offset, 8);
-            hash = mix(hash, word);
+            if (word == 0) {
+                continue;
+            }
+            snprintf(line, sizeof(line), "boundary %lu word 0x%llx 0x%llx",
+                     index,
+                     (unsigned long long)(uintptr_t)(at + offset),
+                     (unsigned long long)word);
+            v2_trace_put(line);
+            if (++emitted >= V2_DIAG_WORD_MAX) {
+                break;
+            }
         }
-        snprintf(line, sizeof(line), "boundary %lu page 0x%llx 0x%016llx",
-                 index, (unsigned long long)(uintptr_t)at,
-                 (unsigned long long)hash);
-        v2_trace_put(line);
-        emitted++;
     }
-    if (emitted >= V2_DIAG_PAGE_MAX) {
-        v2_trace_put("boundary (page list truncated)");
+    if (emitted >= V2_DIAG_WORD_MAX) {
+        v2_trace_put("boundary (word list truncated)");
     }
 }
 
@@ -153,7 +159,9 @@ void v2_diag_boundary(const struct v2_cpu *cpu, unsigned long index)
 
     if ((long)index < detail()) {
         emit_registers(index, cpu);
-        emit_regions(index, space, page_size);
+        if (index == 0) {
+            emit_words(index, space, page_size);
+        }
         return;
     }
 
