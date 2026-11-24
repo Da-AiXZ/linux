@@ -260,9 +260,15 @@
      * build with no G4 section -- and the log that arrived said nothing about
      * the reason.  A line that is not in the upload did not happen.
      */
+    /*
+     * %@ , not %s: `report` is an NSString, and %s prints the bytes of the
+     * object header.  0.1.6's first device log said "18 copied, 5 already
+     * present" followed by four bytes of binary rubbish -- that rubbish was
+     * this, finally visible because the line reaches the upload now.
+     */
     NSString *line = [NSString stringWithFormat:
-        @"[app] rootfs %d copied, %d already present%s%s\n", copied, kept,
-        report.length ? "\n" : "", report];
+        @"[app] rootfs %d copied, %d already present%@%@\n", copied, kept,
+        report.length ? @"\n" : @"", report];
     [self append:line];
     return line;
 }

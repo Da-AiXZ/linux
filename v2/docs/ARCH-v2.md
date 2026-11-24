@@ -601,3 +601,32 @@ image /usr/lib/libssl.so.3                  checked 0xc4000  matches the file
 停住（`ld.so` 紧接着就 `exit(127)`，退出时的现场已经没用了），把 `x0..x30`、`sp`、`pc`
 和栈顶若干字打出来。有了 `find_sym` 的 `dso` 指针与 `syms`/`strings` 字段，就能直接看出
 是"链断了"还是"表指针是垃圾"，而不必再猜。
+
+#### 真机 0.1.6.7：动态链接跑通了，flkae 也在第一枪就中（2026-11-24 15:25）
+
+```
+$ dynamic busybox echo     dynamic-busybox-ok           status=0
+$ apk --version
+[v2] exec map /usr/lib/libcrypto.so.3 at 0x1078f8000 len=0x408000 prot=5 sites=+0
+[v2] exec map /usr/lib/libz.so.1      at 0x107d00000  len=0x34000
+[v2] exec map /usr/lib/libapk.so.2.14.0 at 0x107d34000 len=0x44000
+[v2] exec map /usr/lib/libssl.so.3    at 0x107d78000  len=0xd4000
+Error relocating /usr/lib/libcrypto.so.3: getnameinfo: symbol not found   status=127
+```
+
+两件事同时成立：
+
+1. **iOS 上第一次真正完成了动态链接**：`PT_INTERP` 被尊重、`ld-musl` 在 0x103904000 加载、
+   `AT_BASE` 指向它、它把 libc 重定位完，`dynamic-busybox-ok` 是 ld.so 亲手跑出来的。
+2. **G4-flake 在真机上 1/1 复现**，而且签名与桌面完全一致（重定位 libcrypto 时、
+   某个 libc 符号找不到）。桌面是 1%，真机是第一枪——所以真机是一个**随时可取**的样本，
+   比每天等 CI 撞 1% 强得多。
+
+一个巧合值得记下（目前只当线索，不当结论）：这次 `stack top=0x1078f8000`，
+而 `libcrypto` 正好被映射在 `0x1078f8000`——紧贴栈顶、不重叠。合法，但说明分配器的
+first-fit 会把库放在栈的正上方；如果栈在重定位期间向下长，两者就会撞上。桌面 1%、
+真机 100% 的差异，可能就藏在"栈与库的相对位置"里。
+
+另外修掉一个只在上传日志里才看得见的 bug：`rootfs %d copied, %d already present%s%s`
+把 `NSString *report` 传给了 `%s`，于是日志里那行后面跟着四个字节的二进制垃圾
+（`18 copied, 5 already present˘{‡`）。改成 `%@`。
