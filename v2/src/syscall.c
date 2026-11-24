@@ -1167,13 +1167,17 @@ void v2_syscall_dispatch(struct v2_cpu *cpu)
 
         if (budget > 0) {
             budget--;
-            fprintf(stderr, "[v2] dispatch cpu=%p frame=%p kind=%d site=0x%llx "
-                            "sp=0x%llx x0=0x%llx\n",
+            fprintf(stderr, "[v2] dispatch cpu=%p frame=%p kind=%d reg=%d "
+                            "site=0x%llx sp=0x%llx x0=0x%llx x17=0x%llx "
+                            "x19=0x%llx\n",
                     (void *)cpu, (void *)&v2_cpu_frame,
                     patch != NULL ? (int)patch->kind : -1,
+                    patch != NULL ? (int)patch->reg : -1,
                     (unsigned long long)site,
                     (unsigned long long)cpu->sp,
-                    (unsigned long long)cpu->x[0]);
+                    (unsigned long long)cpu->x[0],
+                    (unsigned long long)cpu->x[17],
+                    (unsigned long long)cpu->x[19]);
         }
     }
     if (patch != NULL && patch->kind == V2_PATCH_MRS) {

@@ -184,29 +184,29 @@ static void v2_fault(int number, siginfo_t *info, void *context)
     {
         const mcontext_t *regs = &state->uc_mcontext;
 
-        fprintf(stderr, "[v2] x0..x7  %016llx %016llx %016llx %016llx"
-                        " %016llx %016llx %016llx %016llx\n",
-                (unsigned long long)regs->regs[0],
-                (unsigned long long)regs->regs[1],
-                (unsigned long long)regs->regs[2],
-                (unsigned long long)regs->regs[3],
-                (unsigned long long)regs->regs[4],
-                (unsigned long long)regs->regs[5],
-                (unsigned long long)regs->regs[6],
-                (unsigned long long)regs->regs[7]);
-        fprintf(stderr, "[v2] x8..x15 %016llx %016llx %016llx %016llx"
-                        " %016llx %016llx %016llx %016llx\n",
-                (unsigned long long)regs->regs[8],
-                (unsigned long long)regs->regs[9],
-                (unsigned long long)regs->regs[10],
-                (unsigned long long)regs->regs[11],
-                (unsigned long long)regs->regs[12],
-                (unsigned long long)regs->regs[13],
-                (unsigned long long)regs->regs[14],
-                (unsigned long long)regs->regs[15]);
-        fprintf(stderr, "[v2] lr=%016llx sp=%016llx\n",
-                (unsigned long long)regs->regs[30],
-                (unsigned long long)regs->sp);
+        /*
+         * Every register, not the first sixteen.  x16/x17 are what the site
+         * stubs borrow, and x19 is the frame pointer the return path trusts;
+         * a fault report that hides them cannot tell "the guest jumped to zero"
+         * from "our own return path did".
+         */
+        for (int group = 0; group < 4; group++) {
+            int first = group * 8;
+            int last = first + 8;
+
+            if (last > 31) {
+                last = 31;
+            }
+            fprintf(stderr, "[v2] x%-2d..x%-2d", first, last - 1);
+            for (int reg = first; reg < last; reg++) {
+                fprintf(stderr, " %016llx", (unsigned long long)regs->regs[reg]);
+            }
+            fprintf(stderr, "\n");
+        }
+        fprintf(stderr, "[v2] sp=%016llx pc=%016llx pstate=%016llx\n",
+                (unsigned long long)regs->sp,
+                (unsigned long long)regs->pc,
+                (unsigned long long)regs->pstate);
     }
 #endif
     /* The instructions around pc, when they are inside the guest. */
