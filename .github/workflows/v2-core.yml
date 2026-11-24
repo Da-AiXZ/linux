@@ -457,7 +457,7 @@ jobs:
           caught=""
           for run in $(seq 1 600); do
             env V2_TIME_FREEZE=1 V2_SPACE_BASE=0x7000000000 V2_HASH_EACH=64 \
-              V2_DIAG_WORDS=44,45,46 \
+              V2_DIAG_WORDS=36,37,38,39,40,41,42,43,44,45,46,47,48 \
               V2_SYSCALL_LOG=/tmp/trace/run.log \
               ./build/guest-runner --root tests/guest/root \
               tests/guest/root/sbin/apk --version > /tmp/trace/run.out 2>&1
@@ -478,7 +478,7 @@ jobs:
           ok=""
           for run in $(seq 1 40); do
             env V2_TIME_FREEZE=1 V2_SPACE_BASE=0x7000000000 V2_HASH_EACH=64 \
-              V2_DIAG_WORDS=44,45,46 \
+              V2_DIAG_WORDS=36,37,38,39,40,41,42,43,44,45,46,47,48 \
               V2_SYSCALL_LOG=/tmp/trace/run.log \
               ./build/guest-runner --root tests/guest/root \
               tests/guest/root/sbin/apk --version > /tmp/trace/run.out 2>&1

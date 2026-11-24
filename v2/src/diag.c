@@ -87,7 +87,8 @@ static void emit_registers(unsigned long index, const struct v2_cpu *cpu)
 
 static int wants_words(unsigned long index)
 {
-    static long wanted[16];
+    static long wanted[32];
+    static int count;
     static int loaded;
 
     if (!loaded) {
@@ -95,26 +96,21 @@ static int wants_words(unsigned long index)
         char *end = (char *)list;
 
         loaded = 1;
-        while (list != NULL && *end != '\0' && wanted[14] == 0) {
+        while (list != NULL && *end != '\0' && count < 31) {
             long value = strtol(end, &end, 0);
 
             if (value < 0) {
                 break;
             }
-            for (int slot = 0; slot < 15; slot++) {
-                if (wanted[slot] == 0) {
-                    wanted[slot] = value + 1;
-                    break;
-                }
-            }
+            wanted[count++] = value;
             if (*end != ',') {
                 break;
             }
             end++;
         }
     }
-    for (int slot = 0; slot < 15 && wanted[slot] != 0; slot++) {
-        if ((unsigned long)(wanted[slot] - 1) == index) {
+    for (int slot = 0; slot < count; slot++) {
+        if ((unsigned long)wanted[slot] == index) {
             return 1;
         }
     }
