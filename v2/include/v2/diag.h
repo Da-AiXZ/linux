@@ -1,27 +1,27 @@
 /*
  * v2/diag.h -- fingerprints taken at a syscall boundary.
  *
- * The question this answers is narrow: two runs that were given the same image,
- * the same frozen clock and the same pinned address space reach syscall N with
- * identical state, so the first boundary where their fingerprints differ is the
- * boundary where something entered the guest that we did not account for.
+ * The question this answers is narrow: two runs given the same image, the same
+ * frozen clock and the same pinned arena reach syscall N in the same state, or
+ * they do not.  The first boundary whose fingerprint differs is where something
+ * entered the guest that we did not account for -- and until this existed, the
+ * space between two syscalls was an assumption rather than a measurement.
  */
 #ifndef V2_DIAG_H
 #define V2_DIAG_H
 
-#include <stddef.h>
 #include <stdint.h>
 
 #include "v2/cpu.h"
 
 /*
- * Prints one line per syscall for the first V2_HASH_EACH syscalls: a hash of the
- * guest's registers and a hash of every writable page.  Where the line goes is
- * the syscall log's business; this only computes it.
+ * Writes the fingerprint of this boundary into the syscall log: one hash line
+ * per call, and for the first few calls the raw registers and one hash per
+ * writable region -- because "the registers differ" is not an answer and
+ * "x16 differs" is.
  *
- * `into` receives the two numbers when the environment asks for them.
+ * Silent unless V2_HASH_EACH is set to the number of boundaries to record.
  */
-int v2_diag_boundary(const struct v2_cpu *cpu, unsigned long index,
-                     uint64_t *registers, uint64_t *memory, size_t *pages);
+void v2_diag_boundary(const struct v2_cpu *cpu, unsigned long index);
 
 #endif

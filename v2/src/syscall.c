@@ -1158,14 +1158,5 @@ void v2_syscall_dispatch(struct v2_cpu *cpu)
     }
     cpu->x[0] = (uint64_t)result;
     v2_trace_record(site, number, name, result, args);
-    {
-        uint64_t registers = 0;
-        uint64_t memory = 0;
-        size_t pages = 0;
-        unsigned long index = dispatch_count++;
-
-        if (v2_diag_boundary(cpu, index, &registers, &memory, &pages)) {
-            v2_trace_boundary(index, registers, memory, pages);
-        }
-    }
+    v2_diag_boundary(cpu, dispatch_count++);
 }
