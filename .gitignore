@@ -14,3 +14,8 @@ dist/
 __pycache__/
 *.pyc
 .apk-cache/
+
+# `zig cc -o /dev/null` on Windows writes a literal file named "nul" into the
+# working directory, and Windows will not let you delete it afterwards.
+nul
+v2/nul
