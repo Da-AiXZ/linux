@@ -373,6 +373,14 @@ jobs:
           measure "kernel's address (the shipping configuration)" V2_SPACE_BASE=0x0
           measure "fixed benign address 0x7000000000" V2_SPACE_BASE=0x7000000000
 
+          # Twice now, the step that freezes the clock and writes a syscall log
+          # has failed zero times in 250 runs while this same job measures one
+          # per hundred.  Two zeros in a row at 1% is one chance in a hundred and
+          # sixty, so one of those two things is suppressing the bug -- and they
+          # are cheap to separate.
+          measure "clock frozen, no log" V2_TIME_FREEZE=1
+          measure "syscall log, clock running" V2_SYSCALL_LOG=/tmp/g_log_only.log
+
           # Same 150 runs, but from a build whose uninitialised locals hold a
           # pattern.  A rate that moves means the flake lives in memory we never
           # wrote; a rate that does not means it does not.
