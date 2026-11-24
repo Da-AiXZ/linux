@@ -68,6 +68,13 @@ static uint64_t link_base;
 static uint64_t link_end;
 static uint64_t space_base;
 static uint64_t space_end;
+/*
+ * The fault handler runs with a broken guest, so it may only call functions
+ * that cannot touch guest memory.  v2_space_guard_at reads the guard array,
+ * which lives in host memory next to the page table, so it is safe here and
+ * it turns "addr = space + 0x..." into a verdict.
+ */
+static struct v2_space *fault_space;
 
 /*
  * The guest runs inside this process, so a guest fault *is* a host fault.
@@ -98,6 +105,16 @@ static void v2_fault(int number, siginfo_t *info, void *context)
     if (space_base != 0 && address >= space_base && address < space_end) {
         fprintf(stderr, "[v2] addr = space + 0x%llx\n",
                 (unsigned long long)(address - space_base));
+    }
+    if (fault_space != NULL && v2_space_guard_at(fault_space, info->si_addr)) {
+        /*
+         * This is the line the whole guard experiment exists for: it says the
+         * faulting address is the page we deliberately left empty after a
+         * mapping, so the access ran past the end of whatever was mapped just
+         * below it, and `pc` names the code that did it.
+         */
+        fprintf(stderr, "[v2] GUARD PAGE: this access left the mapping below "
+                        "it; pc above is the writer\n");
     }
 #if defined(__APPLE__)
     /*
@@ -299,6 +316,24 @@ int main(int argc, char **argv)
                              V2_ISLAND_STRIDE, V2_ISLAND_SIZE);
     if (status != 0) {
         die("cannot reserve the guest address space", NULL);
+    }
+    fault_space = space;
+    /*
+     * V2_GUARD=1 leaves one empty page after every first-fit mapping, so a
+     * write past the end of a mapping faults here instead of landing in the
+     * next mapping's first page.  Bytes written *after* V2_VERIFY compared an
+     * image against its file are invisible to that check, which is why the
+     * flake survived three generations of instrumentation.
+     *
+     * One page, not sixteen: v2 keeps guest pages equal to host pages, so a
+     * single page is exactly the boundary.  (v1 needed 16 KiB and still missed
+     * three quarters of its mappings, because 4 KiB requests left a slack.)
+     */
+    if (getenv("V2_GUARD") != NULL) {
+        if (v2_space_set_guard(space, 1) != 0) {
+            die("guard pages", "cannot allocate the guard array");
+        }
+        fprintf(stderr, "[v2] guard: one page after every mapping\n");
     }
     fprintf(stderr, "[v2] space 0x%llx..0x%llx page=0x%zx\n",
            (unsigned long long)(uintptr_t)v2_space_base(space),

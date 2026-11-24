@@ -12,6 +12,8 @@
 
 #include <libkern/OSCacheControl.h>
 #include <mach/mach.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -19,9 +21,36 @@
 
 static int d_reserve(void *context, size_t length, void **base)
 {
+    const char *pin = getenv("V2_SPACE_BASE");
     void *map;
 
     (void)context;
+    /*
+     * V2_SPACE_BASE pins the arena so a failure seen on the device can be
+     * reproduced on a desktop with the same absolute addresses.  The flake is
+     * layout sensitive -- V2_VERIFY moves one library and the rate drops by an
+     * order of magnitude -- so "the same layout, on demand" is the difference
+     * between a bug that is hunted and one that is waited for.
+     *
+     * The region is ours to take: nothing else in this process maps there, and
+     * a pinned base that is already occupied is not fatal, it just falls back
+     * to the anonymous reservation.
+     */
+    if (pin != NULL) {
+        unsigned long long wanted = strtoull(pin, NULL, 0);
+
+        if (wanted != 0) {
+            map = mmap((void *)(uintptr_t)wanted, length, PROT_NONE,
+                       MAP_ANON | MAP_PRIVATE | MAP_NORESERVE | MAP_FIXED, -1,
+                       0);
+            if (map != MAP_FAILED) {
+                *base = map;
+                return 0;
+            }
+            fprintf(stderr, "[v2] V2_SPACE_BASE=0x%llx unavailable; falling "
+                            "back to an anonymous reservation\n", wanted);
+        }
+    }
     map = mmap(NULL, length, PROT_NONE, MAP_ANON | MAP_PRIVATE | MAP_NORESERVE,
                -1, 0);
     if (map == MAP_FAILED) {
