@@ -305,42 +305,54 @@ jobs:
       # and that the canary past the array is intact.  A hundred and fifty runs
       # of the harshest configuration (no verification, which is where the
       # device fails every time) is enough to say whether that ever happens.
-      # Three failing runs have byte-identical *relative* layouts, so the
-      # allocator is not the variable: the absolute base is, and pinning it made
-      # four hundred runs pass where two hundred unpinned runs failed five times.
+      # The flake is reproducible on demand: pinned at 0x120000000 it failed 144
+      # of 150 runs, pinned at 0x110000000 it failed 126, at 0x7000000000 it
+      # failed none, and unpinned it failed 3.  So the trigger is the region the
+      # arena is taken from, and a 96% case is one that can be interrogated
+      # instead of sampled.
       #
-      # Two reservation paths now differ by exactly one thing, so measure both
-      # halves instead of arguing: V2_PIN_KERNEL keeps the address the kernel
-      # chose but takes it with MAP_FIXED, and V2_SPACE_BASE pins a low address
-      # with the same mechanism the passing runs used.
-      #
-      #   kernel address + MAP_FIXED    fails  -> the address is what matters
-      #                                 passes -> the reservation method is
-      #   low address + MAP_FIXED       fails  -> the region is what matters
-      #                                 passes -> only the method was ever wrong
-      - name: Address or method, take them apart
+      # What follows asks the four questions that a deterministic case makes
+      # cheap to ask: is the failure the same every time, does a guard page see
+      # anything, does the image still match its file, and what does the whole
+      # layout look like.
+      - name: Interrogate the reproducible case
         working-directory: v2
         run: |
           set +e
-          measure() {
-            label=$1
-            shift
-            failed=0
-            runs=0
-            for run in $(seq 1 150); do
-              env "$@" ./build/guest-runner --root tests/guest/root \
-                tests/guest/root/sbin/apk --version > /tmp/g_am.log 2>&1
-              runs=$((runs + 1))
-              grep -q "Error relocating\|FAULT" /tmp/g_am.log && failed=$((failed + 1))
-              grep -q "falling back to an anonymous reservation\|V2_PIN_KERNEL could not" \
-                /tmp/g_am.log && runs=$((runs - 1))
-            done
-            echo "$label: $failed of $runs failed"
-          }
-          measure "unpinned (kernel address, mmap(NULL))" V2_SPACE_BASE=0x0
-          measure "kernel address taken with MAP_FIXED" V2_PIN_KERNEL=1
-          measure "low address 0x110000000 with MAP_FIXED" V2_SPACE_BASE=0x110000000
-          measure "low address 0x120000000 with MAP_FIXED" V2_SPACE_BASE=0x120000000
+          BAD=0x120000000
+          : > /tmp/g_bad.txt
+          failed=0
+          for run in $(seq 1 40); do
+            V2_SPACE_BASE=$BAD ./build/guest-runner --root tests/guest/root \
+              tests/guest/root/sbin/apk --version > /tmp/g_bad.log 2>&1
+            if grep -q "Error relocating\|FAULT" /tmp/g_bad.log; then
+              failed=$((failed + 1))
+              grep -m1 "Error relocating\|FAULT" /tmp/g_bad.log >> /tmp/g_bad.txt
+            fi
+          done
+          echo "pinned $BAD: $failed of 40 failed"
+          echo "--- distinct failure lines ---"
+          sort /tmp/g_bad.txt | uniq -c | sort -rn | head -6
+
+          echo "--- does a guard page see the write ---"
+          guard_hits=0
+          for run in $(seq 1 10); do
+            V2_GUARD=1 V2_SPACE_BASE=$BAD ./build/guest-runner \
+              --root tests/guest/root tests/guest/root/sbin/apk --version \
+              > /tmp/g_badg.log 2>&1
+            grep -q "GUARD PAGE" /tmp/g_badg.log && guard_hits=$((guard_hits + 1))
+          done
+          echo "guard hits: $guard_hits of 10"
+
+          echo "--- do the images still match their files, at the failure ---"
+          V2_VERIFY=1 V2_SPACE_BASE=$BAD ./build/guest-runner \
+            --root tests/guest/root tests/guest/root/sbin/apk --version \
+            > /tmp/g_badv.log 2>&1
+          grep -E "every readable image page|differs at|matches the file|Error relocating|FAULT" \
+            /tmp/g_badv.log | head -14
+
+          echo "--- the layout that fails ---"
+          grep -E "\\[v2\\] (space|load|interp|stack|exec map)" /tmp/g_bad.log | head -12
 
       - name: Space table accused after every operation
         working-directory: v2
