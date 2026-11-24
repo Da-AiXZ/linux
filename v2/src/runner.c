@@ -116,6 +116,25 @@ static void v2_fault(int number, siginfo_t *info, void *context)
         fprintf(stderr, "[v2] GUARD PAGE: this access left the mapping below "
                         "it; pc above is the writer\n");
     }
+    if (fault_space != NULL) {
+        /*
+         * What the table thinks of the page that faulted.  A SIGBUS in the
+         * dynamic loader's memcpy on a page this table calls MAPPED means the
+         * table and the host disagree -- which is the one state v2 exists to
+         * make impossible.  A page the table calls FREE means we handed a free
+         * page to memcpy, which is our caller's mistake but at least a
+         * legible one.
+         */
+        int page_state = v2_space_state_at(fault_space, info->si_addr);
+
+        fprintf(stderr, "[v2] page state=0x%02x (%s%s%s%s) guard=%d\n",
+                (unsigned)page_state,
+                (page_state & V2_PAGE_MAPPED) ? "MAPPED " : "free ",
+                (page_state & V2_PAGE_RESERVED) ? "RESERVED " : "",
+                (page_state & V2_PROT_READ) ? "r" : "-",
+                (page_state & V2_PROT_WRITE) ? "w" : "-",
+                v2_space_guard_at(fault_space, info->si_addr));
+    }
 #if defined(__APPLE__)
     /*
      * The registers at the fault.  "addr=0x6516" alone says nothing about

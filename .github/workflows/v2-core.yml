@@ -354,6 +354,9 @@ jobs:
           echo "--- the layout that fails ---"
           grep -E "\\[v2\\] (space|load|interp|stack|exec map)" /tmp/g_bad.log | head -12
 
+          echo "--- one failing log, tail ---"
+          tail -45 /tmp/g_bad.log
+
       - name: Space table accused after every operation
         working-directory: v2
         run: |
