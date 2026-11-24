@@ -369,7 +369,7 @@ static void verify_note_segments(const char *host_path,
  * race is inside the guest's own execution and the entry state is exonerated.
  */
 static uint64_t hash_guest_state(struct v2_space *space, size_t page_size,
-                                 size_t *mapped_pages)
+                                 size_t *mapped_pages, size_t *readable_pages)
 {
     uint64_t hash = 1469598103934665603ULL;
     uint8_t chunk[4096];
@@ -377,21 +377,34 @@ static uint64_t hash_guest_state(struct v2_space *space, size_t page_size,
     uint8_t *base = (uint8_t *)v2_space_base(space);
 
     *mapped_pages = 0;
+    *readable_pages = 0;
     for (size_t page = 0; page < pages; page++) {
-        int state = v2_space_state_at(space, base + page * page_size);
+        uint8_t *at = base + page * page_size;
+        int state = v2_space_state_at(space, at);
 
+        /*
+         * Every page's state goes in, mapped or not: a protection that differs
+         * between two runs is a difference even when the bytes do not.  Content
+         * is added only where it can be read -- an image legitimately contains
+         * PROT_NONE gap pages, and asking for their contents is not an error,
+         * it is a question with no answer.
+         */
+        hash = (hash ^ (uint64_t)(unsigned)state) * 1099511628211ULL;
         if ((state & V2_PAGE_MAPPED) == 0) {
             continue;
         }
         (*mapped_pages)++;
-        for (size_t at = 0; at < page_size; at += sizeof(chunk)) {
-            size_t want = page_size - at;
+        if ((state & V2_PROT_READ) == 0) {
+            continue;
+        }
+        (*readable_pages)++;
+        for (size_t offset = 0; offset < page_size; offset += sizeof(chunk)) {
+            size_t want = page_size - offset;
 
             if (want > sizeof(chunk)) {
                 want = sizeof(chunk);
             }
-            if (v2_space_read(space, chunk, base + page * page_size + at,
-                              want) != 0) {
+            if (v2_space_read(space, chunk, at + offset, want) != 0) {
                 return 0;
             }
             for (size_t index = 0; index < want; index++) {
@@ -714,10 +727,11 @@ int main(int argc, char **argv)
             (unsigned long long)cpu.pc, (unsigned long long)aux.base);
     if (getenv("V2_HASH_ENTRY") != NULL) {
         size_t mapped = 0;
-        uint64_t digest = hash_guest_state(space, page_size, &mapped);
+        size_t readable = 0;
+        uint64_t digest = hash_guest_state(space, page_size, &mapped, &readable);
 
-        fprintf(stderr, "[v2] entry state hash=0x%llx pages=%zu\n",
-                (unsigned long long)digest, mapped);
+        fprintf(stderr, "[v2] entry state hash=0x%llx mapped=%zu readable=%zu\n",
+                (unsigned long long)digest, mapped, readable);
     }
     fflush(stdout);
     v2_guest_enter(cpu.pc, cpu.sp);

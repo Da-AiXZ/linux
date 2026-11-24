@@ -377,12 +377,21 @@ jobs:
             hash=$(sed -n 's/.*entry state \(hash=0x[0-9a-f]* pages=[0-9]*\).*/\1/p' \
                    /tmp/g_hash.log | head -1)
             result=ok
-            grep -q "Error relocating\|FAULT" /tmp/g_hash.log && result=FAILED
+            if grep -q "Error relocating\|FAULT" /tmp/g_hash.log; then
+              result=FAILED
+              cp /tmp/g_hash.log "/tmp/g_hash_fail.$run.log"
+            fi
             echo "run $run $result $hash" >> /tmp/g_hashes.txt
           done
           cat /tmp/g_hashes.txt
           echo "--- distinct entry states ---"
           sed 's/^run [0-9]* [A-Za-z]* //' /tmp/g_hashes.txt | sort | uniq -c
+          for log in /tmp/g_hash_fail.*.log; do
+            [ -f "$log" ] || continue
+            echo "--- $log ---"
+            grep -E "entry state|FAULT|Error relocating|page state|last [0-9]+ syscall" "$log"
+            break
+          done
           echo "--- refused pins are counted separately ---"
           V2_SPACE_BASE=0x120000000 ./build/guest-runner --root tests/guest/root \
             tests/guest/root/sbin/apk --version 2>&1 | head -2
