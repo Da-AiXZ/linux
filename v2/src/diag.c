@@ -29,7 +29,6 @@
 #define V2_DIAG_WORD_MAX 8000
 
 static long boundary_limit = -1;
-static long detail_limit = -1;
 
 static long from_env(const char *name, long fallback)
 {
@@ -49,20 +48,6 @@ static long limit(void)
     return boundary_limit;
 }
 
-static long detail(void)
-{
-    if (detail_limit < 0) {
-        detail_limit = from_env("V2_HASH_DEEP", 3);
-    }
-    return detail_limit;
-}
-
-static uint64_t mix(uint64_t hash, uint64_t value)
-{
-    hash ^= value;
-    return hash * 1099511628211ULL;
-}
-
 static void emit_registers(unsigned long index, const struct v2_cpu *cpu)
 {
     char line[512];
@@ -78,8 +63,18 @@ static void emit_registers(unsigned long index, const struct v2_cpu *cpu)
         for (int reg = first; reg < last; reg++) {
             size_t used = strlen(line);
 
-            snprintf(line + used, sizeof(line) - used, " x%d=0x%llx", reg,
-                     (unsigned long long)cpu->x[reg]);
+            /*
+             * x16 is the host's syscall entry and is the one register that is
+             * supposed to carry a host address into the guest -- it is what the
+             * stub branches back to.  Printing it would put a different number
+             * on every line of the log and hide the differences that matter.
+             */
+            if (reg == 16) {
+                snprintf(line + used, sizeof(line) - used, " x16=(host)");
+            } else {
+                snprintf(line + used, sizeof(line) - used, " x%d=0x%llx", reg,
+                         (unsigned long long)cpu->x[reg]);
+            }
         }
         v2_trace_put(line);
     }
@@ -90,8 +85,48 @@ static void emit_registers(unsigned long index, const struct v2_cpu *cpu)
     v2_trace_put(line);
 }
 
+static int wants_words(unsigned long index)
+{
+    static long wanted[16];
+    static int loaded;
+
+    if (!loaded) {
+        const char *list = getenv("V2_DIAG_WORDS");
+        char *end = (char *)list;
+
+        loaded = 1;
+        while (list != NULL && *end != '\0' && wanted[14] == 0) {
+            long value = strtol(end, &end, 0);
+
+            if (value < 0) {
+                break;
+            }
+            for (int slot = 0; slot < 15; slot++) {
+                if (wanted[slot] == 0) {
+                    wanted[slot] = value + 1;
+                    break;
+                }
+            }
+            if (*end != ',') {
+                break;
+            }
+            end++;
+        }
+    }
+    for (int slot = 0; slot < 15 && wanted[slot] != 0; slot++) {
+        if ((unsigned long)(wanted[slot] - 1) == index) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static void emit_words(unsigned long index, v2_space *space, size_t page_size)
 {
+    if (!wants_words(index)) {
+        return;
+    }
+
     static uint8_t page[V2_DIAG_PAGE];
     uint8_t *base = (uint8_t *)v2_space_base(space);
     size_t total = v2_space_page_count(space);
@@ -157,26 +192,12 @@ void v2_diag_boundary(const struct v2_cpu *cpu, unsigned long index)
         return;
     }
 
-    if ((long)index < detail()) {
-        emit_registers(index, cpu);
-        if (index == 0) {
-            emit_words(index, space, page_size);
-        }
-        return;
-    }
-
-    {
-        uint64_t hash = 1469598103934665603ULL;
-        char line[128];
-
-        for (int reg = 0; reg < 31; reg++) {
-            hash = mix(hash, cpu->x[reg]);
-        }
-        hash = mix(hash, cpu->sp);
-        hash = mix(hash, cpu->pc);
-        hash = mix(hash, cpu->nzcv);
-        snprintf(line, sizeof(line), "boundary %lu summary regs=0x%016llx",
-                 index, (unsigned long long)hash);
-        v2_trace_put(line);
-    }
+    /*
+     * Every boundary, because the one that matters is the one just before the
+     * guest goes a different way, and that number is not known in advance -- it
+     * was 47 when this was written.  Five lines per call, and the whole point is
+     * that the first line that differs names a register.
+     */
+    emit_registers(index, cpu);
+    emit_words(index, space, page_size);
 }
