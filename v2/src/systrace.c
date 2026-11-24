@@ -103,6 +103,18 @@ void v2_trace_record(uint64_t site, uint64_t number, const char *name,
     }
 }
 
+void v2_trace_boundary(unsigned long index, uint64_t registers,
+                       uint64_t memory, size_t pages)
+{
+    if (log_file == NULL) {
+        return;
+    }
+    fprintf(log_file, "boundary %lu mem=0x%016llx regs=0x%016llx writable=%zu\n",
+            index, (unsigned long long)memory, (unsigned long long)registers,
+            pages);
+    log_lines++;
+}
+
 void v2_trace_flush(void)
 {
     if (log_file != NULL) {

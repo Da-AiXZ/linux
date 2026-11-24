@@ -21,6 +21,7 @@
 #include "v2/fsops.h"
 #include "v2/patch.h"
 #include "v2/proc.h"
+#include "v2/diag.h"
 #include "v2/systrace.h"
 #include "v2/sysnames.h"
 #include "v2/vmops.h"
@@ -1114,6 +1115,8 @@ static const struct v2_sysent table[320] = {
     [278] = {"getrandom", sys_getrandom},
 };
 
+static unsigned long dispatch_count;
+
 void v2_syscall_dispatch(struct v2_cpu *cpu)
 {
     uint64_t site = cpu->pc;
@@ -1155,4 +1158,14 @@ void v2_syscall_dispatch(struct v2_cpu *cpu)
     }
     cpu->x[0] = (uint64_t)result;
     v2_trace_record(site, number, name, result, args);
+    {
+        uint64_t registers = 0;
+        uint64_t memory = 0;
+        size_t pages = 0;
+        unsigned long index = dispatch_count++;
+
+        if (v2_diag_boundary(cpu, index, &registers, &memory, &pages)) {
+            v2_trace_boundary(index, registers, memory, pages);
+        }
+    }
 }

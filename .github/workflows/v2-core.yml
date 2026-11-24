@@ -448,7 +448,7 @@ jobs:
           mkdir -p /tmp/trace
           caught=""
           for run in $(seq 1 250); do
-            env V2_TIME_FREEZE=1 V2_SPACE_BASE=0x7000000000 \
+            env V2_TIME_FREEZE=1 V2_SPACE_BASE=0x7000000000 V2_HASH_EACH=64 \
               V2_SYSCALL_LOG=/tmp/trace/run.log \
               ./build/guest-runner --root tests/guest/root \
               tests/guest/root/sbin/apk --version > /tmp/trace/run.out 2>&1
@@ -468,7 +468,7 @@ jobs:
 
           ok=""
           for run in $(seq 1 40); do
-            env V2_TIME_FREEZE=1 V2_SPACE_BASE=0x7000000000 \
+            env V2_TIME_FREEZE=1 V2_SPACE_BASE=0x7000000000 V2_HASH_EACH=64 \
               V2_SYSCALL_LOG=/tmp/trace/run.log \
               ./build/guest-runner --root tests/guest/root \
               tests/guest/root/sbin/apk --version > /tmp/trace/run.out 2>&1
