@@ -305,6 +305,59 @@ jobs:
       # and that the canary past the array is intact.  A hundred and fifty runs
       # of the harshest configuration (no verification, which is where the
       # device fails every time) is enough to say whether that ever happens.
+      # Three failing runs have byte-identical *relative* layouts (0x10000 /
+      # 0x34000 / 0x48f8000 for the image, the interpreter and the stack), and so
+      # does every passing run, because the allocator is deterministic.  So the
+      # layout is not the variable -- the arena's absolute base is.  Pinning at
+      # 0x7000000000 worked and happened to pass twenty of twenty, which proves
+      # the mechanism and says nothing about the rate.
+      #
+      # So sweep absolute bases 16 MiB apart from there, two runs each: a base
+      # that fails twice is a layout that fails on demand, which is the whole
+      # difference between hunting this bug and waiting for it.
+      - name: Sweep absolute bases for one that fails on demand
+        working-directory: v2
+        run: |
+          set +e
+          found=""
+          usable=0
+          for step in $(seq 0 199); do
+            base=$(printf '0x%x' $((0x7000000000 + step * 0x1000000)))
+            failed=0
+            refused=0
+            for run in 1 2; do
+              V2_SPACE_BASE=$base ./build/guest-runner --root tests/guest/root \
+                tests/guest/root/sbin/apk --version > /tmp/g_base.log 2>&1
+              if grep -q "falling back to an anonymous reservation" /tmp/g_base.log; then
+                refused=1
+                break
+              fi
+              grep -q "Error relocating" /tmp/g_base.log && failed=$((failed + 1))
+            done
+            [ "$refused" -eq 1 ] && continue
+            usable=$((usable + 1))
+            if [ "$failed" -eq 2 ]; then
+              found=$base
+              cp /tmp/g_base.log /tmp/g_base_failing.log
+              break
+            fi
+          done
+          echo "sweep: $usable usable bases, first failing base=${found:-none}"
+          if [ -n "$found" ]; then
+            confirmed=0
+            for run in $(seq 1 20); do
+              V2_SPACE_BASE=$found ./build/guest-runner --root tests/guest/root \
+                tests/guest/root/sbin/apk --version > /tmp/g_confirm.log 2>&1
+              grep -q "Error relocating" /tmp/g_confirm.log && confirmed=$((confirmed + 1))
+            done
+            echo "confirm: $confirmed of 20 failed at V2_SPACE_BASE=$found"
+            if [ "$confirmed" -ge 10 ]; then
+              echo "::warning::G4-flake reproduces on demand at V2_SPACE_BASE=$found ($confirmed/20)"
+              grep -E "\\[v2\\] (space|load|interp|stack|exec map)" /tmp/g_confirm.log | head -12
+              grep -m1 "Error relocating" /tmp/g_confirm.log
+            fi
+          fi
+
       - name: Space table accused after every operation
         working-directory: v2
         run: |
