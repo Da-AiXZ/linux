@@ -126,7 +126,6 @@ static int wants_words(unsigned long index)
 }
 
 #define V2_DIAG_PAGE_LIST 8192
-#define V2_DIAG_TOP_PAGES 8
 
 static size_t page_list[V2_DIAG_PAGE_LIST];
 
@@ -141,13 +140,14 @@ static size_t page_list[V2_DIAG_PAGE_LIST];
  * that is where the suspect is, and a page number would otherwise be one more
  * round trip.
  */
-static void emit_pages(unsigned long index, v2_space *space, size_t page_size,
-                       int with_words)
+static void emit_pages(unsigned long index, const struct v2_cpu *cpu,
+                       v2_space *space, size_t page_size, int with_words)
 {
     static uint8_t page[V2_DIAG_PAGE];
     uint8_t *base = (uint8_t *)v2_space_base(space);
     size_t total = v2_space_page_count(space);
     size_t count = 0;
+    uint64_t probe;
 
     for (size_t which = 0; which < total; which++) {
         if ((v2_space_state_at(space, base + which * page_size) &
@@ -160,6 +160,13 @@ static void emit_pages(unsigned long index, v2_space *space, size_t page_size,
         }
         count++;
     }
+    /*
+     * The pages whose words are worth printing are the ones the stack is on:
+     * an earlier version printed the eight highest pages and got libcrypto,
+     * because first-fit had put a library right above the stack.
+     */
+    probe = cpu->sp & ~(uint64_t)(page_size - 1);
+
     for (size_t slot = 0; slot < count && slot < V2_DIAG_PAGE_LIST; slot++) {
         uint8_t *at = base + page_list[slot] * page_size;
         uint64_t hash = 1469598103934665603ULL;
@@ -180,7 +187,9 @@ static void emit_pages(unsigned long index, v2_space *space, size_t page_size,
                  (unsigned long long)hash);
         v2_trace_put(line);
 
-        if (with_words && slot + V2_DIAG_TOP_PAGES >= count) {
+        if (with_words &&
+            ((uint64_t)(uintptr_t)at == probe ||
+             (uint64_t)(uintptr_t)at + page_size == probe)) {
             for (size_t offset = 0; offset + 8 <= page_size; offset += 8) {
                 uint64_t word;
 
@@ -239,6 +248,6 @@ void v2_diag_boundary(const struct v2_cpu *cpu, unsigned long index)
      * something nobody can diff.
      */
     if (wants_words(index)) {
-        emit_pages(index, space, page_size, 1);
+        emit_pages(index, cpu, space, page_size, 1);
     }
 }
