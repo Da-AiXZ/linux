@@ -326,7 +326,16 @@ jobs:
                 known=$((known + 1))
               fi
             elif ! grep -q "2 distinct packages available" /tmp/g5_loop.log; then
+              # Exit 0 with no package count is a second face of the same
+              # family: apk finished, so nothing faulted, but a line it prints
+              # on the way out is missing -- which a heap-corrupting bug can do
+              # just as easily as it can break a symbol lookup.  Seen once in
+              # 200 on be979d5, and the log was not kept, which made it
+              # undiagnosable; it is kept now, so the next one is evidence.
               echo "run $run: exited zero but printed no package count" >> /tmp/g5_novel.txt
+              cp /tmp/g5_loop.log "/tmp/g5_fail.$run.log"
+              echo "--- run $run exited zero, full log ---"
+              cat /tmp/g5_loop.log
             fi
           done
           echo "runs=$runs known-g4-flake=$known"
