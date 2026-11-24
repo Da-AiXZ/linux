@@ -244,16 +244,72 @@ static int set_islands(struct v2_patcher *patcher, int prot, char *error,
     return 0;
 }
 
+/*
+ * Is there a patch site in this range at all?
+ *
+ * Scanning without copying matters more than it sounds.  Every executable
+ * mapping ld.so makes was read into a heap buffer and written straight back,
+ * four megabytes at a time, five times per start-up -- and none of these
+ * libraries contains a single `svc`, because musl keeps them all in libc.  So
+ * the pass did nothing except dirty every page of every image in the middle of
+ * the loader's own work.  A no-op that touches four megabytes is not a no-op;
+ * it is a second variable.
+ *
+ * The chunk is a multiple of four and the range is page aligned, so a word
+ * never straddles two reads.
+ */
+static int v2_has_site(const struct v2_space *space, uint64_t address,
+                       size_t length)
+{
+    uint8_t chunk[16384];
+    size_t done = 0;
+
+    while (done < length) {
+        size_t want = length - done;
+
+        if (want > sizeof(chunk)) {
+            want = sizeof(chunk);
+        }
+        if (v2_space_read(space, chunk,
+                          (const void *)(uintptr_t)(address + done),
+                          want) != 0) {
+            return -1;
+        }
+        for (size_t at = 0; at + 4 <= want; at += 4) {
+            uint32_t word;
+
+            memcpy(&word, chunk + at, sizeof(word));
+            if (word == V2_ARM64_SVC0 ||
+                (word & 0xFFFFFFE0u) == V2_ARM64_MRS_TPIDR ||
+                (word & 0xFFFFFFE0u) == V2_ARM64_MSR_TPIDR) {
+                return 1;
+            }
+        }
+        done += want;
+    }
+    return 0;
+}
+
 int v2_patch_runtime(struct v2_patcher *patcher, uint64_t address,
                      size_t length, char *error, size_t error_size)
 {
     const struct v2_host *host = v2_space_host(patcher->space);
     uint8_t *buffer;
     int was_sealed;
+    int present;
+    int before;
     int status;
 
     if (length == 0) {
         return 0;
+    }
+    present = v2_has_site(patcher->space, address, length);
+    if (present < 0) {
+        v2_patch_error(error, error_size, "cannot read the new image");
+        return -V2_EFAULT;
+    }
+    if (present == 0) {
+        return 0;    /* nothing to patch, so nothing is touched */
     }
     was_sealed = patcher->sealed;
     if (was_sealed) {
@@ -271,6 +327,7 @@ int v2_patch_runtime(struct v2_patcher *patcher, uint64_t address,
         status = -V2_ENOMEM;
         goto reseal;
     }
+    before = patcher->site_count;
     if (v2_space_read(patcher->space, buffer,
                       (const void *)(uintptr_t)address, length) != 0) {
         v2_patch_error(error, error_size, "cannot read the new image");
@@ -279,13 +336,15 @@ int v2_patch_runtime(struct v2_patcher *patcher, uint64_t address,
     }
     status = v2_patch_buffer(patcher, address, buffer, length, error,
                              error_size);
-    if (status == 0 &&
+    if (status == 0 && patcher->site_count != before &&
         v2_space_write(patcher->space, (void *)(uintptr_t)address, buffer,
                        length) != 0) {
         v2_patch_error(error, error_size, "cannot write the patched image");
         status = -V2_EFAULT;
     }
-    host->flush_icache(host->ctx, (void *)(uintptr_t)address, length);
+    if (patcher->site_count != before) {
+        host->flush_icache(host->ctx, (void *)(uintptr_t)address, length);
+    }
 done:
     free(buffer);
 reseal:

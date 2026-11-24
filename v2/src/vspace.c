@@ -225,9 +225,15 @@ static void v2_check_handout(v2_space *space, size_t page, int prot)
     uint8_t *at = space->base + page * space->page_size;
     size_t offset;
 
-    /* A page the caller cannot read now is a page the guest cannot read now. */
-    if (!handout_check() || (prot & V2_PROT_READ) == 0 ||
-        space->page_size > sizeof(buffer)) {
+    /*
+     * A page the caller cannot read now is a page the guest cannot read now.
+     * The host may also have no read primitive at all -- the trace harness
+     * supplies a page table and nothing else -- and asking a NULL function
+     * pointer whether the page is zero killed the L1 job the moment this check
+     * became unconditional.
+     */
+    if (!handout_check() || space->host.read == NULL ||
+        (prot & V2_PROT_READ) == 0 || space->page_size > sizeof(buffer)) {
         return;
     }
     if (space->host.read(space->host.ctx, buffer, at, space->page_size) != 0) {
