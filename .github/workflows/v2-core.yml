@@ -306,41 +306,59 @@ jobs:
       # of the harshest configuration (no verification, which is where the
       # device fails every time) is enough to say whether that ever happens.
       # Pinning the base of a *failing* run cannot work: that address was
-      # chosen by mmap and is owned by something else in the next process.  So
-      # pin a handful of addresses nobody uses instead, and ask the opposite
-      # question -- does a fixed layout fail every time?  If any of them does,
-      # the flake stops being a 2%-per-run statistic and becomes one case that
-      # can be bisected on a desktop without waiting for luck.
-      - name: Layout, pinned
+      # chosen by mmap and is owned by something else in the next process --
+      # the last attempt reported exactly that, twice.  What does work is
+      # pinning the arena somewhere nothing else wants and asking whether the
+      # resulting layout fails every time, because the outcome is a property of
+      # the layout: one base gave 20 passes in 20 runs.
+      #
+      # So: sweep bases 16 MiB apart across two island strides, six runs each.
+      # A layout that fails on request turns a 2%-per-run statistic into one
+      # case that can be bisected on a desktop, with no device and no luck.
+      - name: Sweep for a layout that fails on demand
         working-directory: v2
         run: |
           set +e
-          for base in 0x5000000000 0x6000000000 0x7000000000; do
-            pinned=0
+          found=""
+          tried=0
+          for step in $(seq 0 31); do
+            base=$(printf '0x%x' $((0x1000000000 + step * 0x1000000)))
             failed=0
-            for run in $(seq 1 20); do
-              if V2_SPACE_BASE=$base ./build/guest-runner --root tests/guest/root \
-                   tests/guest/root/sbin/apk --version > /tmp/g_pin.log 2>&1; then
-                pinned=$((pinned + 1))
-                if grep -q "falling back to an anonymous reservation" \
-                     /tmp/g_pin.log; then
-                  echo "$base: pin refused (address taken)"
-                  break
-                fi
-              else
+            passed=0
+            refused=0
+            for run in $(seq 1 6); do
+              V2_SPACE_BASE=$base ./build/guest-runner --root tests/guest/root \
+                tests/guest/root/sbin/apk --version > /tmp/g_sweep.log 2>&1
+              if grep -q "falling back to an anonymous reservation" /tmp/g_sweep.log; then
+                refused=1
+                break
+              fi
+              if grep -q "Error relocating" /tmp/g_sweep.log; then
                 failed=$((failed + 1))
-                cp /tmp/g_pin.log "/tmp/g_pin_${base}_$failed.log"
+                cp /tmp/g_sweep.log "/tmp/g_sweep_${step}_$failed.log"
+              else
+                passed=$((passed + 1))
               fi
             done
-            echo "layout $base: $failed of 20 failed, $pinned passed"
+            [ "$refused" -eq 1 ] && continue
+            tried=$((tried + 1))
+            if [ "$failed" -ne 0 ]; then
+              echo "layout $base: $failed of $((failed + passed)) failed  <-- reproducible"
+              found=$base
+              break
+            fi
           done
-          for log in /tmp/g_pin_*.log; do
-            [ -f "$log" ] || continue
-            echo "--- $log ---"
-            grep -E "\\[v2\\] (space|stack|exec map|load|interp)" "$log" | head -12
-            grep -m1 "Error relocating" "$log" || true
-          done
-          echo "layout pinned: done"
+          echo "sweep: $tried usable layouts, first failing base=${found:-none}"
+          if [ -n "$found" ]; then
+            echo "::warning::G4-flake reproduces on demand at V2_SPACE_BASE=$found"
+            for log in /tmp/g_sweep_*_1.log; do
+              [ -f "$log" ] || continue
+              echo "--- $log ---"
+              grep -E "\\[v2\\] (space|stack|exec map|load|interp)" "$log" | head -12
+              grep -m1 "Error relocating" "$log"
+              break
+            done
+          fi
 
       - name: Space table accused after every operation
         working-directory: v2
