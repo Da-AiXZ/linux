@@ -455,7 +455,7 @@ jobs:
           set +e
           mkdir -p /tmp/trace
           caught=""
-          for run in $(seq 1 250); do
+          for run in $(seq 1 600); do
             env V2_TIME_FREEZE=1 V2_SPACE_BASE=0x7000000000 V2_HASH_EACH=64 \
               V2_SYSCALL_LOG=/tmp/trace/run.log \
               ./build/guest-runner --root tests/guest/root \
@@ -469,8 +469,8 @@ jobs:
             fi
           done
           if [ -z "$caught" ]; then
-            echo "no failure in 250 runs with the clock frozen"
-            echo "--- the clock was the variable, or 250 runs got unlucky ---"
+            echo "no failure in 600 runs with the clock frozen"
+            echo "--- at one per hundred, six hundred runs should have found six ---"
             exit 0
           fi
 
