@@ -197,7 +197,7 @@
  * apk's libraries at their real paths, and Documents is writable, which the
  * bundle is not -- apk will want that in G5.
  */
-- (void)prepareRoot:(NSString *)root
+- (NSString *)prepareRoot:(NSString *)root
 {
     NSFileManager *files = [NSFileManager defaultManager];
     NSString *source = [[[NSBundle mainBundle] bundlePath]
@@ -210,7 +210,7 @@
 
     if (![files fileExistsAtPath:source]) {
         [self append:@"[app] no bundled rootfs; the guest gets an empty one\n"];
-        return;
+        return @"[app] no bundled rootfs; the guest gets an empty one\n";
     }
 
     walk = [files enumeratorAtPath:source];
@@ -254,9 +254,17 @@
         }
         copied++;
     }
-    [self append:[NSString stringWithFormat:
+    /*
+     * The report goes into the *uploaded* text as well as the screen.  0.1.5
+     * printed it to the screen only, so a failed copy looked exactly like a
+     * build with no G4 section -- and the log that arrived said nothing about
+     * the reason.  A line that is not in the upload did not happen.
+     */
+    NSString *line = [NSString stringWithFormat:
         @"[app] rootfs %d copied, %d already present%s%s\n", copied, kept,
-        report.length ? "\n" : "", report]];
+        report.length ? "\n" : "", report];
+    [self append:line];
+    return line;
 }
 
 #pragma mark - run
@@ -303,7 +311,7 @@
         stringByAppendingPathComponent:@"Helpers/hello"];
     [text appendFormat:@"[app] guest=%@\n", elf];
 
-    [self prepareRoot:root];
+    [text appendString:[self prepareRoot:root]];
 
     NSDate *started = [NSDate date];
     int status = [V2Runner runGuest:elf root:root timeout:20 output:text];
@@ -357,8 +365,27 @@
      * ld.so found libc through our openat/mmap, and the interpreter
      * relocated it -- apk adds libapk, libcrypto, libssl and libz on top.
      */
+    NSString *dynamicRoot = root;
     NSString *dynamicBusybox = [root stringByAppendingPathComponent:@"bin/busybox"];
     NSString *apk = [root stringByAppendingPathComponent:@"sbin/apk"];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:apk]) {
+        /*
+         * 0.1.5 reached the device, ran all six applets and then skipped this
+         * whole section without a word: the Documents copy was missing
+         * sbin/apk, and the check was an `if` with no `else`.  The bundle root
+         * is read-only, which `apk --version` does not mind, so it is a
+         * perfectly good fallback -- and if that is missing too, say so in the
+         * upload instead of disappearing.
+         */
+        NSString *bundleRoot = [[[NSBundle mainBundle] bundlePath]
+            stringByAppendingPathComponent:@"Helpers/root"];
+        dynamicRoot = bundleRoot;
+        dynamicBusybox = [bundleRoot stringByAppendingPathComponent:@"bin/busybox"];
+        apk = [bundleRoot stringByAppendingPathComponent:@"sbin/apk"];
+        NSString *note = @"[app] Documents root has no sbin/apk; using the bundle root\n";
+        [text appendString:note];
+        [self append:note];
+    }
     if ([[NSFileManager defaultManager] fileExistsAtPath:apk]) {
         NSArray<NSDictionary *> *dynamic = @[
             @{@"title": @"dynamic busybox echo",
@@ -379,7 +406,7 @@
 
             [text appendString:header];
             [self append:header];
-            dynamic_status = [V2Runner runGuest:one[@"path"] root:root
+            dynamic_status = [V2Runner runGuest:one[@"path"] root:dynamicRoot
                                            args:one[@"args"] timeout:30
                                          output:piece];
             [text appendString:piece];
@@ -387,6 +414,11 @@
                                 dynamic_status];
             [self append:piece];
         }
+    } else {
+        NSString *note = [NSString stringWithFormat:
+            @"[app] G4 skipped: no apk at %@\n", apk];
+        [text appendString:note];
+        [self append:note];
     }
 
     // Upload with the retry ladder from the doc: 2s, 5s, 10s.
