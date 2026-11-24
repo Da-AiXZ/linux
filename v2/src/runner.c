@@ -28,6 +28,7 @@
 #include "v2/patch.h"
 #include "v2/proc.h"
 #include "v2/stack.h"
+#include "v2/vmops.h"
 #include "v2/vspace.h"
 
 /*
@@ -227,6 +228,10 @@ int main(int argc, char **argv)
     int fd;
     int status;
 
+    /* V2_VERIFY=1 makes every file mapping prove it matches the file. */
+    if (getenv("V2_VERIFY") != NULL) {
+        v2_verify_mappings = 1;
+    }
     memset(&interp_image, 0, sizeof(interp_image));
     memset(&interp_load, 0, sizeof(interp_load));
 

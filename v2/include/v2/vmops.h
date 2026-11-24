@@ -10,6 +10,15 @@
 
 #include "v2/fsops.h"
 
+/*
+ * Set by the runner from V2_VERIFY=1.  When set, every file mapping is
+ * compared against the file after it is made, and the first differing byte is
+ * reported.  A library whose contents are wrong fails twenty steps later in
+ * ld.so's symbol lookup with a message about whichever symbol the damage hit,
+ * which is impossible to work backwards from; this says it at the source.
+ */
+extern int v2_verify_mappings;
+
 long long v2_vm_brk(struct v2_cpu *cpu, struct v2_proc *proc);
 long long v2_vm_mmap(struct v2_cpu *cpu, struct v2_proc *proc);
 long long v2_vm_munmap(struct v2_cpu *cpu, struct v2_proc *proc);

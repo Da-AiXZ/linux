@@ -9,12 +9,78 @@
 #include "v2/cpu.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "v2/patch.h"
 #include "v2/proc.h"
 #include "v2/vmops.h"
 #include "v2/vspace.h"
+
+int v2_verify_mappings;
+
+/*
+ * Compare a freshly mapped file range against the file itself.  This is the
+ * instrument for "some library looks wrong only sometimes": relocation
+ * failures inside ld.so name a different symbol each time, which is what a
+ * hole in a symbol table looks like, and a hole can only come from the bytes
+ * we put in memory.
+ */
+static void verify_mapping(struct v2_proc *proc, int host_fd, uint64_t offset,
+                           uint64_t address, size_t length)
+{
+    struct stat info;
+    uint8_t *file;
+    uint8_t *guest;
+    size_t want;
+    size_t done = 0;
+
+    if (!v2_verify_mappings || fstat(host_fd, &info) != 0 ||
+        info.st_size <= 0) {
+        return;
+    }
+    if (offset >= (uint64_t)info.st_size) {
+        return;
+    }
+    want = (size_t)((uint64_t)info.st_size - offset);
+    if (want > length) {
+        want = length;
+    }
+    file = (uint8_t *)malloc(want);
+    guest = (uint8_t *)malloc(want);
+    if (file == NULL || guest == NULL) {
+        free(file);
+        free(guest);
+        return;
+    }
+    while (done < want) {
+        ssize_t got = pread(host_fd, file + done, want - done,
+                            (off_t)(offset + done));
+
+        if (got <= 0) {
+            break;
+        }
+        done += (size_t)got;
+    }
+    if (done == want &&
+        v2_space_read(proc->space, guest, (const void *)(uintptr_t)address,
+                      want) == 0) {
+        for (size_t index = 0; index < want; index++) {
+            if (file[index] != guest[index]) {
+                fprintf(stderr,
+                        "[v2] MISMATCH at 0x%llx (+0x%zx): file=%02x guest=%02x"
+                        " of 0x%zx bytes\n",
+                        (unsigned long long)address, index, file[index],
+                        guest[index], want);
+                break;
+            }
+        }
+    }
+    free(file);
+    free(guest);
+}
 
 long long v2_vm_brk(struct v2_cpu *cpu, struct v2_proc *proc)
 {
@@ -56,6 +122,10 @@ long long v2_vm_mmap(struct v2_cpu *cpu, struct v2_proc *proc)
      * executable" is exactly the set of pages that may contain `svc #0`.
      * They are writable for the few microseconds it takes to rewrite them.
      */
+    if (result > 0 && fd >= 0) {
+        /* Before patching, so the comparison is against the file as it is. */
+        verify_mapping(proc, fd, offset, (uint64_t)result, (size_t)length);
+    }
     if (result > 0 && fd >= 0 && (prot & V2_PROT_EXEC) != 0 &&
         proc->patcher != NULL) {
         char patch_error[96] = "";
