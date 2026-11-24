@@ -26,7 +26,6 @@
 
 /* A page is 4 KiB on x86 and 16 KiB on Apple silicon; one buffer covers both. */
 #define V2_DIAG_PAGE 16384
-#define V2_DIAG_WORD_MAX 8000
 
 static long boundary_limit = -1;
 
@@ -126,56 +125,76 @@ static int wants_words(unsigned long index)
     return 0;
 }
 
-static void emit_words(unsigned long index, v2_space *space, size_t page_size)
-{
-    if (!wants_words(index)) {
-        return;
-    }
+#define V2_DIAG_PAGE_LIST 8192
+#define V2_DIAG_TOP_PAGES 8
 
+static size_t page_list[V2_DIAG_PAGE_LIST];
+
+/*
+ * One hash per writable page, plus the words of the last few pages.
+ *
+ * The word dump alone was a trap: it stopped at eight thousand words, which is
+ * the *lowest* eight thousand non-zero words, and the stack -- where every
+ * interesting value in this bug lives -- is the highest memory in the arena.  It
+ * had never been compared.  A hash per page cannot be truncated into silence and
+ * costs a line per page; the words of the top eight pages come with it because
+ * that is where the suspect is, and a page number would otherwise be one more
+ * round trip.
+ */
+static void emit_pages(unsigned long index, v2_space *space, size_t page_size,
+                       int with_words)
+{
     static uint8_t page[V2_DIAG_PAGE];
     uint8_t *base = (uint8_t *)v2_space_base(space);
     size_t total = v2_space_page_count(space);
-    size_t emitted = 0;
+    size_t count = 0;
 
-    /*
-     * Every non-zero word of every writable page, at the first boundary only.
-     *
-     * A hash per page found the page and could not say more; most of this memory
-     * is zero, so listing what is not zero is compact and, more to the point,
-     * diffable: the first word that differs is a byte offset in a named region,
-     * which is something that can be read rather than argued about.
-     */
-    for (size_t which = 0; which < total && emitted < V2_DIAG_WORD_MAX; which++) {
-        uint8_t *at = base + which * page_size;
-
-        if ((v2_space_state_at(space, at) &
+    for (size_t which = 0; which < total; which++) {
+        if ((v2_space_state_at(space, base + which * page_size) &
              (V2_PAGE_MAPPED | V2_PROT_WRITE)) !=
             (V2_PAGE_MAPPED | V2_PROT_WRITE)) {
             continue;
         }
+        if (count < V2_DIAG_PAGE_LIST) {
+            page_list[count] = which;
+        }
+        count++;
+    }
+    for (size_t slot = 0; slot < count && slot < V2_DIAG_PAGE_LIST; slot++) {
+        uint8_t *at = base + page_list[slot] * page_size;
+        uint64_t hash = 1469598103934665603ULL;
+        char line[96];
+
         if (v2_space_read(space, page, at, page_size) != 0) {
             continue;
         }
         for (size_t offset = 0; offset + 8 <= page_size; offset += 8) {
             uint64_t word;
-            char line[64];
 
             memcpy(&word, page + offset, 8);
-            if (word == 0) {
-                continue;
-            }
-            snprintf(line, sizeof(line), "boundary %lu word 0x%llx 0x%llx",
-                     index,
-                     (unsigned long long)(uintptr_t)(at + offset),
-                     (unsigned long long)word);
-            v2_trace_put(line);
-            if (++emitted >= V2_DIAG_WORD_MAX) {
-                break;
+            hash ^= word;
+            hash *= 1099511628211ULL;
+        }
+        snprintf(line, sizeof(line), "boundary %lu page 0x%llx 0x%016llx",
+                 index, (unsigned long long)(uintptr_t)at,
+                 (unsigned long long)hash);
+        v2_trace_put(line);
+
+        if (with_words && slot + V2_DIAG_TOP_PAGES >= count) {
+            for (size_t offset = 0; offset + 8 <= page_size; offset += 8) {
+                uint64_t word;
+
+                memcpy(&word, page + offset, 8);
+                if (word == 0) {
+                    continue;
+                }
+                snprintf(line, sizeof(line),
+                         "boundary %lu word 0x%llx 0x%llx", index,
+                         (unsigned long long)(uintptr_t)(at + offset),
+                         (unsigned long long)word);
+                v2_trace_put(line);
             }
         }
-    }
-    if (emitted >= V2_DIAG_WORD_MAX) {
-        v2_trace_put("boundary (word list truncated)");
     }
 }
 
@@ -214,5 +233,12 @@ void v2_diag_boundary(const struct v2_cpu *cpu, unsigned long index)
         v2_trace_put(line);
     }
     emit_registers(index, cpu);
-    emit_words(index, space, page_size);
+    /*
+     * Pages only inside the window: a hash per page is four and a half thousand
+     * lines, and doing that at all sixty-four boundaries would make the log
+     * something nobody can diff.
+     */
+    if (wants_words(index)) {
+        emit_pages(index, space, page_size, 1);
+    }
 }
