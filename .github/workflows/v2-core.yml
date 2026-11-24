@@ -375,6 +375,7 @@ jobs:
           faces_fault=0
           faces_io=0
           faces_count=0
+          reproduced=""
           for run in $(seq 1 $runs); do
             if ! ./build/guest-runner --root /tmp/g5root /tmp/g5root/sbin/apk \
                  update --allow-untrusted --no-progress > /tmp/g5_loop.log 2>&1; then
@@ -386,6 +387,30 @@ jobs:
               elif grep -q "Error relocating .*: symbol not found" /tmp/g5_loop.log; then
                 known=$((known + 1))
                 faces_symbol=$((faces_symbol + 1))
+                # The device fails at one layout and passes at another, which
+                # says the trigger is a property of the layout rather than of
+                # the run.  If that is true here too, pinning the arena at this
+                # run's base should fail again on demand -- and a failure that
+                # reproduces on request is a bug that can be bisected instead
+                # of waited for.  One attempt per step, not per failure.
+                if [ -z "$reproduced" ]; then
+                  base=$(sed -n 's/.*\[v2\] space \(0x[0-9a-f]*\)\.\..*/\1/p' \
+                         /tmp/g5_loop.log | head -1)
+                  if [ -n "$base" ]; then
+                    V2_SPACE_BASE=$base ./build/guest-runner --root /tmp/g5root \
+                      /tmp/g5root/sbin/apk --version > /tmp/g_repro.log 2>&1 || true
+                    if grep -q "symbol not found" /tmp/g_repro.log; then
+                      reproduced=$base
+                      cp /tmp/g_repro.log /tmp/g_reproduced.log
+                      echo "reproduced at V2_SPACE_BASE=$base (run $run's layout)"
+                    elif grep -q "falling back to an anonymous reservation" \
+                         /tmp/g_repro.log; then
+                      echo "could not pin $base: that address was taken in the new process"
+                    else
+                      echo "pinned $base and it passed -- the trigger is not the arena base alone"
+                    fi
+                  fi
+                fi
                 if grep -q "every readable image page" /tmp/g5_loop.log; then
                   fired=$((fired + 1))
                   grep -E "every readable image page|differs at" /tmp/g5_loop.log \
@@ -417,6 +442,10 @@ jobs:
           # has a target and the offsets say where.  If no, the bytes are right
           # at the moment of failure and the fault is in what ld.so built out
           # of them.
+          if [ -n "$reproduced" ]; then
+            echo "::warning::G4-flake reproduces on demand at V2_SPACE_BASE=$reproduced"
+            grep -E "\[v2\] (space|load|interp|stack|exec map)" /tmp/g_reproduced.log | head -12
+          fi
           echo "in-failure comparison: fired=$fired silent=$silent"
           echo "faces: symbol=$faces_symbol fault=$faces_fault index-io=$faces_io no-count=$faces_count"
           cat /tmp/g5_evidence.txt 2>/dev/null || true
