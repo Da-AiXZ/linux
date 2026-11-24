@@ -429,7 +429,16 @@ jobs:
           # at the moment of failure and the fault is in what ld.so built out
           # of them.
           echo "--- layouts of the failing runs ---"
-          cat /tmp/g_layouts.txt 2>/dev/null || true
+          # Read back from the per-run logs that were already kept.  Subtracting
+          # the arena base from these lines answers whether a failing run differs
+          # from a passing one in a relationship between mappings, or in
+          # something that is not in the layout at all.
+          for log in /tmp/g5_fail.*.log; do
+            [ -f "$log" ] || continue
+            echo "--- ${log##*/} ---"
+            grep -E "\[v2\] (space|load|interp|stack|exec map)" "$log" | head -12
+            grep -m1 "Error relocating" "$log" || true
+          done
           echo "in-failure comparison: fired=$fired silent=$silent"
           echo "faces: symbol=$faces_symbol fault=$faces_fault index-io=$faces_io no-count=$faces_count"
           cat /tmp/g5_evidence.txt 2>/dev/null || true
