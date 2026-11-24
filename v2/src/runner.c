@@ -189,6 +189,29 @@ static uint8_t *read_file(const char *path, size_t *length)
     return buffer;
 }
 
+/*
+ * Register every PT_LOAD separately.  Comparing a whole image linearly against
+ * the file is only correct when vaddr == offset for every segment: true for the
+ * libraries ld.so maps (one mapping at offset zero), false for the program and
+ * the interpreter, whose second segment starts at a different file offset than
+ * its vaddr.  That mismatch produced a fake 569-byte "difference" in apk and
+ * cost three rounds of instrumentation (ARCH 14.9).
+ */
+static void verify_note_segments(const char *host_path,
+                                 const struct v2_elf_image *image,
+                                 const struct v2_elf_load *load)
+{
+    for (int index = 0; index < image->segment_count; index++) {
+        const struct v2_elf_segment *segment = &image->segments[index];
+
+        if (segment->filesz == 0) {
+            continue;
+        }
+        v2_verify_note_host(host_path, load->base + segment->vaddr,
+                            (size_t)segment->filesz, segment->offset);
+    }
+}
+
 int main(int argc, char **argv)
 {
 #if TARGET_OS_IPHONE
@@ -320,8 +343,7 @@ int main(int argc, char **argv)
     }
     free(file);
     /* Cover the images we mapped ourselves; V2_VERIFY compares them at exit. */
-    v2_verify_note_host(elf_path, load.start,
-                        load.span < file_length ? load.span : file_length, 0);
+    verify_note_segments(elf_path, &image, &load);
     jump_entry = load.entry;   /* the interpreter replaces this below */
     fprintf(stderr, "[v2] load base=0x%llx entry=0x%llx span=0x%llx\n",
            (unsigned long long)load.base, (unsigned long long)load.entry,
@@ -376,10 +398,7 @@ int main(int argc, char **argv)
                 image.interp, (unsigned long long)interp_load.base,
                 (unsigned long long)interp_load.entry,
                 (unsigned long long)interp_load.span);
-        v2_verify_note_host(host_path, interp_load.start,
-                            interp_load.span < interp_length ? interp_load.span
-                                                             : interp_length,
-                            0);
+        verify_note_segments(host_path, &interp_image, &interp_load);
         jump_entry = interp_load.entry;
         aux_base_pending = interp_load.base;
     }
@@ -395,6 +414,14 @@ int main(int argc, char **argv)
     status = v2_patch_seal(&patcher, error, sizeof(error));
     if (status != 0) {
         die("seal", error);
+    }
+    /*
+     * The four bytes at each site now hold `b stub` instead of `svc`, so they
+     * are the one difference the exit-time comparison must not report.  Every
+     * other byte still has to match the file exactly.
+     */
+    for (int index = 0; index < patcher.site_count; index++) {
+        v2_verify_ignore(patcher.sites[index].address, 4);
     }
 
     proc.patcher = &patcher;

@@ -26,7 +26,7 @@ static uint8_t *verify_file;
 static uint8_t *verify_guest;
 static size_t verify_capacity;
 
-#define V2_VERIFY_SLOTS 16
+#define V2_VERIFY_SLOTS 32
 static struct {
     uint64_t address;      /* where it was mapped in the guest            */
     uint64_t offset;       /* where it starts in the file                 */
@@ -36,6 +36,43 @@ static struct {
     char path[128];        /* the guest path, for reopening at dump time  */
 } verify_snapshot[V2_VERIFY_SLOTS];
 static int verify_count;
+
+/*
+ * Bytes the loader rewrote on purpose.  Every patched site holds a four-byte
+ * `b stub` where the file has `svc`, so a byte-for-byte comparison against the
+ * file would report exactly those bytes as damage.  They are the only
+ * differences that are allowed, and naming them is what makes the comparison
+ * mean something -- otherwise "the image differs" is true by construction and
+ * says nothing about whether the *rest* of the image was read correctly.
+ */
+#define V2_VERIFY_IGNORED V2_PATCH_MAX_SITES
+static struct {
+    uint64_t address;
+    size_t length;
+} verify_ignored[V2_VERIFY_IGNORED];
+static int verify_ignored_count;
+
+void v2_verify_ignore(uint64_t address, size_t length)
+{
+    if (!v2_verify_mappings || verify_ignored_count >= V2_VERIFY_IGNORED) {
+        return;
+    }
+    verify_ignored[verify_ignored_count].address = address;
+    verify_ignored[verify_ignored_count].length = length;
+    verify_ignored_count++;
+}
+
+static int verify_is_ignored(uint64_t address)
+{
+    for (int index = 0; index < verify_ignored_count; index++) {
+        if (address >= verify_ignored[index].address &&
+            address < verify_ignored[index].address +
+                          verify_ignored[index].length) {
+            return 1;
+        }
+    }
+    return 0;
+}
 
 static uint64_t hash_range(struct v2_proc *proc, uint64_t address,
                            size_t length)
@@ -82,6 +119,8 @@ void v2_verify_dump(void)
         return;
     }
     page_size = v2_space_page_size(v2_current_process->space);
+    fprintf(stderr, "[v2] verify: %d patched sites excluded\n",
+            verify_ignored_count);
 
     for (int index = 0; index < verify_count; index++) {
         size_t checked = 0;
@@ -132,7 +171,8 @@ void v2_verify_dump(void)
             }
             checked += want;
             for (size_t at = 0; at < want; at++) {
-                if (verify_file[at] != verify_guest[at]) {
+                if (verify_file[at] != verify_guest[at] &&
+                    !verify_is_ignored(address + at)) {
                     if (differences == 0) {
                         first_difference = base + at;
                     }

@@ -34,6 +34,14 @@ void v2_verify_dump(void);
 void v2_verify_note_host(const char *host_path, uint64_t address,
                          size_t length, uint64_t file_offset);
 
+/*
+ * Declare bytes the loader rewrote on purpose (each patched site's four-byte
+ * branch).  Without this the program and the interpreter always "differ",
+ * because the branch is there by design, and the comparison cannot answer the
+ * only question it exists to answer: was the rest of the image read correctly?
+ */
+void v2_verify_ignore(uint64_t address, size_t length);
+
 long long v2_vm_brk(struct v2_cpu *cpu, struct v2_proc *proc);
 long long v2_vm_mmap(struct v2_cpu *cpu, struct v2_proc *proc);
 long long v2_vm_munmap(struct v2_cpu *cpu, struct v2_proc *proc);

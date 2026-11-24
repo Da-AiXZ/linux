@@ -1,0 +1,57 @@
+name: v2-flake
+
+# The strict reading of the v1 death line: two hundred runs of apk, zero
+# failures.  It is deliberately not on every push.  At the measured 1.1%
+# per-run rate, a 200-run gate is red ~90% of the time, and a gate that is
+# always red is a gate nobody reads -- worse, it hides the commits that are
+# red for a *new* reason.
+#
+# So the strict gate lives here: nightly, and by hand when you want a number.
+# This workflow turning green is the definition of G4 closed.  Until then it
+# is supposed to be red, and that red is the honest status of the bug.
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: v2-flake
+  cancel-in-progress: false
+
+jobs:
+  strict:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build runner
+        working-directory: v2
+        run: make guest
+
+      - name: 200 x apk update, zero failures allowed
+        working-directory: v2
+        run: |
+          set -eu
+          rm -rf /tmp/g5root
+          cp -R tests/guest/root /tmp/g5root
+          failures=0
+          for run in $(seq 1 200); do
+            if ! ./build/guest-runner --root /tmp/g5root /tmp/g5root/sbin/apk \
+                 update --allow-untrusted --no-progress > /tmp/flake.log 2>&1; then
+              failures=$((failures + 1))
+              echo "run $run: $(grep -m1 -E 'Error relocating|FAULT' /tmp/flake.log || echo 'no error line')"
+              cp /tmp/flake.log "/tmp/flake.$failures.log"
+            elif ! grep -q "2 distinct packages available" /tmp/flake.log; then
+              failures=$((failures + 1))
+              echo "run $run: exited zero but printed no package count"
+              cp /tmp/flake.log "/tmp/flake.$failures.log"
+            fi
+          done
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::G4-flake still open: $failures of 200 runs failed (ARCH-v2 14.9)"
+            echo "--- first failure in full ---"
+            cat /tmp/flake.1.log
+            exit 1
+          fi
+          echo "G4 closed: 200 of 200 clean, zero relocations failed"
