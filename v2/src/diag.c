@@ -182,10 +182,19 @@ static void emit_pages(unsigned long index, const struct v2_cpu *cpu,
             hash ^= word;
             hash *= 1099511628211ULL;
         }
-        snprintf(line, sizeof(line), "boundary %lu page 0x%llx 0x%016llx",
-                 index, (unsigned long long)(uintptr_t)at,
-                 (unsigned long long)hash);
-        v2_trace_put(line);
+        /*
+         * No hash line for the stack's own pages: the words come out anyway, and
+         * a hash that differs one line before them makes the diff stop there and
+         * report "this page", which is what we already knew.
+         */
+        if (!with_words ||
+            ((uint64_t)(uintptr_t)at != probe &&
+             (uint64_t)(uintptr_t)at + page_size != probe)) {
+            snprintf(line, sizeof(line), "boundary %lu page 0x%llx 0x%016llx",
+                     index, (unsigned long long)(uintptr_t)at,
+                     (unsigned long long)hash);
+            v2_trace_put(line);
+        }
 
         if (with_words &&
             ((uint64_t)(uintptr_t)at == probe ||
