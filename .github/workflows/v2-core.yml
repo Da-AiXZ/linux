@@ -25,6 +25,17 @@ on:
 # Pushing ten commits in ten minutes should leave one run, not ten.  Without
 # this, every push keeps its own three runners busy and the tab fills with
 # stale red runs that all describe the same commit's ancestor.
+# Both jobs, not just the Linux one: the first version of this put the detector
+# on `guest` and left `guest-darwin` without it, and then reported "no dirty
+# page on either host" from a run where macOS never had the switch.
+env:
+  # A failing run's base, replayed.  Empty on a push; set by hand when a census
+  # names an address worth reproducing.
+  V2_SPACE_BASE: ${{ inputs.space_base }}
+  # Every page handed to the guest must read as zero.  A page that comes back
+  # dirty comes back dirty on every run, so this is a detector, not a sample.
+  V2_HANDOUT_CHECK: "1"
+
 concurrency:
   group: v2-core-${{ github.ref }}
   cancel-in-progress: true
@@ -86,14 +97,6 @@ jobs:
   guest:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 20
-    env:
-      # A failing run's base, replayed.  Empty on a push; set by hand when a
-      # census names an address worth reproducing.
-      V2_SPACE_BASE: ${{ inputs.space_base }}
-      # Every page handed to the guest must read as zero.  A page that comes
-      # back dirty comes back dirty on every run, so this is a detector, not a
-      # sample -- one run answers it.
-      V2_HANDOUT_CHECK: "1"
     steps: &guest_steps
       - uses: actions/checkout@v4
 
@@ -255,6 +258,10 @@ jobs:
             fi
           done
           echo "runs=$runs failures=$failures mismatches=$mismatches"
+          # An annotation, not only a log line: this account has hit its log
+          # egress limit once already, and the number that decides the next
+          # experiment should not be behind a download.
+          echo "::warning::census base=${V2_SPACE_BASE:-kernel} runs=$runs failures=$failures mismatches=$mismatches"
           echo "--- last passing run, for comparison ---"
           grep -E "image .* at 0x" /tmp/g4_pass.log 2>/dev/null | head -6 || true
           cat /tmp/flake.txt || true
@@ -684,6 +691,7 @@ jobs:
             fi
           done
           echo "runs=$runs known-g4-flake=$known"
+          echo "::warning::apk-update200 known-g4-flake=$known of $runs"
           # The comparison that decides where this bug lives: in a failing run,
           # did any read-only page stop matching its file?  If yes, the writer
           # has a target and the offsets say where.  If no, the bytes are right
