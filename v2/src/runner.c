@@ -101,6 +101,16 @@ static void v2_fault(int number, siginfo_t *info, void *context)
 #endif
     fprintf(stderr, "\n[v2] FAULT signal=%d addr=0x%llx pc=0x%llx\n", number,
             (unsigned long long)address, (unsigned long long)pc);
+    /*
+     * The frame as the runtime last left it.  A zero here and a nonzero pc
+     * above would mean the fault is not on the path that uses it; two zeros
+     * mean the entry code never got to store sp and pc, which is a different
+     * bug from a guest that jumped to zero on its own.
+     */
+    fprintf(stderr, "[v2] frame sp=0x%llx pc=0x%llx x0=0x%llx\n",
+            (unsigned long long)v2_cpu_frame.sp,
+            (unsigned long long)v2_cpu_frame.pc,
+            (unsigned long long)v2_cpu_frame.x[0]);
     if (image_base != 0 && pc >= image_base && pc < image_end) {
         fprintf(stderr, "[v2] pc = image + 0x%llx\n",
                 (unsigned long long)(pc - image_base));
@@ -791,6 +801,13 @@ int main(int argc, char **argv)
     space_base = (uint64_t)(uintptr_t)v2_space_base(space);
     space_end = space_base + v2_space_length(space);
 
+    /*
+     * The entry code addresses its frame by symbol, not through this pointer;
+     * printing both makes a mismatch between the two a line in the log rather
+     * than a fault at address zero.
+     */
+    fprintf(stderr, "[v2] cpu=%p frame=%p sizeof=%u\n", (void *)&cpu,
+            (void *)&v2_cpu_frame, (unsigned)sizeof(cpu));
     fprintf(stderr, "[v2] enter pc=0x%llx at_base=0x%llx\n",
             (unsigned long long)cpu.pc, (unsigned long long)aux.base);
     if (getenv("V2_HASH_ENTRY") != NULL) {

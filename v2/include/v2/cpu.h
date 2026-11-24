@@ -46,6 +46,10 @@ _Static_assert(offsetof(struct v2_cpu, fpsr) == 792, "fpsr is [x9, #792]");
 struct v2_proc;
 struct v2_patcher;
 
+/* The frame the entry code fills before it calls the dispatcher.  It lives in
+ * host memory so a syscall never writes a byte the guest can read. */
+extern struct v2_cpu v2_cpu_frame;
+
 /* Installed once by the runner; the dispatcher is called from the stub. */
 extern struct v2_proc *v2_current_process;
 extern struct v2_patcher *v2_current_patcher;
