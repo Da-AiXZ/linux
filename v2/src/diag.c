@@ -26,6 +26,7 @@
 
 /* A page is 4 KiB on x86 and 16 KiB on Apple silicon; one buffer covers both. */
 #define V2_DIAG_PAGE 16384
+#define V2_DIAG_PAGE_MAX 6000
 
 static long boundary_limit = -1;
 static long detail_limit = -1;
@@ -94,48 +95,41 @@ static void emit_regions(unsigned long index, v2_space *space, size_t page_size)
     static uint8_t page[V2_DIAG_PAGE];
     uint8_t *base = (uint8_t *)v2_space_base(space);
     size_t total = v2_space_page_count(space);
-    size_t which = 0;
+    size_t emitted = 0;
 
-    while (which < total) {
+    /*
+     * One line per page, not per region.  A region here is seventy megabytes of
+     * heap with the stack at the top of it, so one hash for the lot says "some
+     * page differs" and costs another round to narrow down; a hash per page
+     * names it the first time.
+     */
+    for (size_t which = 0; which < total && emitted < V2_DIAG_PAGE_MAX; which++) {
+        uint8_t *at = base + which * page_size;
         uint64_t hash = 1469598103934665603ULL;
-        size_t run_start;
-        size_t pages = 0;
+        char line[96];
 
-        if ((v2_space_state_at(space, base + which * page_size) &
+        if ((v2_space_state_at(space, at) &
              (V2_PAGE_MAPPED | V2_PROT_WRITE)) !=
             (V2_PAGE_MAPPED | V2_PROT_WRITE)) {
-            which++;
             continue;
         }
-        run_start = which;
-        while (which < total &&
-               (v2_space_state_at(space, base + which * page_size) &
-                (V2_PAGE_MAPPED | V2_PROT_WRITE)) ==
-                   (V2_PAGE_MAPPED | V2_PROT_WRITE)) {
-            if (v2_space_read(space, page, base + which * page_size,
-                              page_size) == 0) {
-                for (size_t at = 0; at + 8 <= page_size; at += 8) {
-                    uint64_t word;
-
-                    memcpy(&word, page + at, 8);
-                    hash = mix(hash, word);
-                }
-            }
-            pages++;
-            which++;
+        if (v2_space_read(space, page, at, page_size) != 0) {
+            continue;
         }
-        {
-            char line[192];
+        for (size_t offset = 0; offset + 8 <= page_size; offset += 8) {
+            uint64_t word;
 
-            snprintf(line, sizeof(line),
-                     "boundary %lu region 0x%llx 0x%llx hash=0x%016llx pages=%zu",
-                     index,
-                     (unsigned long long)(uintptr_t)(base +
-                                                     run_start * page_size),
-                     (unsigned long long)(uintptr_t)(base + which * page_size),
-                     (unsigned long long)hash, pages);
-            v2_trace_put(line);
+            memcpy(&word, page + offset, 8);
+            hash = mix(hash, word);
         }
+        snprintf(line, sizeof(line), "boundary %lu page 0x%llx 0x%016llx",
+                 index, (unsigned long long)(uintptr_t)at,
+                 (unsigned long long)hash);
+        v2_trace_put(line);
+        emitted++;
+    }
+    if (emitted >= V2_DIAG_PAGE_MAX) {
+        v2_trace_put("boundary (page list truncated)");
     }
 }
 
