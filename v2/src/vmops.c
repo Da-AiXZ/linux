@@ -75,14 +75,16 @@ static uint64_t hash_range(struct v2_proc *proc, uint64_t address,
 void v2_verify_dump(void)
 {
     char host_path[V2_PATH_MAX * 2];
+    size_t page_size;
 
-    if (!v2_verify_mappings || v2_current_process == NULL) {
+    if (!v2_verify_mappings || v2_current_process == NULL ||
+        verify_file == NULL || verify_guest == NULL) {
         return;
     }
+    page_size = v2_space_page_size(v2_current_process->space);
+
     for (int index = 0; index < verify_count; index++) {
-        uint8_t *file = verify_file;
-        size_t want = verify_snapshot[index].length;
-        size_t done = 0;
+        size_t checked = 0;
         size_t differences = 0;
         uint64_t first_difference = 0;
         int fd;
@@ -99,70 +101,61 @@ void v2_verify_dump(void)
         if (fd < 0) {
             continue;
         }
-        while (done < want) {
-            ssize_t got = pread(fd, file + done, want - done,
-                                (off_t)(verify_snapshot[index].offset + done));
+        /*
+         * Page by page, and only pages that are both readable and executable:
+         * an image legitimately contains PROT_NONE gap pages and writable
+         * data, and relocation rewrites the latter by design.  What must not
+         * change is the code and the symbol tables, which live together.
+         */
+        for (size_t base = 0; base < verify_snapshot[index].length;
+             base += page_size) {
+            uint64_t address = verify_snapshot[index].address + base;
+            size_t want = verify_snapshot[index].length - base;
+            int state;
 
-            if (got <= 0) {
-                break;
+            if (want > page_size) {
+                want = page_size;
             }
-            done += (size_t)got;
+            state = v2_space_state_at(v2_current_process->space,
+                                      (const void *)(uintptr_t)address);
+            if ((state & V2_PAGE_MAPPED) == 0 ||
+                (state & V2_PROT_EXEC) == 0 ||
+                (state & V2_PROT_READ) == 0) {
+                continue;
+            }
+            if (pread(fd, verify_file, want,
+                      (off_t)(verify_snapshot[index].offset + base)) !=
+                    (ssize_t)want ||
+                v2_space_read(v2_current_process->space, verify_guest,
+                              (const void *)(uintptr_t)address, want) != 0) {
+                continue;
+            }
+            checked += want;
+            for (size_t at = 0; at < want; at++) {
+                if (verify_file[at] != verify_guest[at]) {
+                    if (differences == 0) {
+                        first_difference = base + at;
+                    }
+                    differences++;
+                }
+            }
         }
         close(fd);
-        if (done != want ||
-            v2_space_read(v2_current_process->space, verify_guest,
-                          (const void *)(uintptr_t)verify_snapshot[index].address,
-                          want) != 0) {
+        if (checked == 0) {
             continue;
         }
-        /*
-         * Only executable pages.  musl's first mapping of a library covers the
-         * whole span with the lowest segment's protection, which for a shared
-         * object is the executable one -- so the range we snapshot always
-         * contains the data segments too, and relocation legitimately rewrites
-         * those.  The page table knows which pages are actually code.
-         */
-        {
-            size_t page = v2_space_page_size(v2_current_process->space);
-
-            for (size_t base = 0; base < want; base += page) {
-                int state = v2_space_state_at(
-                    v2_current_process->space,
-                    (const void *)(uintptr_t)(verify_snapshot[index].address +
-                                              base));
-                size_t limit = base + page < want ? base + page : want;
-
-                if ((state & V2_PROT_EXEC) == 0) {
-                    continue;
-                }
-                for (size_t at = base; at < limit; at++) {
-                    if (file[at] != verify_guest[at]) {
-                        if (differences == 0) {
-                            first_difference = at;
-                        }
-                        differences++;
-                    }
-                }
-            }
-        }
-        fprintf(stderr, "[v2] image %s at 0x%llx: %s",
+        fprintf(stderr, "[v2] image %s at 0x%llx: checked 0x%zx, ",
                 verify_snapshot[index].path,
-                (unsigned long long)verify_snapshot[index].address,
-                differences == 0 ? "matches the file\n" : "differs at 0x");
-        if (differences != 0) {
-            fprintf(stderr, "%llx (%zu of %zu bytes)\n",
-                    (unsigned long long)first_difference, differences, want);
+                (unsigned long long)verify_snapshot[index].address, checked);
+        if (differences == 0) {
+            fprintf(stderr, "matches the file\n");
+        } else {
+            fprintf(stderr, "differs at 0x%llx (%zu bytes)\n",
+                    (unsigned long long)first_difference, differences);
         }
     }
 }
 
-/*
- * Compare a freshly mapped file range against the file itself.  This is the
- * instrument for "some library looks wrong only sometimes": relocation
- * failures inside ld.so name a different symbol each time, which is what a
- * hole in a symbol table looks like, and a hole can only come from the bytes
- * we put in memory.
- */
 static void verify_mapping(struct v2_proc *proc, int host_fd, uint64_t offset,
                            uint64_t address, size_t length)
 {
@@ -229,6 +222,7 @@ static void verify_mapping(struct v2_proc *proc, int host_fd, uint64_t offset,
         }
     }
 }
+
 
 void v2_verify_note_host(const char *host_path, uint64_t address,
                          size_t length, uint64_t file_offset)
