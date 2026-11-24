@@ -2,22 +2,29 @@
  * v2/entry_aarch64.c -- the two places where C calls into guest code and
  * guest code calls back into C.
  *
- * Everything here is a naked function with hand-written instructions.  Two
+ * Everything here is a naked function with hand-written instructions.  Three
  * rules are load-bearing:
  *
- *   - the frame layout must match struct v2_cpu byte for byte (272 bytes);
+ *   - the frame layout must match struct v2_cpu byte for byte (800 bytes);
  *   - the return to the guest is an explicit `br` to the stashed pc, never a
- *     `ret`, because the guest's x30 belongs to the guest.
+ *     `ret`, because the guest's x30 belongs to the guest;
+ *   - the frame lives in the host's .bss, not on the guest's stack.
  *
- * x16 (IP0) is clobbered on the way back.  That is the one register the
- * guest ABI does not need preserved across a syscall: no compiler keeps a
- * value in x16/x17 across a call.
+ * The last rule is the one that took longest to learn.  The frame used to be
+ * pushed 800 bytes below the guest's sp, which is memory the guest owns: the
+ * next deeper call reuses exactly those bytes, and any read-before-write in
+ * the guest then returned a host stack address instead of zero.  Linux gives a
+ * fresh stack page as zeros, so "the guest read something we never wrote" was
+ * a difference between our runtime and the kernel it emulates -- and it moved
+ * with the host's layout, which is the shape of every measurement in this bug.
+ * A host frame in host memory cannot be read by the guest at all.
  *
- * The dispatcher runs on its own stack, not the guest's.  It used to run on the
- * guest's, which put the host's return addresses a kilobyte below the guest's
- * sp -- inside memory the guest is free to use and, on Linux, would have been
- * zeros or its own leftovers.  A guest that reads an uninitialised local then
- * reads whatever the host left behind, and that differs from run to run.
+ * x16 (IP0) is clobbered on the way back.  That is the one register the guest
+ * ABI does not need preserved across a call.  x17 is also consumed by the stub
+ * (it carries the site address), which is a real deviation from Linux -- the
+ * kernel preserves both -- and it is recorded here rather than hidden: no
+ * compiler keeps a live value in x16/x17 across a call, and the stub needs one
+ * register to name the site.
  */
 #include "v2/cpu.h"
 
@@ -25,14 +32,17 @@
 
 #if defined(__APPLE__)
 #define V2_CALL(name) "bl _" #name "\n"
+#define V2_ASM(name) "_" #name
+/* Darwin's assembler wants @PAGE/@PAGEOFF; ELF wants :lo12:. */
+#define V2_LEA(reg, name) \
+    "adrp " reg ", " V2_ASM(name) "@PAGE\n" \
+    "add  " reg ", " reg ", " V2_ASM(name) "@PAGEOFF\n"
 #else
 #define V2_CALL(name) "bl " #name "\n"
-#endif
-
-#if defined(__APPLE__)
-#define V2_ASM(name) "_" #name
-#else
 #define V2_ASM(name) #name
+#define V2_LEA(reg, name) \
+    "adrp " reg ", " #name "\n" \
+    "add  " reg ", " reg ", :lo12:" #name "\n"
 #endif
 
 /*
@@ -48,116 +58,127 @@
 #define V2_HOST_STACK_SIZE 262144
 unsigned char v2_host_stack[V2_HOST_STACK_SIZE] __attribute__((aligned(16)));
 
+/*
+ * The guest's register file while the dispatcher runs.  Host memory, host
+ * lifetime, one guest at a time.  It is a global rather than a local of the
+ * dispatcher because the stub reaches it from assembly before any C frame
+ * exists.
+ */
+struct v2_cpu v2_cpu_frame __attribute__((aligned(16)));
+
 __attribute__((naked, used)) void v2_syscall_entry(void)
 {
     __asm__ volatile(
-        "sub  sp, sp, #272\n"
-        "stp  x0, x1, [sp, #0]\n"
-        "stp  x2, x3, [sp, #16]\n"
-        "stp  x4, x5, [sp, #32]\n"
-        "stp  x6, x7, [sp, #48]\n"
-        "stp  x8, x9, [sp, #64]\n"
-        "stp  x10, x11, [sp, #80]\n"
-        "stp  x12, x13, [sp, #96]\n"
-        "stp  x14, x15, [sp, #112]\n"
+        V2_LEA("x9", v2_cpu_frame)
+        "stp  x0, x1, [x9, #0]\n"
+        "stp  x2, x3, [x9, #16]\n"
+        "stp  x4, x5, [x9, #32]\n"
+        "stp  x6, x7, [x9, #48]\n"
+        "stp  x8, x9, [x9, #64]\n"
+        "stp  x10, x11, [x9, #80]\n"
+        "stp  x12, x13, [x9, #96]\n"
+        "stp  x14, x15, [x9, #112]\n"
         /* x16 is not saved: nothing reads it back, and its value is the host's. */
-        "str  x17, [sp, #136]\n"
-        "stp  x18, x19, [sp, #144]\n"
-        "stp  x20, x21, [sp, #160]\n"
-        "stp  x22, x23, [sp, #176]\n"
-        "stp  x24, x25, [sp, #192]\n"
-        "stp  x26, x27, [sp, #208]\n"
-        "stp  x28, x29, [sp, #224]\n"
-        "str  x30, [sp, #240]\n"
-        "add  x9, sp, #272\n"
-        "str  x9, [sp, #248]\n"
-        "str  x17, [sp, #256]\n"
-        "mrs  x9, nzcv\n"
-        "str  x9, [sp, #264]\n"
-        "mov  x19, sp\n"
+        "str  x17, [x9, #136]\n"
+        "stp  x18, x19, [x9, #144]\n"
+        "stp  x20, x21, [x9, #160]\n"
+        "stp  x22, x23, [x9, #176]\n"
+        "stp  x24, x25, [x9, #192]\n"
+        "stp  x26, x27, [x9, #208]\n"
+        "stp  x28, x29, [x9, #224]\n"
+        "str  x30, [x9, #240]\n"
+        /*
+         * x9 was saved at #72 above and is now reused as the base register.
+         * The store read its base before it wrote, so the value in the frame is
+         * the guest's; the reload makes that independent of the reader knowing
+         * that rule.
+         */
+        V2_LEA("x9", v2_cpu_frame)
+        "mov  x10, sp\n"
+        "str  x10, [x9, #248]\n"
+        "str  x17, [x9, #256]\n"
+        "mrs  x10, nzcv\n"
+        "str  x10, [x9, #264]\n"
         /*
          * The floating point and SIMD state, which the guest also owns.  A Linux
          * syscall preserves q0..q31, FPCR and FPSR; this trampoline preserved
          * none of them, so every call handed the guest back whatever the host's
-         * formatting and copying code had left in those registers.  They live
-         * below the frame because the frame's layout is the guest's struct.
+         * formatting and copying code had left in those registers.
          */
-        "sub  sp, sp, #528\n"
-        "stp  q0, q1, [sp, #0]\n"
-        "stp  q2, q3, [sp, #32]\n"
-        "stp  q4, q5, [sp, #64]\n"
-        "stp  q6, q7, [sp, #96]\n"
-        "stp  q8, q9, [sp, #128]\n"
-        "stp  q10, q11, [sp, #160]\n"
-        "stp  q12, q13, [sp, #192]\n"
-        "stp  q14, q15, [sp, #224]\n"
-        "stp  q16, q17, [sp, #256]\n"
-        "stp  q18, q19, [sp, #288]\n"
-        "stp  q20, q21, [sp, #320]\n"
-        "stp  q22, q23, [sp, #352]\n"
-        "stp  q24, q25, [sp, #384]\n"
-        "stp  q26, q27, [sp, #416]\n"
-        "stp  q28, q29, [sp, #448]\n"
-        "stp  q30, q31, [sp, #480]\n"
-        "mrs  x9, fpcr\n"
-        "str  x9, [sp, #512]\n"
-        "mrs  x9, fpsr\n"
-        "str  x9, [sp, #520]\n"
-        "adrp x10, " V2_ASM(v2_host_stack) "@PAGE\n"
-        "add  x10, x10, " V2_ASM(v2_host_stack) "@PAGEOFF\n"
+        "stp  q0, q1, [x9, #272]\n"
+        "stp  q2, q3, [x9, #304]\n"
+        "stp  q4, q5, [x9, #336]\n"
+        "stp  q6, q7, [x9, #368]\n"
+        "stp  q8, q9, [x9, #400]\n"
+        "stp  q10, q11, [x9, #432]\n"
+        "stp  q12, q13, [x9, #464]\n"
+        "stp  q14, q15, [x9, #496]\n"
+        "stp  q16, q17, [x9, #528]\n"
+        "stp  q18, q19, [x9, #560]\n"
+        "stp  q20, q21, [x9, #592]\n"
+        "stp  q22, q23, [x9, #624]\n"
+        "stp  q24, q25, [x9, #656]\n"
+        "stp  q26, q27, [x9, #688]\n"
+        "stp  q28, q29, [x9, #720]\n"
+        "stp  q30, q31, [x9, #752]\n"
+        "mrs  x10, fpcr\n"
+        "str  x10, [x9, #784]\n"
+        "mrs  x10, fpsr\n"
+        "str  x10, [x9, #792]\n"
+        "mov  x19, x9\n"
+        V2_LEA("x10", v2_host_stack)
         "mov  x11, #" "262144" "\n"
         "add  x10, x10, x11\n"
         "mov  sp, x10\n"
         "mov  x0, x19\n"
         V2_CALL(v2_syscall_dispatch)
-        "mov  sp, x19\n"
-        "sub  sp, sp, #528\n"
-        "ldp  q0, q1, [sp, #0]\n"
-        "ldp  q2, q3, [sp, #32]\n"
-        "ldp  q4, q5, [sp, #64]\n"
-        "ldp  q6, q7, [sp, #96]\n"
-        "ldp  q8, q9, [sp, #128]\n"
-        "ldp  q10, q11, [sp, #160]\n"
-        "ldp  q12, q13, [sp, #192]\n"
-        "ldp  q14, q15, [sp, #224]\n"
-        "ldp  q16, q17, [sp, #256]\n"
-        "ldp  q18, q19, [sp, #288]\n"
-        "ldp  q20, q21, [sp, #320]\n"
-        "ldp  q22, q23, [sp, #352]\n"
-        "ldp  q24, q25, [sp, #384]\n"
-        "ldp  q26, q27, [sp, #416]\n"
-        "ldp  q28, q29, [sp, #448]\n"
-        "ldp  q30, q31, [sp, #480]\n"
-        "ldr  x9, [sp, #512]\n"
-        "msr  fpcr, x9\n"
-        "ldr  x9, [sp, #520]\n"
-        "msr  fpsr, x9\n"
-        "add  sp, sp, #528\n"
-        "ldr  x9, [sp, #264]\n"
-        "msr  nzcv, x9\n"
-        "ldp  x0, x1, [sp, #0]\n"
-        "ldp  x2, x3, [sp, #16]\n"
-        "ldp  x4, x5, [sp, #32]\n"
-        "ldp  x6, x7, [sp, #48]\n"
-        "ldp  x8, x9, [sp, #64]\n"
-        "ldp  x10, x11, [sp, #80]\n"
-        "ldp  x12, x13, [sp, #96]\n"
-        "ldp  x14, x15, [sp, #112]\n"
-        "ldp  x18, x19, [sp, #144]\n"
-        "ldp  x20, x21, [sp, #160]\n"
-        "ldp  x22, x23, [sp, #176]\n"
-        "ldp  x24, x25, [sp, #192]\n"
-        "ldp  x26, x27, [sp, #208]\n"
-        "ldp  x28, x29, [sp, #224]\n"
-        "ldr  x30, [sp, #240]\n"
-        "ldr  x16, [sp, #256]\n"
-        "ldr  x17, [sp, #128 + 8]\n"
-        "add  sp, sp, #272\n"
+        "ldp  q0, q1, [x19, #272]\n"
+        "ldp  q2, q3, [x19, #304]\n"
+        "ldp  q4, q5, [x19, #336]\n"
+        "ldp  q6, q7, [x19, #368]\n"
+        "ldp  q8, q9, [x19, #400]\n"
+        "ldp  q10, q11, [x19, #432]\n"
+        "ldp  q12, q13, [x19, #464]\n"
+        "ldp  q14, q15, [x19, #496]\n"
+        "ldp  q16, q17, [x19, #528]\n"
+        "ldp  q18, q19, [x19, #560]\n"
+        "ldp  q20, q21, [x19, #592]\n"
+        "ldp  q22, q23, [x19, #624]\n"
+        "ldp  q24, q25, [x19, #656]\n"
+        "ldp  q26, q27, [x19, #688]\n"
+        "ldp  q28, q29, [x19, #720]\n"
+        "ldp  q30, q31, [x19, #752]\n"
+        "ldr  x10, [x19, #784]\n"
+        "msr  fpcr, x10\n"
+        "ldr  x10, [x19, #792]\n"
+        "msr  fpsr, x10\n"
+        "ldr  x10, [x19, #264]\n"
+        "msr  nzcv, x10\n"
+        /*
+         * sp leaves the frame before the frame pointer does.  x19 is the only
+         * register holding the frame, and it is also a guest register that has
+         * to be restored -- so sp and the return site are read out first, into
+         * x10 (restored immediately after) and x16 (the one register the guest
+         * ABI lets us clobber).
+         */
+        "ldr  x10, [x19, #248]\n"
+        "mov  sp, x10\n"
+        "ldr  x16, [x19, #256]\n"
+        "ldp  x0, x1, [x19, #0]\n"
+        "ldp  x2, x3, [x19, #16]\n"
+        "ldp  x4, x5, [x19, #32]\n"
+        "ldp  x6, x7, [x19, #48]\n"
+        "ldp  x8, x9, [x19, #64]\n"
+        "ldp  x10, x11, [x19, #80]\n"
+        "ldp  x12, x13, [x19, #96]\n"
+        "ldp  x14, x15, [x19, #112]\n"
+        "ldp  x18, x19, [x19, #144]\n"
         "br   x16\n");
 }
 
+/* The parameter arrives in x0 and is read by name only inside the asm. */
 __attribute__((naked, noreturn, used)) void v2_guest_enter(
-    const struct v2_cpu *cpu)
+    const struct v2_cpu *cpu __attribute__((unused)))
 {
     /*
      * Every register, not just the two that matter.

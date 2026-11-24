@@ -257,13 +257,13 @@ static void emit_pages(unsigned long index, const struct v2_cpu *cpu,
         }
         if (with_words && (uint64_t)(uintptr_t)at == probe) {
             /*
-             * Only the live part of the stack page: from our own frame upwards.
-             * Below that the guest never reads again, and whatever a previous
-             * call left there differs between runs for reasons that cannot
-             * matter -- which is enough to make the page differ and hide the
-             * word that does.
+             * The live stack: from sp upwards.  This used to start 800 bytes
+             * below sp, because the syscall entry frame lived there and the
+             * words in it were the host's.  The frame is in host memory now, so
+             * everything from sp up is the guest's own, and everything below sp
+             * is dead.  Comparing the dead half only ever produced noise.
              */
-            uint64_t frame = cpu->sp > 800 ? cpu->sp - 800 : 0;
+            uint64_t frame = cpu->sp;
 
             for (size_t offset = 0; offset + 8 <= page_size; offset += 8) {
                 uint64_t word;
@@ -284,6 +284,36 @@ static void emit_pages(unsigned long index, const struct v2_cpu *cpu,
             }
         }
     }
+}
+
+static void emit_fp(unsigned long index, const struct v2_cpu *cpu)
+{
+    uint64_t hash = 1469598103934665603ULL;
+    char line[96];
+
+    /*
+     * The vector registers, in one number.
+     *
+     * They were the last guest-visible state without an owner: the dispatcher
+     * did not save them, the fingerprint did not print them, and the guest
+     * spilled whatever it found to its own stack.  Zeroing them at entry moved
+     * the failure rate, which says the guest reads them before writing them --
+     * so a comparison that omits them can print "identical" for two runs that
+     * went different ways at the very next branch.
+     */
+    for (int slot = 0; slot < 32; slot++) {
+        hash ^= cpu->q[slot][0];
+        hash *= 1099511628211ULL;
+        hash ^= cpu->q[slot][1];
+        hash *= 1099511628211ULL;
+    }
+    hash ^= cpu->fpcr;
+    hash *= 1099511628211ULL;
+    hash ^= cpu->fpsr;
+    hash *= 1099511628211ULL;
+    snprintf(line, sizeof(line), "boundary %lu fp 0x%016llx", index,
+             (unsigned long long)hash);
+    v2_trace_put(line);
 }
 
 void v2_diag_boundary(const struct v2_cpu *cpu, unsigned long index)
@@ -321,6 +351,7 @@ void v2_diag_boundary(const struct v2_cpu *cpu, unsigned long index)
         v2_trace_put(line);
     }
     emit_registers(index, cpu);
+    emit_fp(index, cpu);
     /*
      * Pages only inside the window: a hash per page is four and a half thousand
      * lines, and doing that at all sixty-four boundaries would make the log
