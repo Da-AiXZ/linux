@@ -630,3 +630,29 @@ first-fit 会把库放在栈的正上方；如果栈在重定位期间向下长�
 另外修掉一个只在上传日志里才看得见的 bug：`rootfs %d copied, %d already present%s%s`
 把 `NSString *report` 传给了 `%s`，于是日志里那行后面跟着四个字节的二进制垃圾
 （`18 copied, 5 already present˘{‡`）。改成 `%@`。
+
+#### V2_VERIFY 一直在压低失败率；现场第一次被抓住（2026-11-24 16:22，0.1.10.11）
+
+关掉校验后，20 发里就中 1 发，200 发那组从第 1 发起连中——**`V2_VERIFY` 不是无关变量，
+它每次多分配 4 MB、多读一遍文件，把失败率压到了 1%**。所以此前"桌面 1%、真机 1/1"
+的波动，很大一部分是布局与分配造成的，不是两个环境的差异。
+
+第一份带寄存器的样本（`apk x20` 里那一发）：
+
+```
+x7 =0x726f7469736f7065   "eposi"
+x12=0x6f7469736f706572   "reposito"
+x13=0x6b636568635f7972   "ry_check"
+x30=0x10308cdb4  pc=0x103087484  sp=0x1078f7440
+Error relocating /var/mobile/Documents/root/sbin/apk: apk_db_repository_check: symbol not found
+```
+
+三次失败分别在三个不同的 dso 上找不到符号（libapk 的 `apk_pkg_free`、apk 的
+`apk_db_repository_check`、libcrypto 的 `getnameinfo`），而寄存器里拼出的正是那个
+正在比较的符号名。**名字读对了、比较在进行、走完整条作用域链没找到。** 所以缺的不是
+字节，是"该去哪些库找"的那份清单。
+
+下一步的仪器不再是寄存器，而是**把 dso 链打出来**：失败那一刻从当前 `dso` 顺着
+`next`/`deps` 走一遍，打印每个节点的 name / syms / strings / nbuckets。链上缺一节，
+或者某个指针为空，会直接看见。另一个必须同时验的变量是 `V2_VERIFY` 的 4 MB 分配——
+它能把失败率从"几乎必现"压到 1%，说明失败与堆布局强相关，这条线索不能丢。
