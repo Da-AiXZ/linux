@@ -748,7 +748,7 @@ int main(int argc, char **argv)
                 (unsigned long long)digest, mapped, readable);
     }
     fflush(stdout);
-    v2_guest_enter(cpu.pc, cpu.sp);
+    v2_guest_enter(&cpu);
     return 0;
 }
 

@@ -74,13 +74,47 @@ __attribute__((naked, used)) void v2_syscall_entry(void)
         "br   x16\n");
 }
 
-__attribute__((naked, noreturn, used)) void v2_guest_enter(uint64_t pc,
-                                                           uint64_t sp)
+__attribute__((naked, noreturn, used)) void v2_guest_enter(
+    const struct v2_cpu *cpu)
 {
+    /*
+     * Every register, not just the two that matter.
+     *
+     * This used to take (pc, sp) and set nothing else, which meant the guest's
+     * x0..x30 were whatever the host happened to hold at that moment -- for the
+     * runner that is the host's own stack and heap addresses, so they differed
+     * from run to run and by roughly an address-space worth of bits.  Nothing
+     * noticed because the entry hash covers memory, not registers, and musl's
+     * _dlstart only reads sp; but the fingerprints taken at the first syscall
+     * boundary differed on every run, which means the guest had already stored
+     * some of that residue into its own memory.
+     *
+     * A guest that starts from a defined state is the premise the whole
+     * determinism argument rests on, so it starts from the struct.
+     */
     __asm__ volatile(
-        "mov  x9, x0\n"
-        "mov  sp, x1\n"
-        "br   x9\n");
+        "mov  x17, x0\n"
+        "ldr  x16, [x17, #248]\n"
+        "ldp  x0, x1, [x17, #0]\n"
+        "ldp  x2, x3, [x17, #16]\n"
+        "ldp  x4, x5, [x17, #32]\n"
+        "ldp  x6, x7, [x17, #48]\n"
+        "ldp  x8, x9, [x17, #64]\n"
+        "ldp  x10, x11, [x17, #80]\n"
+        "ldp  x12, x13, [x17, #96]\n"
+        "ldp  x14, x15, [x17, #112]\n"
+        "ldp  x18, x19, [x17, #144]\n"
+        "ldp  x20, x21, [x17, #160]\n"
+        "ldp  x22, x23, [x17, #176]\n"
+        "ldp  x24, x25, [x17, #192]\n"
+        "ldp  x26, x27, [x17, #208]\n"
+        "ldp  x28, x29, [x17, #224]\n"
+        "ldr  x30, [x17, #240]\n"
+        "mov  sp, x16\n"
+        "ldr  x16, [x17, #256]\n"
+        "msr  nzcv, xzr\n"
+        "mov  x17, xzr\n"
+        "br   x16\n");
 }
 
 #endif /* __aarch64__ */

@@ -35,8 +35,8 @@ extern _Thread_local uint64_t v2_tls_shadow;
 
 void v2_syscall_dispatch(struct v2_cpu *cpu);
 
-/* Never returns: sets sp and jumps to pc. */
-void v2_guest_enter(uint64_t pc, uint64_t sp);
+/* Never returns: loads the whole register file and jumps to pc. */
+void v2_guest_enter(const struct v2_cpu *cpu);
 
 /* The entry every patched site branches to (see entry_aarch64.c). */
 void v2_syscall_entry(void);

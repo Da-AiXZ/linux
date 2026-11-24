@@ -497,6 +497,10 @@ jobs:
             exit 1
           fi
 
+          echo "--- the first calls of each run ---"
+          echo "pass:";  head -6 /tmp/trace/pass.log
+          echo "fail:";  head -6 /tmp/trace/fail.log
+
           echo "--- trace diff ---"
           python3 ../Tools/v2_trace_diff.py /tmp/trace/pass.log /tmp/trace/fail.log \
             --context 10 --max 3
