@@ -328,8 +328,11 @@ jobs:
           known=0
           runs=200
           echo "mode: V2_VERIFY=${V2_VERIFY:-unset} (calibrated for this step: 1.1%/run, ceiling 5%)"
+          fired=0
+          silent=0
           : > /tmp/g5_fail.txt
           : > /tmp/g5_novel.txt
+          : > /tmp/g5_evidence.txt
           for run in $(seq 1 $runs); do
             if ! ./build/guest-runner --root /tmp/g5root /tmp/g5root/sbin/apk \
                  update --allow-untrusted --no-progress > /tmp/g5_loop.log 2>&1; then
@@ -342,6 +345,13 @@ jobs:
                 echo "run $run: ${line:-unclassified failure}" >> /tmp/g5_novel.txt
               else
                 known=$((known + 1))
+                if grep -q "every readable image page" /tmp/g5_loop.log; then
+                  fired=$((fired + 1))
+                  grep -E "every readable image page|differs at" /tmp/g5_loop.log \
+                    >> /tmp/g5_evidence.txt || true
+                else
+                  silent=$((silent + 1))
+                fi
               fi
             elif ! grep -q "2 distinct packages available" /tmp/g5_loop.log; then
               # Exit 0 with no package count is a second face of the same
@@ -357,6 +367,13 @@ jobs:
             fi
           done
           echo "runs=$runs known-g4-flake=$known"
+          # The comparison that decides where this bug lives: in a failing run,
+          # did any read-only page stop matching its file?  If yes, the writer
+          # has a target and the offsets say where.  If no, the bytes are right
+          # at the moment of failure and the fault is in what ld.so built out
+          # of them.
+          echo "in-failure comparison: fired=$fired silent=$silent"
+          cat /tmp/g5_evidence.txt 2>/dev/null || true
           if [ -s /tmp/g5_fail.txt ]; then
             echo "--- every failure, one line each ---"
             cat /tmp/g5_fail.txt
