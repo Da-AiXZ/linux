@@ -129,25 +129,45 @@ static uint64_t write_range(struct v2_proc *proc, int host, uint64_t buffer,
 static void dump_relocation_state(struct v2_cpu *cpu, struct v2_proc *proc,
                                   uint64_t address, uint64_t length)
 {
+    static char seen[512];
+    static size_t seen_length;
+    static int reported;
     char text[256];
     uint64_t words[16];
     size_t want = length < sizeof(text) - 1 ? length : sizeof(text) - 1;
+    size_t room;
 
-    if (want == 0 ||
+    if (reported || want == 0 ||
         v2_space_read(proc->space, text, (const void *)(uintptr_t)address,
                       want) != 0) {
         return;
     }
     text[want] = 0;
-    if (strstr(text, "Error relocating") == NULL) {
+    /*
+     * musl flushes stdio through __overflow, which writes two bytes at a time
+     * when the buffer is drained -- so the sentence "Error relocating" is
+     * never inside a single write().  Looking for it in one chunk missed every
+     * failure of one CI run (six of them), which is a hook that silently does
+     * nothing.  Accumulate what fd 2 receives instead.
+     */
+    room = sizeof(seen) - 1 - seen_length;
+    if (room > want) {
+        room = want;
+    }
+    memcpy(seen + seen_length, text, room);
+    seen_length += room;
+    seen[seen_length] = 0;
+    if (strstr(seen, "Error relocating") == NULL) {
         return;
     }
+    reported = 1;
     fprintf(stderr, "[v2] --- relocation error, registers at the write ---\n");
     for (int index = 0; index < 31; index += 2) {
         fprintf(stderr, "[v2] x%-2d=0x%016llx  x%-2d=0x%016llx\n", index,
                 (unsigned long long)cpu->x[index], index + 1,
                 (unsigned long long)cpu->x[index + 1]);
-    }    fprintf(stderr, "[v2] sp=0x%llx pc=0x%llx nzcv=0x%llx\n",
+    }
+    fprintf(stderr, "[v2] sp=0x%llx pc=0x%llx nzcv=0x%llx\n",
             (unsigned long long)cpu->sp, (unsigned long long)cpu->pc,
             (unsigned long long)cpu->nzcv);
     if (v2_space_read(proc->space, words,
