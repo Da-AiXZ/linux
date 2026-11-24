@@ -91,6 +91,24 @@ jobs:
           grep -q "hello from guest" /tmp/guest.out
           echo "guest exit status: $?"
 
+      # Darwin's madvise is a hint; Linux's is a promise that the next access
+      # reads zeros.  v2's decommit relies on the promise -- the tail of every
+      # segment, and therefore every library's .bss, is mapped fresh over pages
+      # that held something else a moment ago.  If the promise does not hold,
+      # musl's globals are seeded with a neighbour's bytes, which is exactly
+      # the shape of "a random symbol is not found".
+      - name: Page semantics -- a reused page must read as zero
+        working-directory: v2
+        run: |
+          set +e
+          V2_PAGETEST=1 ./build/guest-runner --root . tests/guest/hello 2>&1 \
+            | tee /tmp/pagetest.out
+          if grep -q "DIRTY\|discarded NOTHING" /tmp/pagetest.out; then
+            echo "::error::a released page did not come back zero; .bss cannot be trusted"
+            exit 1
+          fi
+          echo "page semantics ok: reuse and MADV_DONTNEED both return zeros"
+
       # G3: a real, third-party program.  busybox is static PIE (see
       # v2-busybox.yml) and each applet exercises a different corner of the
       # syscall table: getdents64 for ls, openat+read for cat, uname, stat for

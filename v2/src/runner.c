@@ -147,10 +147,16 @@ static void v2_fault(int number, siginfo_t *info, void *context)
         fprintf(stderr, "[v2] pc is inside the program (+0x%llx)\n",
                 (unsigned long long)(pc - image_base));
     }
-    if (space_base != 0 && pc >= space_base + 16 && pc < space_end) {
-        const uint32_t *words = (const uint32_t *)(uintptr_t)(pc - 16);
+    if (space_base != 0 && pc >= space_base + 8 && pc + 8 <= space_end) {
+        /*
+         * The bracketed word is the faulting instruction.  It used to start at
+         * pc-16 with the brackets on the third word, which bracketed pc-8 --
+         * a report that names the wrong instruction is worse than none, and
+         * this one cost a wrong hypothesis before it was noticed.
+         */
+        const uint32_t *words = (const uint32_t *)(uintptr_t)(pc - 8);
 
-        fprintf(stderr, "[v2] code: %08x %08x  [%08x] %08x %08x\n",
+        fprintf(stderr, "[v2] code: %08x %08x [%08x] %08x %08x   (pc-8..pc+8)\n",
                 words[0], words[1], words[2], words[3], words[4]);
     }
     v2_syscall_dump_trace();
@@ -192,6 +198,83 @@ static const char *build_stamp(void)
 #if defined(__clang__)
 #pragma clang diagnostic pop
 #endif
+
+/*
+ * One anonymous page, written, released, and asked for again at the same
+ * address.  Linux promises the second mapping reads as zeros; v2's decommit
+ * mprotects it PROT_NONE and calls madvise(MADV_DONTNEED), and on Darwin
+ * madvise is a *hint* ("the system may reclaim these pages"), not a promise.
+ *
+ * If the page comes back dirty, then every .bss in every library can be seeded
+ * with the previous occupant's bytes -- the tail of a segment is mapped
+ * MAP_FIXED over pages that held another library a moment ago.  musl keeps its
+ * globals, its dso chain and its exit list in exactly that .bss, which is the
+ * shape of a bug whose symptom is "a random symbol is not found" and "a NULL
+ * dereference while printing the error".
+ *
+ * It runs in its own throwaway space so the real arena is not shifted by a
+ * single page: this is a measurement, and a measurement that changes the
+ * layout cannot be compared with one that does not.
+ */
+static void page_zero_selftest(size_t page_size)
+{
+    struct v2_host host = v2_host_darwin();
+    struct v2_space *probe = NULL;
+    uint8_t *bytes;
+    unsigned long long first;
+    unsigned long long again;
+    size_t dirty = 0;
+    size_t discarded = 0;
+
+    if (v2_space_create(&probe, &host, 8 * page_size, page_size, 0, 0) != 0) {
+        fprintf(stderr, "[v2] pagetest: cannot reserve a probe space\n");
+        return;
+    }
+    first = (unsigned long long)v2_space_map(probe, NULL, page_size,
+                                             V2_PROT_READ | V2_PROT_WRITE,
+                                             V2_MAP_ANON, -1, 0);
+    if ((long long)first <= 0) {
+        fprintf(stderr, "[v2] pagetest: cannot map a probe page\n");
+        v2_space_destroy(probe);
+        return;
+    }
+    memset((void *)(uintptr_t)first, 0xA5, page_size);
+    v2_space_unmap(probe, (void *)(uintptr_t)first, page_size);
+
+    again = (unsigned long long)v2_space_map(probe, (void *)(uintptr_t)first,
+                                             page_size,
+                                             V2_PROT_READ | V2_PROT_WRITE,
+                                             V2_MAP_ANON | V2_MAP_FIXED, -1, 0);
+    if ((long long)again <= 0) {
+        fprintf(stderr, "[v2] pagetest: cannot remap the probe page\n");
+        v2_space_destroy(probe);
+        return;
+    }
+    bytes = (uint8_t *)(uintptr_t)again;
+    for (size_t index = 0; index < page_size; index++) {
+        if (bytes[index] != 0) {
+            dirty++;
+        }
+    }
+    fprintf(stderr, "[v2] pagetest: page reused after unmap is %s (%zu of %zu "
+                    "bytes nonzero)\n",
+            dirty == 0 ? "zero" : "DIRTY", dirty, page_size);
+
+    /* The other path a guest can take: madvise(MADV_DONTNEED) on a live page. */
+    memset(bytes, 0x5A, page_size);
+    v2_space_advise(probe, (void *)(uintptr_t)again, page_size,
+                    V2_MADV_DONTNEED);
+    for (size_t index = 0; index < page_size; index++) {
+        if (bytes[index] != 0) {
+            discarded++;
+        }
+    }
+    fprintf(stderr, "[v2] pagetest: madvise(DONTNEED) discarded %s (%zu of %zu "
+                    "bytes still nonzero)\n",
+            discarded == 0 ? "and zeroed the page" : "NOTHING",
+            discarded, page_size);
+    v2_space_destroy(probe);
+}
 
 static uint8_t *read_file(const char *path, size_t *length)
 {
@@ -254,6 +337,9 @@ static void verify_note_segments(const char *host_path,
 int main(int argc, char **argv)
 {
     fprintf(stderr, "[v2] helper built %s\n", build_stamp());
+    if (getenv("V2_PAGETEST") != NULL) {
+        page_zero_selftest((size_t)sysconf(_SC_PAGESIZE));
+    }
 #if TARGET_OS_IPHONE
     /*
      * Anonymous PROT_EXEC needs CS_DEBUGGED on iOS.  PT_TRACE_ME is the only
