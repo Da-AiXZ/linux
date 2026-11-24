@@ -567,3 +567,37 @@ macOS 池子在排队，不是我们的构建慢——看 job 的 `created_at �
 如果这一版之后 `apk` 与 `ld-musl` 仍然报 `differs at`，那它指的位置就是真问题所在；
 如果两者都变绿，则"装载器读错"被彻底排除，嫌疑只剩 musl 在**正确的字节**上建表失败，
 下一步就该去看 `find_sym`/`dso` 链，而不是再看内存。
+
+#### 结果：六个镜像全绿，装载器被排除（2026-11-24 15:07）
+
+改完的第一轮（run 45345529821）：
+
+```
+runs=486 failures=5 mismatches=0
+image tests/guest/root/sbin/apk             checked 0xf31c   matches the file
+image .../lib/ld-musl-aarch64.so.1          checked 0xa1d14  matches the file
+image /usr/lib/libcrypto.so.3               checked 0x3a8000 matches the file
+image /usr/lib/libz.so.1                    checked 0x20790  matches the file
+image /usr/lib/libapk.so.2.14.0             checked 0x30e88  matches the file
+image /usr/lib/libssl.so.3                  checked 0xc4000  matches the file
+```
+
+`apk` 和 `ld-musl` 从"differs at（569 / 2273 字节）"变成了 `matches the file`，说明那两处
+差异**全部**是我们自己写的分支，一个字节都不多。**即使在失败的那 5 次运行里**，也是如此。
+
+于是三条假设可以正式划掉：
+
+| 假设 | 状态 |
+|---|---|
+| 我们搬错了字节（短读、EOF 补零、段偏移） | **排除**：486 次运行、5 次失败，零字节不符 |
+| 补丁误命中（把数据当成 `svc` 改掉） | **排除**：若误改，那几个字节就会与文件不符 |
+| 地址布局（基址、跳板距离） | **排除**（此前）：失败分布在四个不同 arena 基址 |
+
+剩下的只能是：**musl 拿到正确字节之后，自己建立的运行时结构（`dso` 链、`syms`/`strings`/
+哈希表指针、堆）在约 1% 的运行里是错的**。这不是"内存里字节不对"，而是"指针不对"，
+所以任何逐字节比对都不可能看到它——这也解释了为什么三代仪器都是 0 mismatch。
+
+下一步的仪器因此换了目标：在 guest 打印 `Error relocating …` 的那一次 `write(2)` 上
+停住（`ld.so` 紧接着就 `exit(127)`，退出时的现场已经没用了），把 `x0..x30`、`sp`、`pc`
+和栈顶若干字打出来。有了 `find_sym` 的 `dso` 指针与 `syms`/`strings` 字段，就能直接看出
+是"链断了"还是"表指针是垃圾"，而不必再猜。
