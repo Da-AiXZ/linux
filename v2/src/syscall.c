@@ -1029,6 +1029,7 @@ static long long sys_exit(struct v2_cpu *cpu, struct v2_proc *proc)
      * guest was running -- the difference between "we broke it" and "musl
      * cannot find a symbol that is right there". */
     v2_verify_dump();
+    v2_trace_flush();
     fflush(stderr);
     _exit((int)(cpu->x[0] & 0xFF));
 }

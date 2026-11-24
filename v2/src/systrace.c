@@ -92,6 +92,15 @@ void v2_trace_record(uint64_t site, uint64_t number, const char *name,
             (unsigned long long)args[4], (unsigned long long)args[5],
             (unsigned long long)site, result);
     log_lines++;
+    /*
+     * Flushed as it goes, not at the end: the guest leaves through _exit and
+     * atexit never runs, and a guest that dies by signal never reaches either.
+     * Both were measured -- the first version of this log recorded zero calls
+     * for a failing run *and* for a passing one.
+     */
+    if (log_lines % 256 == 0) {
+        fflush(log_file);
+    }
 }
 
 void v2_trace_flush(void)

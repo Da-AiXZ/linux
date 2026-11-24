@@ -489,6 +489,14 @@ jobs:
           grep -E "Error relocating|FAULT|page state|last [0-9]+ syscall" /tmp/trace/fail.out | head -6
           grep -E "\\[v2\\] (space|load|interp|stack|exec map)" /tmp/trace/fail.out | head -8
 
+          # An empty log is not a result: it means the instrument is broken, and
+          # the first version of this step reported "identical: 0 calls" for a
+          # run that had died on a symbol lookup.  That is red, not quiet.
+          if [ ! -s /tmp/trace/fail.log ] || [ ! -s /tmp/trace/pass.log ]; then
+            echo "::error::the syscall log is empty; the instrument is broken"
+            exit 1
+          fi
+
           echo "--- trace diff ---"
           python3 ../Tools/v2_trace_diff.py /tmp/trace/pass.log /tmp/trace/fail.log \
             --context 10 --max 3
