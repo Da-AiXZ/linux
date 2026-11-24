@@ -167,11 +167,20 @@ static void dump_relocation_state(struct v2_cpu *cpu, struct v2_proc *proc,
     }
     reported = 1;
     fprintf(stderr, "[v2] --- relocation error, registers at the write ---\n");
-    for (int index = 0; index < 31; index += 2) {
+    /*
+     * x[31] does not exist.  The loop used to run `index < 31` two at a time and
+     * read x[31] on its last pass -- the word after the array, which is sp.  It
+     * never faulted because the struct is contiguous and the printer only
+     * wanted to show something; GCC says so and clang does not, which is why
+     * the Linux build is worth having.
+     */
+    for (int index = 0; index < 30; index += 2) {
         fprintf(stderr, "[v2] x%-2d=0x%016llx  x%-2d=0x%016llx\n", index,
                 (unsigned long long)cpu->x[index], index + 1,
                 (unsigned long long)cpu->x[index + 1]);
     }
+    fprintf(stderr, "[v2] x30=0x%016llx\n",
+            (unsigned long long)cpu->x[30]);
     fprintf(stderr, "[v2] sp=0x%llx pc=0x%llx nzcv=0x%llx\n",
             (unsigned long long)cpu->sp, (unsigned long long)cpu->pc,
             (unsigned long long)cpu->nzcv);
