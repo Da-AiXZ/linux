@@ -81,6 +81,11 @@ jobs:
   guest:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 20
+    env:
+      # Every page handed to the guest must read as zero.  A page that comes
+      # back dirty comes back dirty on every run, so this is a detector, not a
+      # sample -- one run answers it.
+      V2_HANDOUT_CHECK: "1"
     steps: &guest_steps
       - uses: actions/checkout@v4
 

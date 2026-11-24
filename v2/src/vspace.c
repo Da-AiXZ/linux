@@ -191,6 +191,66 @@ static int v2_find_run_guarded(const v2_space *space, size_t count,
     return v2_find_run(space, count, out);
 }
 
+/*
+ * V2_HANDOUT_CHECK=1: every page that leaves the free list must read as zero.
+ *
+ * This is the invariant the whole address space exists to provide, and until
+ * now it was asserted only by a separate page-reuse test.  Here it is checked
+ * at the one place a page is handed out, which makes it a detector instead of a
+ * statistic: a page that comes back dirty comes back dirty on *every* run, so
+ * one run answers the question that two hundred runs of `apk --version` were
+ * being asked to answer.
+ *
+ * On Darwin this is the interesting check.  `madvise(MADV_DONTNEED)` there is a
+ * hint and discards nothing (measured: 16384 of 16384 bytes intact), so every
+ * reuse path has to destroy the range with MAP_FIXED|MAP_ANON instead.  If one
+ * path forgot, this line names the page and the byte.
+ */
+static int handout_check(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        const char *value = getenv("V2_HANDOUT_CHECK");
+
+        enabled = value != NULL && value[0] != '\0' && value[0] != '0';
+    }
+    return enabled;
+}
+
+static void v2_check_handout(v2_space *space, size_t page, int prot)
+{
+    static uint8_t buffer[65536];
+    static unsigned long reported;
+    uint8_t *at = space->base + page * space->page_size;
+    size_t offset;
+
+    /* A page the caller cannot read now is a page the guest cannot read now. */
+    if (!handout_check() || (prot & V2_PROT_READ) == 0 ||
+        space->page_size > sizeof(buffer)) {
+        return;
+    }
+    if (space->host.read(space->host.ctx, buffer, at, space->page_size) != 0) {
+        return;
+    }
+    for (offset = 0; offset < space->page_size; offset++) {
+        if (buffer[offset] != 0) {
+            reported++;
+            if (reported <= 8) {
+                fprintf(stderr,
+                        "[v2] HANDOUT DIRTY page=0x%llx offset=%zu "
+                        "value=0x%02x state_before=0x%02x prot=0x%x\n",
+                        (unsigned long long)(uintptr_t)at, offset,
+                        (unsigned)buffer[offset], (unsigned)space->pages[page],
+                        (unsigned)prot);
+            } else if (reported == 9) {
+                fprintf(stderr, "[v2] HANDOUT DIRTY: further pages suppressed\n");
+            }
+            return;
+        }
+    }
+}
+
 static int v2_commit(v2_space *space, size_t first, size_t count, int prot)
 {
     int status = space->host.commit(space->host.ctx,
@@ -201,6 +261,14 @@ static int v2_commit(v2_space *space, size_t first, size_t count, int prot)
         return status;
     }
     for (size_t page = first; page < first + count; page++) {
+        /*
+         * Only pages leaving the free list are checkable: a page that is
+         * already MAPPED is here for a protection change and holds the guest's
+         * own data.
+         */
+        if ((space->pages[page] & V2_PAGE_MAPPED) == 0) {
+            v2_check_handout(space, page, prot);
+        }
         space->pages[page] =
             (uint8_t)(V2_PAGE_MAPPED | (prot & V2_PAGE_PROT_MASK));
     }
