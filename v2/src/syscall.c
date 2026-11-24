@@ -147,8 +147,7 @@ static void dump_relocation_state(struct v2_cpu *cpu, struct v2_proc *proc,
         fprintf(stderr, "[v2] x%-2d=0x%016llx  x%-2d=0x%016llx\n", index,
                 (unsigned long long)cpu->x[index], index + 1,
                 (unsigned long long)cpu->x[index + 1]);
-    }
-    fprintf(stderr, "[v2] sp=0x%llx pc=0x%llx nzcv=0x%llx\n",
+    }    fprintf(stderr, "[v2] sp=0x%llx pc=0x%llx nzcv=0x%llx\n",
             (unsigned long long)cpu->sp, (unsigned long long)cpu->pc,
             (unsigned long long)cpu->nzcv);
     if (v2_space_read(proc->space, words,
@@ -159,6 +158,14 @@ static void dump_relocation_state(struct v2_cpu *cpu, struct v2_proc *proc,
                     (unsigned long long)words[index]);
         }
     }
+    /*
+     * The registers say where find_sym was, but not whether the table it read
+     * was still the file's.  Compare now, while the process is intact, and
+     * over read-only pages too: a symbol lookup that fails on correct code is
+     * the one thing an executable-only comparison cannot distinguish from a
+     * corrupted hash table.
+     */
+    v2_verify_dump_at_failure();
 }
 
 static long long sys_write(struct v2_cpu *cpu, struct v2_proc *proc)

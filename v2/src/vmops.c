@@ -109,6 +109,23 @@ static uint64_t hash_range(struct v2_proc *proc, uint64_t address,
  * a failing run shows an image that no longer matches it, the corruption is
  * ours and the offset says where.
  */
+static int verify_at_failure;
+
+/*
+ * Called from the syscall layer the instant ld.so prints "Error relocating":
+ * everything is still mapped and nothing else will run, so this is the only
+ * moment a comparison says anything about the failing run rather than about
+ * the run after it.
+ */
+void v2_verify_dump_at_failure(void)
+{
+    verify_at_failure = 1;
+    fprintf(stderr, "[v2] --- every readable image page, compared at the "
+                    "failure ---\n");
+    v2_verify_dump();
+    verify_at_failure = 0;
+}
+
 void v2_verify_dump(void)
 {
     char host_path[V2_PATH_MAX * 2];
@@ -119,8 +136,10 @@ void v2_verify_dump(void)
         return;
     }
     page_size = v2_space_page_size(v2_current_process->space);
-    fprintf(stderr, "[v2] verify: %d patched sites excluded\n",
-            verify_ignored_count);
+    if (!verify_at_failure) {
+        fprintf(stderr, "[v2] verify: %d patched sites excluded\n",
+                verify_ignored_count);
+    }
 
     for (int index = 0; index < verify_count; index++) {
         size_t checked = 0;
@@ -157,9 +176,20 @@ void v2_verify_dump(void)
             }
             state = v2_space_state_at(v2_current_process->space,
                                       (const void *)(uintptr_t)address);
+            /*
+             * At exit only code is compared, because relocation legitimately
+             * rewrites data.  At the moment of a relocation *failure* the same
+             * is true of writable pages -- they were being modified on purpose
+             * -- so those are still excluded; what gets added is the read-only
+             * but not executable page.  That is where a symbol table, a bloom
+             * filter and a string table live, and a lookup that fails on
+             * correct code is precisely what the old filter could not see.
+             */
             if ((state & V2_PAGE_MAPPED) == 0 ||
-                (state & V2_PROT_EXEC) == 0 ||
-                (state & V2_PROT_READ) == 0) {
+                (state & V2_PROT_READ) == 0 ||
+                (verify_at_failure
+                     ? (state & V2_PROT_WRITE) != 0
+                     : (state & V2_PROT_EXEC) == 0)) {
                 continue;
             }
             if (pread(fd, verify_file, want,

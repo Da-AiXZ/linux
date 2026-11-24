@@ -27,6 +27,15 @@ extern int v2_verify_mappings;
 void v2_verify_dump(void);
 
 /*
+ * The same comparison, run the instant ld.so announces a relocation failure,
+ * and over every readable page instead of only the executable ones.  At that
+ * moment nothing legitimate is in flight, so a read-only page (symbol table,
+ * bloom filter, string table) that no longer matches the file is a fact about
+ * the failing run rather than about the exit path.
+ */
+void v2_verify_dump_at_failure(void);
+
+/*
  * Register an image that the loader mapped itself (the program and its
  * interpreter) so the same exit-time comparison covers it.  `host_path` is a
  * host path: the loader has one, the guest does not.
