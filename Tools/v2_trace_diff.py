@@ -47,6 +47,9 @@ def main():
                              "divergence (default: 8)")
     parser.add_argument("--max", type=int, default=1,
                         help="how many divergences to report (default: 1)")
+    parser.add_argument("--after", type=int, default=0,
+                        help="how many lines to show after the divergence on "
+                             "each side (default: 0)")
     args = parser.parse_args()
 
     ignore = {name.strip() for name in args.ignore.split(",") if name.strip()}
@@ -77,6 +80,13 @@ def main():
                     print("    %s" % line)
             print("  reference: %s" % left[index])
             print("  suspect  : %s" % right[index])
+            if args.after > 0:
+                print("  reference continues:")
+                for line in left[index + 1:index + 1 + args.after]:
+                    print("    %s" % line)
+                print("  suspect continues:")
+                for line in right[index + 1:index + 1 + args.after]:
+                    print("    %s" % line)
             if reported >= args.max:
                 return 1
         index += 1

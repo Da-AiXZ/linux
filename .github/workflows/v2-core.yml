@@ -513,7 +513,7 @@ jobs:
 
           echo "--- trace diff ---"
           python3 ../Tools/v2_trace_diff.py /tmp/trace/pass.log /tmp/trace/fail.log \
-            --context 10 --max 3
+            --context 6 --max 1 --after 60
 
       - name: Space table accused after every operation
         working-directory: v2
