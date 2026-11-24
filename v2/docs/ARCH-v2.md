@@ -602,7 +602,7 @@ image /usr/lib/libssl.so.3                  checked 0xc4000  matches the file
 和栈顶若干字打出来。有了 `find_sym` 的 `dso` 指针与 `syms`/`strings` 字段，就能直接看出
 是"链断了"还是"表指针是垃圾"，而不必再猜。
 
-#### 真机 0.1.6.7：动态链接跑通了，flkae 也在第一枪就中（2026-11-24 15:25）
+#### 真机 0.1.6.7：动态链接跑通了，flake 也在第一枪就中（2026-11-24 15:25）
 
 ```
 $ dynamic busybox echo     dynamic-busybox-ok           status=0
