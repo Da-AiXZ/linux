@@ -420,6 +420,32 @@
                                 dynamic_status];
             [self append:piece];
         }
+
+        /*
+         * Twenty shots per launch.  The flake is ~1% on the desktop but was
+         * 1/1 here once, so one launch is worth twenty samples -- and only a
+         * failing shot keeps its full log, or the upload becomes noise nobody
+         * reads.
+         */
+        [text appendString:@"\n=== apk x20 ===\n"];
+        int passed = 0;
+        int failed = 0;
+        for (int attempt = 0; attempt < 20; attempt++) {
+            NSMutableString *piece = [NSMutableString string];
+            int shot = [V2Runner runGuest:apk root:dynamicRoot
+                                     args:@[@"--version"] timeout:30
+                                   output:piece];
+            if (shot == 0 && [piece rangeOfString:@"apk-tools"].location
+                                != NSNotFound) {
+                passed++;
+            } else {
+                failed++;
+                [text appendFormat:@"\n--- shot %d status=%d ---\n%@",
+                                    attempt + 1, shot, piece];
+            }
+        }
+        [text appendFormat:@"[app] apk x20 passed=%d failed=%d\n", passed,
+                            failed];
     } else {
         NSString *note = [NSString stringWithFormat:
             @"[app] G4 skipped: no apk at %@\n", apk];
