@@ -495,3 +495,33 @@ runs=81 failures=6 mismatches=0
 CRC 快照，进入 guest 前后各算一次，失败时把"哪个库的 CRC 变了"打出来。
 如果 CRC 变了，说明有人写坏了库；如果没变，说明 ld.so 用正确的字节查表却查不到，
 那时才去看 musl 的 `find_sym`。
+
+#### 逐页比对的结果，以及仪器自己的三个错误（2026-11-24 13:30）
+
+最终数据（`runs=472 failures=5 mismatches=0`）：
+
+```
+image tests/guest/root/sbin/apk            checked 0x10000  differs at 0xf520 (569 bytes)
+image .../lib/ld-musl-aarch64.so.1         checked 0xa4000  differs at 0x186fc (2273 bytes)
+image /usr/lib/libcrypto.so.3              checked 0x3a8000 matches the file
+image /usr/lib/libz.so.1                   checked 0x20790  matches the file
+image /usr/lib/libapk.so.2.14.0            checked 0x30e88  matches the file
+image /usr/lib/libssl.so.3                 checked 0xc4000  matches the file
+```
+
+**四个库的可执行页与文件逐字节一致**，包括失败的那些运行。所以 ld.so 读到的字节是对的。
+
+主程序和解释器报的"差异"是**仪器的 bug**：`apk` 的第二个 `PT_LOAD` 在文件里偏移 0xf520、
+在内存里 vaddr 0x1f520（相差 0x10000）。用"vaddr 等于文件偏移"的线性假设去比，
+段与段之间的落差就成了 569 字节的假差异。库之所以没中招，只是因为它们被检查的那段
+没有跨过段边界。
+
+**这个仪器的三次错误，值得记下来**（每一次都差点让我得出错误结论）：
+
+1. 对整个映射取哈希 —— 重定位本来就会写 `.data`，于是每次都"变了"；
+2. 只对可执行映射取哈希 —— musl 的首次整库映射就是 R-X，仍包含数据段；
+3. 退出时与文件线性比对 —— 段偏移不为零时，段间落差被当成损坏。
+
+**要真正回答"我们的装载器有没有读错"，必须按段比对**（用 PT_LOAD 的 vaddr/offset/filesz
+逐段核对）。在那之前，"装载器读错"这条假设仍然既没被证实也没被排除——但它已经被
+缩到只剩两个镜像（主程序与解释器），而四个由 ld.so 映射的库是干净的。
