@@ -305,6 +305,43 @@ jobs:
       # and that the canary past the array is intact.  A hundred and fifty runs
       # of the harshest configuration (no verification, which is where the
       # device fails every time) is enough to say whether that ever happens.
+      # Pinning the base of a *failing* run cannot work: that address was
+      # chosen by mmap and is owned by something else in the next process.  So
+      # pin a handful of addresses nobody uses instead, and ask the opposite
+      # question -- does a fixed layout fail every time?  If any of them does,
+      # the flake stops being a 2%-per-run statistic and becomes one case that
+      # can be bisected on a desktop without waiting for luck.
+      - name: Layout, pinned
+        working-directory: v2
+        run: |
+          set +e
+          for base in 0x5000000000 0x6000000000 0x7000000000; do
+            pinned=0
+            failed=0
+            for run in $(seq 1 20); do
+              if V2_SPACE_BASE=$base ./build/guest-runner --root tests/guest/root \
+                   tests/guest/root/sbin/apk --version > /tmp/g_pin.log 2>&1; then
+                pinned=$((pinned + 1))
+                if grep -q "falling back to an anonymous reservation" \
+                     /tmp/g_pin.log; then
+                  echo "$base: pin refused (address taken)"
+                  break
+                fi
+              else
+                failed=$((failed + 1))
+                cp /tmp/g_pin.log "/tmp/g_pin_${base}_$failed.log"
+              fi
+            done
+            echo "layout $base: $failed of 20 failed, $pinned passed"
+          done
+          for log in /tmp/g_pin_*.log; do
+            [ -f "$log" ] || continue
+            echo "--- $log ---"
+            grep -E "\\[v2\\] (space|stack|exec map|load|interp)" "$log" | head -12
+            grep -m1 "Error relocating" "$log" || true
+          done
+          echo "layout pinned: done"
+
       - name: Space table accused after every operation
         working-directory: v2
         run: |
