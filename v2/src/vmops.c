@@ -112,6 +112,43 @@ static uint64_t hash_range(struct v2_proc *proc, uint64_t address,
 static int verify_at_failure;
 
 /*
+ * Writable-segment ranges, per image.  ld.so applies relocations here and then
+ * mprotects PT_GNU_RELRO read-only, so at the moment of a failure these pages
+ * are read-only *and* legitimately different from the file.  Without excluding
+ * them the comparison reports tens of thousands of differences in every
+ * failing run and says nothing -- which is exactly what the first version of
+ * this instrument did (libcrypto: 133 233 bytes, all inside RELRO).
+ */
+#define V2_VERIFY_WRITABLE 32
+static struct {
+    uint64_t start;
+    uint64_t end;
+} verify_writable[V2_VERIFY_WRITABLE];
+static int verify_writable_count;
+
+void v2_verify_note_writable(uint64_t start, uint64_t end)
+{
+    if (!v2_verify_mappings || verify_writable_count >= V2_VERIFY_WRITABLE ||
+        end <= start) {
+        return;
+    }
+    verify_writable[verify_writable_count].start = start;
+    verify_writable[verify_writable_count].end = end;
+    verify_writable_count++;
+}
+
+static int verify_is_writable(uint64_t start, uint64_t end)
+{
+    for (int index = 0; index < verify_writable_count; index++) {
+        if (start < verify_writable[index].end &&
+            verify_writable[index].start < end) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/*
  * Called from the syscall layer the instant ld.so prints "Error relocating":
  * everything is still mapped and nothing else will run, so this is the only
  * moment a comparison says anything about the failing run rather than about
@@ -188,7 +225,8 @@ void v2_verify_dump(void)
             if ((state & V2_PAGE_MAPPED) == 0 ||
                 (state & V2_PROT_READ) == 0 ||
                 (verify_at_failure
-                     ? (state & V2_PROT_WRITE) != 0
+                     ? (state & V2_PROT_WRITE) != 0 ||
+                           verify_is_writable(address, address + want)
                      : (state & V2_PROT_EXEC) == 0)) {
                 continue;
             }
@@ -226,6 +264,52 @@ void v2_verify_dump(void)
     }
 }
 
+/*
+ * Read a library's own program headers to learn which of its pages the loader
+ * may write.  Only called for the mapping at file offset zero, which is the
+ * one musl makes first and which therefore starts at the image base.
+ */
+static void note_writable_segments(int fd, uint64_t base)
+{
+    uint8_t header[64];
+    uint8_t headers[32 * 56];
+    uint64_t phoff;
+    uint16_t phentsize;
+    uint16_t phnum;
+    size_t bytes;
+
+    if (pread(fd, header, sizeof(header), 0) != (ssize_t)sizeof(header) ||
+        header[0] != 0x7f || header[1] != 'E' || header[2] != 'L' ||
+        header[3] != 'F') {
+        return;
+    }
+    memcpy(&phoff, header + 0x20, sizeof(phoff));
+    memcpy(&phentsize, header + 0x36, sizeof(phentsize));
+    memcpy(&phnum, header + 0x38, sizeof(phnum));
+    if (phentsize != 56 || phnum == 0 || phnum > 32) {
+        return;
+    }
+    bytes = (size_t)phnum * 56;
+    if (pread(fd, headers, bytes, (off_t)phoff) != (ssize_t)bytes) {
+        return;
+    }
+    for (uint16_t index = 0; index < phnum; index++) {
+        const uint8_t *entry = headers + (size_t)index * 56;
+        uint32_t type;
+        uint32_t flags;
+        uint64_t vaddr;
+        uint64_t memsz;
+
+        memcpy(&type, entry, sizeof(type));
+        memcpy(&flags, entry + 4, sizeof(flags));
+        memcpy(&vaddr, entry + 16, sizeof(vaddr));
+        memcpy(&memsz, entry + 40, sizeof(memsz));
+        if (type == 1 && (flags & 2) != 0) {
+            v2_verify_note_writable(base + vaddr, base + vaddr + memsz);
+        }
+    }
+}
+
 static void verify_mapping(struct v2_proc *proc, int host_fd, uint64_t offset,
                            uint64_t address, size_t length)
 {
@@ -241,6 +325,9 @@ static void verify_mapping(struct v2_proc *proc, int host_fd, uint64_t offset,
     }
     if (offset >= (uint64_t)info.st_size) {
         return;
+    }
+    if (offset == 0) {
+        note_writable_segments(host_fd, address);
     }
     want = (size_t)((uint64_t)info.st_size - offset);
     if (want > length) {

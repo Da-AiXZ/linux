@@ -331,6 +331,11 @@ static void verify_note_segments(const char *host_path,
         }
         v2_verify_note_host(host_path, load->base + segment->vaddr,
                             (size_t)segment->filesz, segment->offset);
+        if ((segment->flags & V2_PROT_WRITE) != 0) {
+            v2_verify_note_writable(load->base + segment->vaddr,
+                                    load->base + segment->vaddr +
+                                        segment->memsz);
+        }
     }
 }
 

@@ -36,6 +36,16 @@ void v2_verify_dump(void);
 void v2_verify_dump_at_failure(void);
 
 /*
+ * Declare a range the loader (or ld.so) is allowed to write into after the
+ * mapping is made: the writable segments, and therefore every PT_GNU_RELRO
+ * page, which becomes read-only only *after* relocation.  The at-failure
+ * comparison skips these -- a difference there is the process working as
+ * designed -- so that what remains is the read-only image, where any
+ * difference is corruption.
+ */
+void v2_verify_note_writable(uint64_t start, uint64_t end);
+
+/*
  * Register an image that the loader mapped itself (the program and its
  * interpreter) so the same exit-time comparison covers it.  `host_path` is a
  * host path: the loader has one, the guest does not.
