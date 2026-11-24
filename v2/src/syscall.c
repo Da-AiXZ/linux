@@ -934,6 +934,11 @@ static long long sys_exit(struct v2_cpu *cpu, struct v2_proc *proc)
 {
     (void)proc;
     fflush(stdout);
+    /* Under V2_VERIFY this says whether any library's bytes changed while the
+     * guest was running -- the difference between "we broke it" and "musl
+     * cannot find a symbol that is right there". */
+    v2_verify_dump();
+    fflush(stderr);
     _exit((int)(cpu->x[0] & 0xFF));
 }
 

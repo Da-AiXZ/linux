@@ -25,6 +25,58 @@ static uint8_t *verify_file;
 static uint8_t *verify_guest;
 static size_t verify_capacity;
 
+#define V2_VERIFY_SLOTS 16
+static struct {
+    uint64_t address;
+    size_t length;
+    uint64_t hash;
+} verify_snapshot[V2_VERIFY_SLOTS];
+static int verify_count;
+
+static uint64_t hash_range(struct v2_proc *proc, uint64_t address,
+                           size_t length)
+{
+    uint64_t hash = 1469598103934665603ULL;   /* FNV-1a, 64 bit */
+    uint8_t chunk[4096];
+    size_t done = 0;
+
+    while (done < length) {
+        size_t want = length - done;
+
+        if (want > sizeof(chunk)) {
+            want = sizeof(chunk);
+        }
+        if (v2_space_read(proc->space, chunk,
+                          (const void *)(uintptr_t)(address + done),
+                          want) != 0) {
+            return 0;
+        }
+        for (size_t index = 0; index < want; index++) {
+            hash = (hash ^ chunk[index]) * 1099511628211ULL;
+        }
+        done += want;
+    }
+    return hash;
+}
+
+void v2_verify_dump(void)
+{
+    if (!v2_verify_mappings || v2_current_process == NULL) {
+        return;
+    }
+    for (int index = 0; index < verify_count; index++) {
+        uint64_t now = hash_range(v2_current_process,
+                                  verify_snapshot[index].address,
+                                  verify_snapshot[index].length);
+
+        fprintf(stderr, "[v2] image 0x%llx len=0x%zx %s\n",
+                (unsigned long long)verify_snapshot[index].address,
+                verify_snapshot[index].length,
+                now == verify_snapshot[index].hash ? "unchanged"
+                                                   : "CHANGED");
+    }
+}
+
 /*
  * Compare a freshly mapped file range against the file itself.  This is the
  * instrument for "some library looks wrong only sometimes": relocation
@@ -142,6 +194,13 @@ long long v2_vm_mmap(struct v2_cpu *cpu, struct v2_proc *proc)
     if (result > 0 && fd >= 0) {
         /* Before patching, so the comparison is against the file as it is. */
         verify_mapping(proc, fd, offset, (uint64_t)result, (size_t)length);
+        if (v2_verify_mappings && verify_count < V2_VERIFY_SLOTS) {
+            verify_snapshot[verify_count].address = (uint64_t)result;
+            verify_snapshot[verify_count].length = (size_t)length;
+            verify_snapshot[verify_count].hash =
+                hash_range(proc, (uint64_t)result, (size_t)length);
+            verify_count++;
+        }
     }
     if (result > 0 && fd >= 0 && (prot & V2_PROT_EXEC) != 0 &&
         proc->patcher != NULL) {

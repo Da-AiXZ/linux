@@ -19,6 +19,13 @@
  */
 extern int v2_verify_mappings;
 
+/*
+ * Recomputed at every guest exit when verification is on: if a library's
+ * bytes changed since it was mapped, something wrote into it, and the name of
+ * the symbol that ld.so could not find is a symptom rather than the cause.
+ */
+void v2_verify_dump(void);
+
 long long v2_vm_brk(struct v2_cpu *cpu, struct v2_proc *proc);
 long long v2_vm_mmap(struct v2_cpu *cpu, struct v2_proc *proc);
 long long v2_vm_munmap(struct v2_cpu *cpu, struct v2_proc *proc);
