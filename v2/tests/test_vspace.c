@@ -565,11 +565,57 @@ static void guard_test(size_t pages, size_t page_size)
     printf("guard  ok  one page after every mapping, never handed out\n");
 }
 
+/*
+ * MADV_DONTNEED keeps the mapping and promises zeros on the next read.  The
+ * host cannot deliver that with a discard hint on Darwin, so the address space
+ * releases and recommits the run itself; the page table must be unchanged, and
+ * the fake host asserts that a page is never committed while already committed.
+ */
+static void advise_test(size_t pages, size_t page_size)
+{
+    struct fake fake;
+    struct v2_host host;
+    struct v2_space *space = NULL;
+    long long mapped;
+    long long second;
+
+    fake_init(&fake, pages, page_size);
+    host = fake_host(&fake);
+    CHECK(v2_space_create(&space, &host, pages * page_size, page_size, 0, 0) == 0);
+
+    mapped = v2_space_map(space, NULL, 2 * page_size,
+                          V2_PROT_READ | V2_PROT_WRITE, V2_MAP_ANON, -1, 0);
+    CHECK(mapped > 0);
+    second = v2_space_map(space, NULL, page_size, V2_PROT_READ, V2_MAP_ANON,
+                          -1, 0);
+    CHECK(second > 0);
+
+    CHECK(v2_space_advise(space, (void *)(uintptr_t)mapped, 2 * page_size,
+                          V2_MADV_DONTNEED) == 0);
+    /* Still mapped, still the same protection, still readable. */
+    CHECK(v2_space_check(space, (void *)(uintptr_t)mapped, 2 * page_size,
+                         V2_PROT_WRITE) == 0);
+    CHECK(v2_space_verify(space) == 0);
+    compare_host_and_space(space, &fake);
+
+    /* A range that ends inside the second mapping must not disturb it. */
+    CHECK(v2_space_advise(space, (void *)(uintptr_t)mapped, page_size,
+                          V2_MADV_DONTNEED) == 0);
+    CHECK(v2_space_check(space, (void *)(uintptr_t)second, page_size,
+                         V2_PROT_READ) == 0);
+    compare_host_and_space(space, &fake);
+
+    v2_space_destroy(space);
+    fake_free(&fake);
+    printf("advise ok  DONTNEED keeps the mapping and the protection\n");
+}
+
 int main(int argc, char **argv)
 {
     int status = 0;
 
     guard_test(64, 0x1000);
+    advise_test(64, 0x1000);
     if (argc >= 3 && strcmp(argv[1], "--trace") == 0) {
         for (int index = 2; index < argc; index++) {
             status |= replay(argv[index]);

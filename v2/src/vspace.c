@@ -404,12 +404,24 @@ long long v2_space_map(v2_space *space, void *hint, size_t length, int prot,
                 }
             }
         } else {
-            for (size_t page = first; page < first + count; page++) {
-                if ((space->pages[page] & V2_PAGE_MAPPED) != 0) {
-                    space->host.decommit(space->host.ctx,
-                                         space->base + page * space->page_size,
-                                         space->page_size);
+            size_t page = first;
+
+            /* Same reason as in unmap: decommit is a syscall, so batch it. */
+            while (page < first + count) {
+                size_t start;
+
+                if ((space->pages[page] & V2_PAGE_MAPPED) == 0) {
+                    page++;
+                    continue;
                 }
+                start = page;
+                while (page < first + count &&
+                       (space->pages[page] & V2_PAGE_MAPPED) != 0) {
+                    page++;
+                }
+                space->host.decommit(space->host.ctx,
+                                     space->base + start * space->page_size,
+                                     (page - start) * space->page_size);
             }
             v2_release_pages(space, first, count);
         }
@@ -521,11 +533,29 @@ long long v2_space_unmap(v2_space *space, void *addr, size_t length)
     if (count > space->page_count - first) {
         count = space->page_count - first;
     }
-    for (size_t page = first; page < first + count; page++) {
-        if ((space->pages[page] & V2_PAGE_MAPPED) != 0) {
+    /*
+     * Release in runs, not page by page: decommit is a real syscall that
+     * destroys the mapping (see host_darwin.c), and apk unmaps megabytes at a
+     * time.  Nothing here changes the page table, so the model still matches.
+     */
+    {
+        size_t page = first;
+
+        while (page < first + count) {
+            size_t start;
+
+            if ((space->pages[page] & V2_PAGE_MAPPED) == 0) {
+                page++;
+                continue;
+            }
+            start = page;
+            while (page < first + count &&
+                   (space->pages[page] & V2_PAGE_MAPPED) != 0) {
+                page++;
+            }
             space->host.decommit(space->host.ctx,
-                                 space->base + page * space->page_size,
-                                 space->page_size);
+                                 space->base + start * space->page_size,
+                                 (page - start) * space->page_size);
         }
     }
     v2_release_pages(space, first, count);
@@ -694,20 +724,34 @@ long long v2_space_advise(v2_space *space, void *addr, size_t length,
     if (advice == V2_MADV_DONTNEED || advice == V2_MADV_FREE) {
         size_t start = first;
         size_t run = 0;
+        int run_prot = 0;
 
+        /*
+         * Linux: after MADV_DONTNEED the pages are still mapped, and reading
+         * one returns zeros.  The host cannot deliver that with a discard hint
+         * (see host_darwin.c), so the run is genuinely released and then
+         * committed again with the protection it had.  The page table does not
+         * change, which is why no model op exists for this.
+         */
         for (size_t page = first; page < first + count + 1; page++) {
             int mapped = page < first + count &&
                 (space->pages[page] & V2_PAGE_MAPPED) != 0;
+            int prot = mapped ? (space->pages[page] & V2_PAGE_PROT_MASK) : 0;
+
+            if (run != 0 && (!mapped || prot != run_prot)) {
+                uint8_t *at = space->base + start * space->page_size;
+                size_t bytes = run * space->page_size;
+
+                space->host.decommit(space->host.ctx, at, bytes);
+                space->host.commit(space->host.ctx, at, bytes, run_prot);
+                run = 0;
+            }
             if (mapped) {
                 if (run == 0) {
                     start = page;
+                    run_prot = prot;
                 }
                 run++;
-            } else if (run != 0) {
-                space->host.discard(space->host.ctx,
-                                    space->base + start * space->page_size,
-                                    run * space->page_size);
-                run = 0;
             }
         }
     }

@@ -74,11 +74,32 @@ static int d_commit(void *context, void *address, size_t length, int prot)
 
 static int d_decommit(void *context, void *address, size_t length)
 {
+    void *map;
+
     (void)context;
-    if (mprotect(address, length, PROT_NONE) != 0) {
+    /*
+     * mprotect(PROT_NONE) + madvise(MADV_DONTNEED) does NOT discard anything
+     * on Darwin.  V2_PAGETEST measured it: a page written, unmapped and asked
+     * for again comes back with 16384 of 16384 bytes intact, and the same is
+     * true of MADV_DONTNEED on a live page.  madvise is documented as a hint
+     * ("the system may reclaim these pages"), and it does not have to act.
+     *
+     * Linux promises the opposite -- a page handed out again reads as zeros --
+     * and every .bss in every library is built on that promise: the tail of a
+     * segment is mapped MAP_FIXED over pages that held another library a
+     * moment ago.  musl keeps its globals, its dso chain and its exit list in
+     * exactly those bytes, which is why the symptom was "a random symbol is
+     * not found" and "a NULL walk while printing the error".
+     *
+     * Replacing the range with fresh anonymous pages keeps the promise on both
+     * platforms: MAP_FIXED destroys whatever was mapped there, and a brand new
+     * anonymous page is zero by definition.
+     */
+    map = mmap(address, length, PROT_NONE,
+               MAP_ANON | MAP_PRIVATE | MAP_FIXED | MAP_NORESERVE, -1, 0);
+    if (map == MAP_FAILED) {
         return -1;
     }
-    madvise(address, length, MADV_DONTNEED);
     return 0;
 }
 
