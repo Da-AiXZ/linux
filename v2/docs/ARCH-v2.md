@@ -704,3 +704,105 @@ slack。**v2 的 guest 页 == 宿主页，一页就是边界，没有 slack。**
 guard 页永远不被交出、永远不被 commit（`v2_space_verify` 会拒绝 committed 的 guard 页）、
 `MAP_FIXED` 显式要点这页时让位。本机（Windows，zig）实测：轨迹 20 168 条断言、
 随机 2 组 31 993 条、guard 随机 3 组 15 235 条全绿，三条轨迹哈希未变。
+
+#### 页语义：`madvise` 不是承诺（2026-11-24 18:40，已修）
+
+真机 0.1.12 的 control 组第 5 发不是重定位失败，是 SIGSEGV：`addr=0x0`、
+`pc` 在 ld-musl 内、`lr` 高两帧——一次**在打印错误信息的路上**的空指针。
+一条"已经在退出的路上"的崩溃不可能是"查不到符号"，它是"某个全局变量不是它该有的值"。
+
+v2 能把一个不是零的全局交给 guest 的地方只有一处：`.bss`。每个段的尾巴都是
+`MAP_FIXED` 覆盖到"刚才还住着别的库"的页上，Linux 承诺新映射读出来是零。
+v2 用 `mprotect(PROT_NONE)` + `madvise(MADV_DONTNEED)` 兑现这个承诺，而 Darwin 的
+`madvise` 文档写的是"**可能**回收这些页"——是提示，不是承诺。
+
+`V2_PAGETEST=1` 在 arm64 runner 上第一次跑就给了答案：
+
+```
+page reused after unmap is DIRTY (16384 of 16384 bytes nonzero)
+madvise(DONTNEED) discarded NOTHING (16384 of 16384 bytes still nonzero)
+```
+
+所以 decommit 一直是假的：页原样回来，内容一个字节都没丢。修法是让 decommit 真的
+**换掉**这段映射（`MAP_FIXED|MAP_ANON|PROT_NONE`），新匿名页按定义就是零。代价是它
+从"提示"变成真 syscall，于是 unmap 与 `MAP_FIXED` 替换路径改成按连续 run 批量调用。
+
+guest 的 `MADV_DONTNEED` 也补回了 Linux 语义：释放 + 用原权限重新 commit，
+映射还在、内容没了（这需要按页权限切分 run，因为一个范围中途可能换权限）。
+
+**这一条修完，flake 没消失**（5/200，仍在 1–3% 量级）。所以它是一只会自己站出来的
+真 bug，但不是这一个。
+
+#### 失败当场比对：字节是对的，错的是 musl 拿它们建出来的东西（2026-11-24 18:55）
+
+`V2_VERIFY` 一直在**退出时**比对、且只比**可执行页**。两处都要改才有信息量：
+
+1. **在失败那一刻比**。ld.so 打完 `Error relocating` 几条指令就 `exit(127)`，退出时的
+   现场已经没用了——同一个理由此前把寄存器 dump 挪到了 `write()`。
+2. **比只读页**。`.gnu.hash` / `.dynsym` / `.dynstr` 在只读段里，符号查找失败而代码
+   与文件一致时，唯一还能错的就是这些表。
+
+第一版有个坑，值得记：不排除可写段时，每次失败都报几万字节差异——因为
+`PT_GNU_RELRO` 是 ld.so 写完指针**之后**才 mprotect 成只读的，失败时它们"只读且与
+文件不同"完全正常（libcrypto 报了 133 233 字节，全部落在 RELRO 内）。把可写段
+（库的 phdr 现读、主程序/解释器用已解析的段）登记进排除表之后：
+
+```
+in-failure comparison: fired=5 silent=0
+（没有任何 differs at）
+```
+
+**五发失败、五发现在比对，每一发都：所有只读页与文件逐字节一致。**
+推论很硬：装载器、页表、`pread`、补丁全都没有问题；出问题的是 musl 用正确字节建出来的
+运行时结构（dso 链、symtab 指针、它自己 mmap 出来的堆）。
+
+顺带修了一个仪器 bug：这个钩子原来对单个 `write()` 的缓冲做 `strstr`，而 musl 的 stdio
+经 `__overflow` **一次只写两个字节**，"Error relocating" 永远不在一次 write 里——加了
+寄存器 dump 之后的那次 CI，六发失败、零次 dump，看起来像"现场不可得"，其实是从没匹配上。
+现在按流累积。
+
+#### 已知 bug 的四种脸（2026-11-24 19:05）
+
+同一个根因现在有四个可区分的落点，CI 分开计数、分开打印，都不单独判红：
+
+| 脸 | 现场 |
+|---|---|
+| `symbol` | `Error relocating <lib>: <sym>: symbol not found` |
+| `fault` | 重定位期间崩溃，带地址与 pc（本机首次：`addr=0x326676e00`） |
+| `index-io` | `WARNING: opening /repo/main: IO ERROR` → `OK: 0 distinct packages available`（v1 的原始签名） |
+| `no-count` | 退出码 0、但没有那行 package 计数 |
+
+`MISMATCH` 与"不属于这四类"的失败仍然无条件判红。分开计数的意义：总数可以一直是 5，
+而构成从"五个符号查找"变成"三个查找 + 一次崩溃 + 一次读不了索引"——那是另一个 bug
+穿着同一个数字。
+
+#### ASLR 是开关：钉住基址 400 发零失败（2026-11-24 19:40）
+
+三发失败运行的**相对布局逐项相同**（镜像 +0x10000、解释器 +0x34000、栈 +0x48f8000，
+库紧随其后），通过运行的也一样——分配器是确定性的。所以布局不是变量。剩下唯一会变的
+东西是 arena 的**绝对基址**。
+
+于是把基址钉在 `0x7000000000` 起、按 16 MiB 步进扫 200 个地址、每个跑 2 发（共 400 发）：
+
+```
+sweep: 200 usable bases, first failing base=none
+```
+
+**同一个 job 里不钉基址的 200 发：5 次失败（3 个 symbol + 2 个 fault）。**
+
+400 发 0 失败 vs 200 发 5 失败，差异不会被采样噪声解释。结论：**这条 bug 依赖 ASLR，
+一旦钉住 arena 就完全不发生。**
+
+两条预约路径只差一件事：
+
+| 路径 | 代码 | 结果 |
+|---|---|---|
+| 不钉（出厂） | `mmap(NULL, 1 GiB, PROT_NONE, ANON\|PRIVATE\|NORESERVE)` | ≈2.5%/次失败 |
+| 钉住 | 同上加 `MAP_FIXED`，地址固定 | 400/400 通过 |
+
+这就把一个统计量变成了**受控变量**：下次要做的是把两条路径之间真正不同的东西找出来
+（内核给出的基址性质？落在进程已有映射附近的相对位置？`MAP_FIXED` 与普通预约在 VM
+entry 上的差别？），而不是继续猜 musl。
+
+顺带排除的：页表自检 150 发零损坏（`V2_CHECK_SPACE=1`，每操作一次全表校验 + 尾部 canary），
+所以别名不是"表被写穿"造成的。
