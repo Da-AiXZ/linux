@@ -81,7 +81,16 @@ jobs:
 
       - name: Build runner
         working-directory: v2
-        run: make guest
+        run: |
+          make guest
+          # A second build whose uninitialised locals and struct padding are
+          # filled with a pattern instead of whatever the stack happened to
+          # hold.  If the flake is our own uninitialised memory, its rate
+          # changes here -- and if it disappears entirely, the class of the bug
+          # is settled in one measurement.
+          make BUILD=build-pattern \
+               CFLAGS="-std=c11 -O2 -g -Iinclude -Wall -Wextra -Werror \
+                       -Wshadow -ftrivial-auto-var-init=pattern" guest
 
       - name: Run a Linux ELF natively
         working-directory: v2
@@ -363,6 +372,17 @@ jobs:
           }
           measure "kernel's address (the shipping configuration)" V2_SPACE_BASE=0x0
           measure "fixed benign address 0x7000000000" V2_SPACE_BASE=0x7000000000
+
+          # Same 150 runs, but from a build whose uninitialised locals hold a
+          # pattern.  A rate that moves means the flake lives in memory we never
+          # wrote; a rate that does not means it does not.
+          failed=0
+          for run in $(seq 1 150); do
+            ./build-pattern/guest-runner --root tests/guest/root \
+              tests/guest/root/sbin/apk --version > /tmp/g_pat.log 2>&1
+            grep -q "Error relocating\|FAULT" /tmp/g_pat.log && failed=$((failed + 1))
+          done
+          echo "uninitialised locals filled with a pattern: $failed of 150 failed"
 
           # With the base pinned the guest's entry state should be identical in
           # every run.  If a failing run hashes differently here, the difference
