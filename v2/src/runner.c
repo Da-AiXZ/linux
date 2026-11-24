@@ -358,6 +358,50 @@ static void verify_note_segments(const char *host_path,
     }
 }
 
+/*
+ * A hash of everything the guest can see, taken immediately before it runs.
+ *
+ * With the arena pinned, the guest's initial state should be bit-identical in
+ * every run -- same layout, same stack, same images.  If two runs with the same
+ * base produce different hashes here, the nondeterminism is already present
+ * before a single guest instruction, and the search is over a much smaller set
+ * of things (what we wrote, not what musl then computed).  If they match, the
+ * race is inside the guest's own execution and the entry state is exonerated.
+ */
+static uint64_t hash_guest_state(struct v2_space *space, size_t page_size,
+                                 size_t *mapped_pages)
+{
+    uint64_t hash = 1469598103934665603ULL;
+    uint8_t chunk[4096];
+    size_t pages = v2_space_page_count(space);
+    uint8_t *base = (uint8_t *)v2_space_base(space);
+
+    *mapped_pages = 0;
+    for (size_t page = 0; page < pages; page++) {
+        int state = v2_space_state_at(space, base + page * page_size);
+
+        if ((state & V2_PAGE_MAPPED) == 0) {
+            continue;
+        }
+        (*mapped_pages)++;
+        for (size_t at = 0; at < page_size; at += sizeof(chunk)) {
+            size_t want = page_size - at;
+
+            if (want > sizeof(chunk)) {
+                want = sizeof(chunk);
+            }
+            if (v2_space_read(space, chunk, base + page * page_size + at,
+                              want) != 0) {
+                return 0;
+            }
+            for (size_t index = 0; index < want; index++) {
+                hash = (hash ^ chunk[index]) * 1099511628211ULL;
+            }
+        }
+    }
+    return hash;
+}
+
 int main(int argc, char **argv)
 {
     fprintf(stderr, "[v2] helper built %s\n", build_stamp());
@@ -668,6 +712,13 @@ int main(int argc, char **argv)
 
     fprintf(stderr, "[v2] enter pc=0x%llx at_base=0x%llx\n",
             (unsigned long long)cpu.pc, (unsigned long long)aux.base);
+    if (getenv("V2_HASH_ENTRY") != NULL) {
+        size_t mapped = 0;
+        uint64_t digest = hash_guest_state(space, page_size, &mapped);
+
+        fprintf(stderr, "[v2] entry state hash=0x%llx pages=%zu\n",
+                (unsigned long long)digest, mapped);
+    }
     fflush(stdout);
     v2_guest_enter(cpu.pc, cpu.sp);
     return 0;

@@ -363,6 +363,26 @@ jobs:
           }
           measure "kernel's address (the shipping configuration)" V2_SPACE_BASE=0x0
           measure "fixed benign address 0x7000000000" V2_SPACE_BASE=0x7000000000
+
+          # With the base pinned the guest's entry state should be identical in
+          # every run.  If a failing run hashes differently here, the difference
+          # exists before a single guest instruction and the search is over what
+          # we wrote, not over what musl then computed.
+          echo "--- entry state, same base, fifteen runs ---"
+          : > /tmp/g_hashes.txt
+          for run in $(seq 1 15); do
+            V2_HASH_ENTRY=1 V2_SPACE_BASE=0x7000000000 ./build/guest-runner \
+              --root tests/guest/root tests/guest/root/sbin/apk --version \
+              > /tmp/g_hash.log 2>&1
+            hash=$(sed -n 's/.*entry state \(hash=0x[0-9a-f]* pages=[0-9]*\).*/\1/p' \
+                   /tmp/g_hash.log | head -1)
+            result=ok
+            grep -q "Error relocating\|FAULT" /tmp/g_hash.log && result=FAILED
+            echo "run $run $result $hash" >> /tmp/g_hashes.txt
+          done
+          cat /tmp/g_hashes.txt
+          echo "--- distinct entry states ---"
+          sed 's/^run [0-9]* [A-Za-z]* //' /tmp/g_hashes.txt | sort | uniq -c
           echo "--- refused pins are counted separately ---"
           V2_SPACE_BASE=0x120000000 ./build/guest-runner --root tests/guest/root \
             tests/guest/root/sbin/apk --version 2>&1 | head -2
