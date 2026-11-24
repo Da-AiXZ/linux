@@ -196,19 +196,30 @@ static void emit_pages(unsigned long index, const struct v2_cpu *cpu,
             v2_trace_put(line);
         }
 
-        if (with_words &&
-            ((uint64_t)(uintptr_t)at == probe ||
-             (uint64_t)(uintptr_t)at + page_size == probe)) {
+        if (with_words && (uint64_t)(uintptr_t)at == probe) {
+            /*
+             * Only the live part of the stack page: from our own frame upwards.
+             * Below that the guest never reads again, and whatever a previous
+             * call left there differs between runs for reasons that cannot
+             * matter -- which is enough to make the page differ and hide the
+             * word that does.
+             */
+            uint64_t frame = cpu->sp > 800 ? cpu->sp - 800 : 0;
+
             for (size_t offset = 0; offset + 8 <= page_size; offset += 8) {
                 uint64_t word;
+                uint64_t where = (uint64_t)(uintptr_t)(at + offset);
 
+                if (where < frame) {
+                    continue;
+                }
                 memcpy(&word, page + offset, 8);
                 if (word == 0) {
                     continue;
                 }
                 snprintf(line, sizeof(line),
                          "boundary %lu word 0x%llx 0x%llx", index,
-                         (unsigned long long)(uintptr_t)(at + offset),
+                         (unsigned long long)where,
                          (unsigned long long)word);
                 v2_trace_put(line);
             }
