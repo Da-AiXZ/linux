@@ -140,6 +140,29 @@ static size_t page_list[V2_DIAG_PAGE_LIST];
  * that is where the suspect is, and a page number would otherwise be one more
  * round trip.
  */
+static void emit_page_words(unsigned long index, const uint8_t *at,
+                            const uint8_t *page, size_t page_size,
+                            uint64_t from)
+{
+    char line[96];
+
+    for (size_t offset = 0; offset + 8 <= page_size; offset += 8) {
+        uint64_t word;
+        uint64_t where = (uint64_t)(uintptr_t)(at + offset);
+
+        if (where < from) {
+            continue;
+        }
+        memcpy(&word, page + offset, 8);
+        if (word == 0) {
+            continue;
+        }
+        snprintf(line, sizeof(line), "boundary %lu word 0x%llx 0x%llx", index,
+                 (unsigned long long)where, (unsigned long long)word);
+        v2_trace_put(line);
+    }
+}
+
 static void emit_pages(unsigned long index, const struct v2_cpu *cpu,
                        v2_space *space, size_t page_size, int with_words)
 {
@@ -147,12 +170,26 @@ static void emit_pages(unsigned long index, const struct v2_cpu *cpu,
     uint8_t *base = (uint8_t *)v2_space_base(space);
     size_t total = v2_space_page_count(space);
     size_t count = 0;
+    size_t stride;
+    size_t island;
+    size_t emitted_islands = 0;
     uint64_t probe;
 
+    stride = v2_space_island_stride(space);
+    island = v2_space_island_size(space);
+
+    /*
+     * Every mapped page, not only the writable ones.
+     *
+     * The comparison has said "the state is identical" for a while, and every
+     * time it said that it had only looked at pages a guest may write.  Code
+     * pages were never compared, and neither were the trampoline islands -- the
+     * one place in guest memory where a host address lives.  If a single byte
+     * anywhere differs, it has to be one of those.
+     */
     for (size_t which = 0; which < total; which++) {
         if ((v2_space_state_at(space, base + which * page_size) &
-             (V2_PAGE_MAPPED | V2_PROT_WRITE)) !=
-            (V2_PAGE_MAPPED | V2_PROT_WRITE)) {
+             V2_PAGE_MAPPED) == 0) {
             continue;
         }
         if (count < V2_DIAG_PAGE_LIST) {
@@ -172,6 +209,18 @@ static void emit_pages(unsigned long index, const struct v2_cpu *cpu,
         uint64_t hash = 1469598103934665603ULL;
         char line[96];
 
+        /*
+         * A page that is mapped but not readable is compared by its state byte
+         * only: reading it would fault on the host, and its protection is itself
+         * something that can differ between runs.
+         */
+        if ((v2_space_state_at(space, at) & V2_PROT_READ) == 0) {
+            snprintf(line, sizeof(line), "boundary %lu page 0x%llx state=0x%02x",
+                     index, (unsigned long long)(uintptr_t)at,
+                     (unsigned)v2_space_state_at(space, at));
+            v2_trace_put(line);
+            continue;
+        }
         if (v2_space_read(space, page, at, page_size) != 0) {
             continue;
         }
@@ -196,6 +245,16 @@ static void emit_pages(unsigned long index, const struct v2_cpu *cpu,
             v2_trace_put(line);
         }
 
+        {
+            size_t offset_into_arena = (size_t)(at - base);
+            int is_island = stride != 0 && island != 0 &&
+                (offset_into_arena % stride) < island;
+
+            if (with_words && is_island && emitted_islands < 2) {
+                emitted_islands++;
+                emit_page_words(index, at, page, page_size, 0);
+            }
+        }
         if (with_words && (uint64_t)(uintptr_t)at == probe) {
             /*
              * Only the live part of the stack page: from our own frame upwards.

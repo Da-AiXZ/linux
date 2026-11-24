@@ -456,8 +456,13 @@ jobs:
         run: |
           set +e
           mkdir -p /tmp/trace
+          # Two failing samples, not one: whether the divergence lands on the
+          # same syscall every time is the difference between "that operation is
+          # wrong" and "a class of operation is wrong", and one sample cannot
+          # tell them apart.
+          for sample in 1 2; do
           caught=""
-          for run in $(seq 1 600); do
+          for run in $(seq 1 400); do
             env V2_TIME_FREEZE=1 V2_SPACE_BASE=0x7000000000 V2_HASH_EACH=64 \
               V2_DIAG_WORDS=36,37,38,39,40,41,42,43,44,45,46,47,48 \
               V2_SYSCALL_LOG=/tmp/trace/run.log \
@@ -513,13 +518,15 @@ jobs:
           echo "pass:";  head -12 /tmp/trace/pass.log
           echo "fail:";  head -12 /tmp/trace/fail.log
 
-          echo "--- trace diff ---"
+          echo "--- trace diff (sample $sample) ---"
           # The diff exits 1 when the traces differ, which is the normal outcome
           # of an experiment.  Being the last command in the step, that status
           # became the build's: five later gates were skipped because a
           # diagnostic found what it was looking for.
           python3 ../Tools/v2_trace_diff.py /tmp/trace/pass.log /tmp/trace/fail.log \
-            --context 6 --max 1 --after 60 || true
+            --context 4 --max 1 --after 20 || true
+          cp /tmp/trace/fail.log "/tmp/trace/fail.$sample.keep" 2>/dev/null || true
+          done
           echo "trace diff finished"
 
       - name: Space table accused after every operation
