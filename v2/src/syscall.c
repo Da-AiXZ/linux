@@ -942,7 +942,18 @@ static long long sys_clock_gettime(struct v2_cpu *cpu, struct v2_proc *proc)
     int id = (int)cpu->x[0];
     struct timespec value;
 
-    if (id == 0) {
+    if (getenv("V2_TIME_FREEZE") != NULL) {
+        /*
+         * Every other input this guest sees is deterministic: the image is a
+         * file, getrandom is a fixed-seed generator, and the address space is
+         * built from a fixed base.  The clock was the one exception, which
+         * makes it impossible to say two runs had the same inputs -- and a
+         * trace diff between two runs that differ in their inputs proves
+         * nothing.  Frozen for diagnosis only; never in a shipped build.
+         */
+        value.tv_sec = 1735689600;   /* 2025-01-01T00:00:00Z */
+        value.tv_nsec = 0;
+    } else if (id == 0) {
         clock_gettime(CLOCK_REALTIME, &value);
     } else {
         clock_gettime(CLOCK_MONOTONIC, &value);
@@ -1115,6 +1126,69 @@ static struct {
 } trace[V2_TRACE_SIZE];
 static unsigned trace_count;
 
+/*
+ * A full trace, opt-in through the environment.  The ring above answers "what
+ * was the guest doing when it died"; this answers "where did this run start to
+ * differ from that one", which is a different question and needs every call,
+ * not the last thirty-two.  Everything else this guest sees is deterministic
+ * (the image is a file, getrandom is fixed-seed, the address space is built
+ * from a fixed base), so with the clock frozen two runs have the same inputs
+ * and the first line that differs is a real divergence.
+ */
+#define V2_TRACE_LINES_MAX 300000
+static FILE *trace_file;
+static long trace_lines;
+static int trace_opened;
+
+static void trace_close(void)
+{
+    if (trace_file != NULL) {
+        fflush(trace_file);
+        fclose(trace_file);
+        trace_file = NULL;
+    }
+}
+
+static void trace_open(void)
+{
+    static char buffer[1 << 20];
+    const char *path = getenv("V2_SYSCALL_LOG");
+
+    trace_opened = 1;
+    if (path == NULL || path[0] == '\0') {
+        return;
+    }
+    trace_file = fopen(path, "w");
+    if (trace_file == NULL) {
+        fprintf(stderr, "[v2] cannot write a syscall log to %s\n", path);
+        return;
+    }
+    setvbuf(trace_file, buffer, _IOFBF, sizeof(buffer));
+    atexit(trace_close);
+}
+
+static void trace_record(uint64_t site, uint64_t number, long long result,
+                         const uint64_t args[6])
+{
+    if (!trace_opened) {
+        trace_open();
+    }
+    if (trace_file == NULL || trace_lines >= V2_TRACE_LINES_MAX) {
+        return;
+    }
+    fprintf(trace_file,
+            "%ld %s(0x%llx 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx) "
+            "site=0x%llx -> %lld\n",
+            trace_lines,
+            number < 320 && table[number].name != NULL ? table[number].name
+                                                       : "unknown",
+            (unsigned long long)args[0], (unsigned long long)args[1],
+            (unsigned long long)args[2], (unsigned long long)args[3],
+            (unsigned long long)args[4], (unsigned long long)args[5],
+            (unsigned long long)site, result);
+    trace_lines++;
+}
+
 void v2_syscall_dispatch(struct v2_cpu *cpu)
 {
     uint64_t site = cpu->pc;
@@ -1140,12 +1214,20 @@ void v2_syscall_dispatch(struct v2_cpu *cpu)
     number = cpu->x[8];
     saved[0] = cpu->x[0];
     saved[1] = cpu->x[1];
-    if (number < 320 && table[number].fn != NULL) {
-        result = table[number].fn(cpu, proc);
-    } else {
-        result = log_unsupported(number);
+    {
+        uint64_t args[6];
+
+        for (int index = 0; index < 6; index++) {
+            args[index] = cpu->x[index];
+        }
+        if (number < 320 && table[number].fn != NULL) {
+            result = table[number].fn(cpu, proc);
+        } else {
+            result = log_unsupported(number);
+        }
+        cpu->x[0] = (uint64_t)result;
+        trace_record(site, number, result, args);
     }
-    cpu->x[0] = (uint64_t)result;
 
     {
         unsigned slot = trace_count % V2_TRACE_SIZE;
@@ -1163,6 +1245,9 @@ void v2_syscall_dump_trace(void)
 {
     unsigned total = trace_count < V2_TRACE_SIZE ? trace_count : V2_TRACE_SIZE;
 
+    if (trace_file != NULL) {
+        fflush(trace_file);
+    }
     fprintf(stderr, "[v2] last %u syscall(s):\n", total);
     for (unsigned index = 0; index < total; index++) {
         unsigned slot = (trace_count - total + index) % V2_TRACE_SIZE;

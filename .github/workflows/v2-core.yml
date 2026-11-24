@@ -384,6 +384,21 @@ jobs:
           done
           echo "uninitialised locals filled with a pattern: $failed of 150 failed"
 
+          # -ftrivial-auto-var-init covers automatic variables only: it fills
+          # the stack, not the heap.  Every structure this runner allocates with
+          # malloc -- the image list, the patch table, the map for each loaded
+          # file -- starts as whatever the host heap last held, and that varies
+          # with the host's own layout.  libmalloc can scribble it for us:
+          # allocated bytes become 0xAA, freed bytes 0x55.  If the rate moves,
+          # the bug is a field we never wrote.
+          failed=0
+          for run in $(seq 1 150); do
+            env MallocScribble=1 ./build/guest-runner --root tests/guest/root \
+              tests/guest/root/sbin/apk --version > /tmp/g_scribble.log 2>&1
+            grep -q "Error relocating\|FAULT" /tmp/g_scribble.log && failed=$((failed + 1))
+          done
+          echo "heap scribbled with 0xAA: $failed of 150 failed"
+
           # With the base pinned the guest's entry state should be identical in
           # every run.  If a failing run hashes differently here, the difference
           # exists before a single guest instruction and the search is over what
@@ -417,6 +432,66 @@ jobs:
           echo "--- refused pins are counted separately ---"
           V2_SPACE_BASE=0x120000000 ./build/guest-runner --root tests/guest/root \
             tests/guest/root/sbin/apk --version 2>&1 | head -2
+
+      # Every input this guest sees is now deterministic: the image is a file,
+      # getrandom is a fixed-seed generator, the address space is built from a
+      # pinned base, and V2_TIME_FREEZE pins the clock.  So two runs that were
+      # given the same inputs must produce the same syscall sequence, and the
+      # first line where they stop agreeing is where this bug lives.
+      #
+      # The ring buffer only held the last thirty-two calls, which is enough to
+      # read a crash and useless for a diff.
+      - name: Diff the trace of a failing run against a passing one
+        working-directory: v2
+        run: |
+          set +e
+          mkdir -p /tmp/trace
+          caught=""
+          for run in $(seq 1 250); do
+            env V2_TIME_FREEZE=1 V2_SPACE_BASE=0x7000000000 \
+              V2_SYSCALL_LOG=/tmp/trace/run.log \
+              ./build/guest-runner --root tests/guest/root \
+              tests/guest/root/sbin/apk --version > /tmp/trace/run.out 2>&1
+            if grep -q "Error relocating\|FAULT" /tmp/trace/run.out; then
+              caught=$run
+              cp /tmp/trace/run.log /tmp/trace/fail.log
+              cp /tmp/trace/run.out /tmp/trace/fail.out
+              echo "caught a failure on run $caught, $(wc -l < /tmp/trace/run.log) calls traced"
+              break
+            fi
+          done
+          if [ -z "$caught" ]; then
+            echo "no failure in 250 runs with the clock frozen"
+            echo "--- the clock was the variable, or 250 runs got unlucky ---"
+            exit 0
+          fi
+
+          ok=""
+          for run in $(seq 1 40); do
+            env V2_TIME_FREEZE=1 V2_SPACE_BASE=0x7000000000 \
+              V2_SYSCALL_LOG=/tmp/trace/run.log \
+              ./build/guest-runner --root tests/guest/root \
+              tests/guest/root/sbin/apk --version > /tmp/trace/run.out 2>&1
+            if ! grep -q "Error relocating\|FAULT" /tmp/trace/run.out; then
+              ok=$run
+              cp /tmp/trace/run.log /tmp/trace/pass.log
+              cp /tmp/trace/run.out /tmp/trace/pass.out
+              echo "reference: run $ok passed, $(wc -l < /tmp/trace/run.log) calls traced"
+              break
+            fi
+          done
+          if [ -z "$ok" ]; then
+            echo "every one of forty runs failed; no reference to diff against"
+            exit 0
+          fi
+
+          echo "--- what the failing run stopped on ---"
+          grep -E "Error relocating|FAULT|page state|last [0-9]+ syscall" /tmp/trace/fail.out | head -6
+          grep -E "\\[v2\\] (space|load|interp|stack|exec map)" /tmp/trace/fail.out | head -8
+
+          echo "--- trace diff ---"
+          python3 ../Tools/v2_trace_diff.py /tmp/trace/pass.log /tmp/trace/fail.log \
+            --context 10 --max 3
 
       - name: Space table accused after every operation
         working-directory: v2
