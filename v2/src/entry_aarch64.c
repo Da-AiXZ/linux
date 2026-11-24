@@ -60,7 +60,8 @@ __attribute__((naked, used)) void v2_syscall_entry(void)
         "stp  x10, x11, [sp, #80]\n"
         "stp  x12, x13, [sp, #96]\n"
         "stp  x14, x15, [sp, #112]\n"
-        "stp  x16, x17, [sp, #128]\n"
+        /* x16 is not saved: nothing reads it back, and its value is the host's. */
+        "str  x17, [sp, #136]\n"
         "stp  x18, x19, [sp, #144]\n"
         "stp  x20, x21, [sp, #160]\n"
         "stp  x22, x23, [sp, #176]\n"
