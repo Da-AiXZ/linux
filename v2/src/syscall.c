@@ -1157,29 +1157,6 @@ void v2_syscall_dispatch(struct v2_cpu *cpu)
     if (v2_current_patcher != NULL) {
         patch = v2_patch_find(v2_current_patcher, site);
     }
-    /*
-     * TEMPORARY (this PR): the first two dispatches, named.  G4 on Linux fails
-     * before any traced syscall, and mrs/msr sites are not traced, so "0 calls"
-     * and "no dispatch" were being read as the same thing.  Remove before merge.
-     */
-    {
-        static int budget = 2;
-
-        if (budget > 0) {
-            budget--;
-            fprintf(stderr, "[v2] dispatch cpu=%p frame=%p kind=%d reg=%d "
-                            "site=0x%llx sp=0x%llx x0=0x%llx x17=0x%llx "
-                            "x19=0x%llx\n",
-                    (void *)cpu, (void *)&v2_cpu_frame,
-                    patch != NULL ? (int)patch->kind : -1,
-                    patch != NULL ? (int)patch->reg : -1,
-                    (unsigned long long)site,
-                    (unsigned long long)cpu->sp,
-                    (unsigned long long)cpu->x[0],
-                    (unsigned long long)cpu->x[17],
-                    (unsigned long long)cpu->x[19]);
-        }
-    }
     if (patch != NULL && patch->kind == V2_PATCH_MRS) {
         cpu->x[patch->reg] = v2_tls_shadow;
         return;
