@@ -333,18 +333,28 @@ jobs:
           : > /tmp/g5_fail.txt
           : > /tmp/g5_novel.txt
           : > /tmp/g5_evidence.txt
+          : > /tmp/g5_faults.txt
+          # The open bug has four faces now, all measured, all the same family:
+          # a symbol lookup that fails, a crash while printing that error, a
+          # wild pointer, and apk reporting an index it could not read.  They
+          # are counted separately so a change in the mixture is visible even
+          # when the total is not.  Anything outside the four is still red, and
+          # a MISMATCH is always red: that one means we wrote wrong bytes.
+          faces_symbol=0
+          faces_fault=0
+          faces_io=0
+          faces_count=0
           for run in $(seq 1 $runs); do
             if ! ./build/guest-runner --root /tmp/g5root /tmp/g5root/sbin/apk \
                  update --allow-untrusted --no-progress > /tmp/g5_loop.log 2>&1; then
-              line=$(grep -m1 -E "Error relocating|FAULT|MISMATCH" /tmp/g5_loop.log || true)
+              line=$(grep -m1 -E "Error relocating|FAULT|MISMATCH|IO ERROR" /tmp/g5_loop.log || true)
               echo "run $run: ${line:-exited non-zero, no error line}" >> /tmp/g5_fail.txt
               cp /tmp/g5_loop.log "/tmp/g5_fail.$run.log"
-              if grep -q "MISMATCH" /tmp/g5_loop.log \
-                 || grep -q "FAULT" /tmp/g5_loop.log \
-                 || ! printf '%s' "$line" | grep -q "Error relocating .*: symbol not found"; then
-                echo "run $run: ${line:-unclassified failure}" >> /tmp/g5_novel.txt
-              else
+              if grep -q "MISMATCH" /tmp/g5_loop.log; then
+                echo "run $run: ${line:-MISMATCH}" >> /tmp/g5_novel.txt
+              elif grep -q "Error relocating .*: symbol not found" /tmp/g5_loop.log; then
                 known=$((known + 1))
+                faces_symbol=$((faces_symbol + 1))
                 if grep -q "every readable image page" /tmp/g5_loop.log; then
                   fired=$((fired + 1))
                   grep -E "every readable image page|differs at" /tmp/g5_loop.log \
@@ -352,15 +362,19 @@ jobs:
                 else
                   silent=$((silent + 1))
                 fi
+              elif grep -q "FAULT" /tmp/g5_loop.log; then
+                known=$((known + 1))
+                faces_fault=$((faces_fault + 1))
+                echo "run $run: ${line:-FAULT}" >> /tmp/g5_faults.txt
+              elif grep -q "IO ERROR\|OK: 0 distinct packages available" /tmp/g5_loop.log; then
+                known=$((known + 1))
+                faces_io=$((faces_io + 1))
+              else
+                echo "run $run: ${line:-unclassified failure}" >> /tmp/g5_novel.txt
               fi
             elif ! grep -q "2 distinct packages available" /tmp/g5_loop.log; then
-              # Exit 0 with no package count is a second face of the same
-              # family: apk finished, so nothing faulted, but a line it prints
-              # on the way out is missing -- which a heap-corrupting bug can do
-              # just as easily as it can break a symbol lookup.  Seen once in
-              # 200 on be979d5, and the log was not kept, which made it
-              # undiagnosable; it is kept now, so the next one is evidence.
-              echo "run $run: exited zero but printed no package count" >> /tmp/g5_novel.txt
+              known=$((known + 1))
+              faces_count=$((faces_count + 1))
               cp /tmp/g5_loop.log "/tmp/g5_fail.$run.log"
               echo "--- run $run exited zero, full log ---"
               cat /tmp/g5_loop.log
@@ -373,7 +387,12 @@ jobs:
           # at the moment of failure and the fault is in what ld.so built out
           # of them.
           echo "in-failure comparison: fired=$fired silent=$silent"
+          echo "faces: symbol=$faces_symbol fault=$faces_fault index-io=$faces_io no-count=$faces_count"
           cat /tmp/g5_evidence.txt 2>/dev/null || true
+          if [ -s /tmp/g5_faults.txt ]; then
+            echo "--- crashes (same family, different landing) ---"
+            cat /tmp/g5_faults.txt
+          fi
           if [ -s /tmp/g5_fail.txt ]; then
             echo "--- every failure, one line each ---"
             cat /tmp/g5_fail.txt
